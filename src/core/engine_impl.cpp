@@ -328,8 +328,11 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
    * and had no network side effect, so it can be retried as is. */
   {
     std::lock_guard<std::mutex> g(mu_);
-    if (inflight_.size() >= cfg_.max_inflight_requests)
+    if (inflight_.size() >= cfg_.max_inflight_requests) {
+      std::lock_guard<std::mutex> sg(stats_mu_);
+      ++stats_.requests_would_block;
       return Status::kWouldBlock;
+    }
   }
 
   RequestId req_id = next_request_.fetch_add(1, std::memory_order_relaxed);
@@ -351,6 +354,10 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
   {
     std::lock_guard<std::mutex> g(mu_);
     inflight_[req_id] = req;
+  }
+  {
+    std::lock_guard<std::mutex> g(stats_mu_);
+    ++stats_.requests_accepted;
   }
 
   PendingSubmit ps;
@@ -484,8 +491,12 @@ Status EngineImpl::progress() {
 
     if (req->cancel_requested()) {
       req->finish_cancelled();
+      std::lock_guard<std::mutex> g(stats_mu_);
+      ++stats_.requests_cancelled;
     } else if (!req->error().ok()) {
       req->fail(req->error());
+      std::lock_guard<std::mutex> g(stats_mu_);
+      ++stats_.requests_failed;
     } else {
       /* Every accepted sub-operation is done, so transfer_complete holds.
        * Device visibility comes next, and only then target_ready. */
@@ -496,6 +507,8 @@ Status EngineImpl::progress() {
         req->mark_stage(Stage::kTargetReady);
       }
       req->finish_success();
+      std::lock_guard<std::mutex> g(stats_mu_);
+      ++stats_.requests_succeeded;
     }
     {
       std::lock_guard<std::mutex> g(mu_);
@@ -511,6 +524,27 @@ void EngineImpl::progress_loop() {
     progress();
     std::this_thread::sleep_for(std::chrono::microseconds(50));
   }
+}
+
+EngineStats EngineImpl::stats() const {
+  EngineStats s;
+  {
+    std::lock_guard<std::mutex> g(stats_mu_);
+    s = stats_;
+  }
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    s.requests_waiting_on_dependency = pending_.size();
+  }
+  /* Sub-operation and byte counts come from the provider, which is the only
+   * layer that knows whether a copy happened. */
+  ProviderStats ps = provider_->stats();
+  s.subops_posted = ps.subops_posted;
+  s.subops_completed = ps.subops_completed;
+  s.subops_failed = ps.subops_failed;
+  s.payload_bytes = ps.payload_bytes;
+  s.payload_bytes_copied = ps.payload_bytes_copied;
+  return s;
 }
 
 Status EngineImpl::record_event(DeviceStream* stream, DeviceEventPtr* out) {

@@ -95,6 +95,7 @@ class EngineImpl : public Engine {
                            std::vector<ReadyEventPtr>* out) override;
   Status progress() override;
   Status record_event(DeviceStream* stream, DeviceEventPtr* out) override;
+  EngineStats stats() const override;
   Status close(int64_t timeout_ms) override;
 
   /* For PeerImpl. */
@@ -148,6 +149,9 @@ class EngineImpl : public Engine {
   std::atomic<uint64_t> next_peer_{1};
   std::atomic<uint64_t> next_request_{1};
   std::atomic<uint32_t> generation_{1};
+
+  mutable std::mutex stats_mu_;
+  EngineStats stats_;
 
   std::thread progress_thread_;
   std::atomic<bool> stopping_{false};

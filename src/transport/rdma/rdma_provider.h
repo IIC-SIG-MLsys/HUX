@@ -66,6 +66,7 @@ class RdmaProvider : public TransportProvider {
   ~RdmaProvider() override;
 
   ProviderCaps caps() const override;
+  ProviderStats stats() const override;
 
   Status register_region(void* addr, uint64_t length, DeviceId device,
                          AccessFlags access, uint64_t* local_key,
@@ -112,6 +113,7 @@ class RdmaProvider : public TransportProvider {
   mutable std::mutex mu_;
   std::unordered_map<uint64_t, ibv_mr*> regions_;
   uint64_t next_key_ = 1;
+  ProviderStats stats_;
 
   /* Maps a work request id back to the sub-operation that produced it. The
    * CQE only carries wr_id, so without this a failure could not name the

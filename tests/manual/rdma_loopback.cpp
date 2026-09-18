@@ -351,6 +351,26 @@ int run_client(std::string const& ip, int gpu) {
     }
   }
 
+  /* The zero-copy claim, as a number rather than an assertion. A transfer in
+   * place leaves payload_bytes_copied at zero; a path that staged through an
+   * intermediate buffer would report what it moved. */
+  std::printf("\n=== payload copies on the whole path ===\n");
+  {
+    EngineStats st = engine->stats();
+    std::printf("   requested %llu B across %llu sub-operations\n",
+                (unsigned long long)st.payload_bytes,
+                (unsigned long long)st.subops_posted);
+    std::printf("   extra payload copied: %llu B\n",
+                (unsigned long long)st.payload_bytes_copied);
+    std::printf("   -> %s\n", st.payload_bytes_copied == 0
+                                  ? "zero-copy: the NIC used the caller's memory"
+                                  : "NOT zero-copy");
+    std::printf("   requests: accepted=%llu succeeded=%llu failed=%llu\n",
+                (unsigned long long)st.requests_accepted,
+                (unsigned long long)st.requests_succeeded,
+                (unsigned long long)st.requests_failed);
+  }
+
   std::printf("\n=== repeated queries agree ===\n");
   bool d1 = false, d2 = false;
   wr->test(&d1);

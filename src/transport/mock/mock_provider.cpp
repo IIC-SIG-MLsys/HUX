@@ -37,6 +37,13 @@ SubmitResult MockProvider::submit(ProviderConnection*,
         cfg_.fail_subops && op.kind == SubOp::Kind::kWrite;
     pending_.push_back(ev);
     ++submitted_;
+    ++stats_.subops_posted;
+    stats_.payload_bytes += op.length;
+    if (cfg_.move_data) {
+      /* The mock really does memcpy, so it reports that cost rather than
+       * pretending to be zero-copy. A real one-sided transfer adds nothing. */
+      stats_.payload_bytes_copied += op.length;
+    }
   }
   r.accepted = limit;
   r.status = limit < ops.size() ? cfg_.submit_status_on_partial : Status::kOk;
@@ -57,6 +64,8 @@ Status MockProvider::poll(uint32_t max_events,
   /* Hand over the whole batch; never return early on a matching entry. */
   while (!pending_.empty() && out->size() < max_events) {
     out->push_back(pending_.front());
+    if (pending_.front().status == Status::kOk) ++stats_.subops_completed;
+    else ++stats_.subops_failed;
     pending_.pop_front();
   }
   return Status::kOk;

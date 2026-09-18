@@ -203,3 +203,72 @@ HUX_TEST(waiting_request_can_still_be_cancelled) {
   CHECK(req->state() == RequestState::kDraining);
   CHECK_EQ(f.provider->submitted_subops(), 0u);
 }
+
+/* ---- Copy accounting ---- */
+
+/* A zero in payload_bytes_copied only means something if the counter can also
+ * be non-zero. The mock genuinely memcpys, so it must report that; a path that
+ * transfers in place reports nothing. Without this pair, "zero-copy" would be
+ * indistinguishable from a counter nobody increments. */
+HUX_TEST(a_copying_provider_reports_what_it_copied) {
+  Fixture f;
+  CHECK(f.setup());
+  RegionView lv, rv;
+  f.views(&lv, &rv);
+
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), lv, rv, {}, &req), Status::kOk);
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 200 && !is_terminal(req->state()); ++i)
+    f.engine->poll_completions(16, &done);
+
+  EngineStats st = f.engine->stats();
+  CHECK_EQ(st.payload_bytes, 4096u);
+  CHECK_EQ(st.payload_bytes_copied, 4096u);  /* the mock really copied */
+  CHECK_EQ(st.requests_accepted, 1u);
+  CHECK_EQ(st.requests_succeeded, 1u);
+  CHECK(st.subops_posted > 0u);
+}
+
+HUX_TEST(stats_count_failures_and_would_block_separately) {
+  EngineConfig cfg;
+  cfg.progress = ProgressMode::kExplicit;
+  cfg.max_inflight_requests = 1;
+  MockConfig mock;
+  mock.move_data = false;
+  auto provider = std::make_shared<MockProvider>(mock);
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(cfg, nullptr, provider, &engine), Status::kOk);
+
+  std::vector<uint8_t> src(4096, 1), dst(4096, 0);
+  MemoryRegionPtr sr, dr;
+  CHECK_STATUS(engine->register_memory(src.data(), 4096, AccessFlags::kRemoteRead, &sr),
+               Status::kOk);
+  CHECK_STATUS(engine->register_memory(dst.data(), 4096, AccessFlags::kLocalWrite, &dr),
+               Status::kOk);
+  std::vector<uint8_t> meta, desc;
+  engine->local_metadata(&meta);
+  PeerPtr peer;
+  CHECK_STATUS(engine->add_peer(meta, &peer), Status::kOk);
+  sr->export_descriptor(&desc);
+  RemoteRegionPtr rr;
+  CHECK_STATUS(peer->import_region(desc, &rr), Status::kOk);
+
+  RegionView lv, rv;
+  dr->view(0, 512, &lv);
+  rr->view(0, 512, &rv);
+
+  RequestPtr a, b;
+  CHECK_STATUS(engine->read(peer.get(), lv, rv, {}, &a), Status::kOk);
+  /* Second request exceeds max_inflight_requests: not accepted, no network
+   * side effect, and counted apart from a failure. */
+  CHECK_STATUS(engine->read(peer.get(), lv, rv, {}, &b), Status::kWouldBlock);
+
+  EngineStats st = engine->stats();
+  CHECK_EQ(st.requests_accepted, 1u);
+  CHECK_EQ(st.requests_would_block, 1u);
+  CHECK_EQ(st.requests_failed, 0u);
+  /* move_data is off, so nothing was copied even though the mock is not a
+   * zero-copy transport. */
+  CHECK_EQ(st.payload_bytes_copied, 0u);
+}

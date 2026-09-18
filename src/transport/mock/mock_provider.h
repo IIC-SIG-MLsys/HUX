@@ -47,6 +47,11 @@ class MockProvider : public TransportProvider {
  public:
   explicit MockProvider(MockConfig cfg = {}) : cfg_(cfg), rng_(12345) {}
 
+  ProviderStats stats() const override {
+    std::lock_guard<std::mutex> g(mu_);
+    return stats_;
+  }
+
   ProviderCaps caps() const override {
     ProviderCaps c;
     c.name = "mock";
@@ -113,6 +118,7 @@ class MockProvider : public TransportProvider {
   std::deque<CompletionEvent> pending_;
   uint64_t next_key_ = 1;
   uint64_t submitted_ = 0;
+  ProviderStats stats_;
 };
 
 }  // namespace hux

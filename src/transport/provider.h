@@ -21,6 +21,19 @@
 
 namespace hux {
 
+/* What a provider has actually done. payload_bytes_copied is the one that
+ * decides whether a path is zero-copy: a claim in a README cannot be checked,
+ * a counter can. A provider that stages through an intermediate buffer adds
+ * the bytes it moved, so the cost shows up rather than hiding in the
+ * bandwidth figure. */
+struct ProviderStats {
+  uint64_t subops_posted = 0;
+  uint64_t subops_completed = 0;
+  uint64_t subops_failed = 0;
+  uint64_t payload_bytes = 0;         /* requested by the caller */
+  uint64_t payload_bytes_copied = 0;  /* extra copies on top of that */
+};
+
 /* Reported as-is. A missing capability returns false rather than being faked
  * with a silent sync or an extra copy. */
 struct ProviderCaps {
@@ -85,6 +98,7 @@ class TransportProvider {
   virtual ~TransportProvider() = default;
 
   virtual ProviderCaps caps() const = 0;
+  virtual ProviderStats stats() const = 0;
 
   virtual Status register_region(void* addr, uint64_t length, DeviceId device,
                                  AccessFlags access, uint64_t* local_key,

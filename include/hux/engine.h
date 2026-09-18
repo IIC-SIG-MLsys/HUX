@@ -29,6 +29,23 @@ struct TransferOptions {
   void* context = nullptr;  /* Local only. */
 };
 
+/* Observable counters. payload_bytes_copied is the one that settles whether a
+ * path is really zero-copy: a transfer in place leaves it at zero, and a path
+ * that stages through an intermediate buffer reports what it moved. */
+struct EngineStats {
+  uint64_t requests_accepted = 0;
+  uint64_t requests_succeeded = 0;
+  uint64_t requests_failed = 0;
+  uint64_t requests_cancelled = 0;
+  uint64_t requests_would_block = 0;
+  uint64_t requests_waiting_on_dependency = 0;
+  uint64_t subops_posted = 0;
+  uint64_t subops_completed = 0;
+  uint64_t subops_failed = 0;
+  uint64_t payload_bytes = 0;
+  uint64_t payload_bytes_copied = 0;
+};
+
 /* The engine owns no communication buffer. The application owns its memory and
  * the engine registers and transfers in place -- this is the main departure
  * from the ConnBuffer-centred design. Several engines may coexist in one
@@ -91,6 +108,7 @@ class Engine {
 
   virtual Status progress() = 0;
   virtual Status record_event(DeviceStream* stream, DeviceEventPtr* out) = 0;
+  virtual EngineStats stats() const = 0;
 
   /* Stops accepting work and drains. On timeout it keeps the resources and
    * reports the incomplete state; it never destroys objects still under DMA. */

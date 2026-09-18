@@ -258,6 +258,11 @@ ProviderCaps RdmaProvider::caps() const {
   return c;
 }
 
+ProviderStats RdmaProvider::stats() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return stats_;
+}
+
 Status RdmaProvider::register_region(void* addr, uint64_t length, DeviceId,
                                      AccessFlags access, uint64_t* local_key,
                                      uint64_t* remote_key) {
@@ -524,6 +529,13 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
       break;
     }
     ++r.accepted;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      ++stats_.subops_posted;
+      stats_.payload_bytes += op.length;
+      /* Nothing is added to payload_bytes_copied: the work request points at
+       * the caller's own memory, so the NIC reads and writes it directly. */
+    }
   }
 
   c->note_posted(r.accepted);
@@ -565,6 +577,11 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
     ev.provider_errno = static_cast<int32_t>(wc[i].status);
     /* Only a write can have changed the remote side. */
     ev.may_have_modified_target = modified && op.is_write;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      if (ev.status == Status::kOk) ++stats_.subops_completed;
+      else ++stats_.subops_failed;
+    }
     out->push_back(ev);
   }
   return Status::kOk;
