@@ -51,10 +51,12 @@ bool recv_all(int fd, void* buf, size_t n) {
   return true;
 }
 
-constexpr size_t kEpInfoBytes = 4 + 2 + 16 + 4 + 4;
+constexpr size_t kEpInfoBytes = 2 + 2 + 4 + 2 + 16 + 4 + 4;
 
 void encode_ep(RdmaEndpointInfo const& e, uint8_t* out) {
   std::vector<uint8_t> b;
+  put_u16(&b, e.major);
+  put_u16(&b, e.minor);
   put_u32(&b, e.qp_num);
   put_u16(&b, e.lid);
   b.insert(b.end(), e.gid, e.gid + 16);
@@ -64,11 +66,13 @@ void encode_ep(RdmaEndpointInfo const& e, uint8_t* out) {
 }
 
 void decode_ep(uint8_t const* in, RdmaEndpointInfo* e) {
-  e->qp_num = get_u32(in);
-  e->lid = get_u16(in + 4);
-  std::memcpy(e->gid, in + 6, 16);
-  e->psn = get_u32(in + 22);
-  e->mtu = get_u32(in + 26);
+  e->major = get_u16(in);
+  e->minor = get_u16(in + 2);
+  e->qp_num = get_u32(in + 4);
+  e->lid = get_u16(in + 8);
+  std::memcpy(e->gid, in + 10, 16);
+  e->psn = get_u32(in + 26);
+  e->mtu = get_u32(in + 30);
 }
 
 /* Maps a completion status onto the contract. IBV_WC_REM_ACCESS_ERR and its
@@ -107,6 +111,14 @@ int ib_access_flags(AccessFlags a) {
 }
 
 }  // namespace
+
+Status check_wire_version(uint16_t peer_major, uint16_t peer_minor) {
+  /* A newer minor on the peer is fine: minor changes only add fields this end
+   * can ignore. A different major is not, in either direction. */
+  if (peer_major != kWireMajor) return Status::kUnsupported;
+  (void)peer_minor;
+  return Status::kOk;
+}
 
 // ---------------- RdmaConnection ----------------
 
@@ -390,6 +402,14 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
   }
   RdmaEndpointInfo peer;
   decode_ep(rx, &peer);
+
+  Status vs = check_wire_version(peer.major, peer.minor);
+  if (vs != Status::kOk) {
+    /* Refused before any queue pair transition, so neither end is left with a
+     * half-built connection. */
+    ibv_destroy_qp(qp);
+    return vs;
+  }
 
   ibv_qp_attr attr{};
   attr.qp_state = IBV_QPS_INIT;

@@ -47,9 +47,18 @@ struct RdmaConfig {
   std::string advertise_ip = "127.0.0.1";
 };
 
+/* Wire format of the connection handshake. A major mismatch is refused rather
+ * than tolerated: the two ends would otherwise agree to a layout only one of
+ * them understands, and the damage surfaces as corrupt transfers rather than
+ * a failed connect. */
+constexpr uint16_t kWireMajor = 1;
+constexpr uint16_t kWireMinor = 0;
+
 /* Identifies one end of a queue pair. Exchanged over TCP during connect, in a
  * fixed little-endian layout rather than as a raw struct. */
 struct RdmaEndpointInfo {
+  uint16_t major = kWireMajor;
+  uint16_t minor = kWireMinor;
   uint32_t qp_num = 0;
   uint16_t lid = 0;
   uint8_t gid[16] = {};
@@ -58,6 +67,9 @@ struct RdmaEndpointInfo {
 };
 
 class RdmaConnection;
+
+/* Separate from the exchange so it can be tested without two hosts. */
+Status check_wire_version(uint16_t peer_major, uint16_t peer_minor);
 
 class RdmaProvider : public TransportProvider {
  public:
