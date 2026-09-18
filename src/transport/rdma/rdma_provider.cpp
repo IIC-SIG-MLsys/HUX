@@ -520,6 +520,12 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     return r;
   }
   auto* c = static_cast<RdmaConnection*>(conn);
+  if (c->failed()) {
+    /* Posting onto a queue pair in ERROR only produces flush completions. Say
+     * so plainly instead of letting each request fail on its own. */
+    r.status = Status::kPeerDisconnected;
+    return r;
+  }
 
   uint32_t const room = c->submit_capacity();
   if (room == 0) {
@@ -655,6 +661,11 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
     ev.sub_id = op.sub_id;
     bool modified = false;
     ev.status = status_from_wc(wc[i].status, &modified);
+    /* Anything but a flush means this completion is what broke the queue
+     * pair; a flush is the wreckage of an earlier one. Either way the
+     * connection is unusable from here. */
+    if (wc[i].status != IBV_WC_SUCCESS && op.conn != nullptr)
+      op.conn->mark_failed();
     ev.provider_errno = static_cast<int32_t>(wc[i].status);
     /* Only a write can have changed the remote side. */
     ev.may_have_modified_target = modified && op.is_write;

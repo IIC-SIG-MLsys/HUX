@@ -328,10 +328,84 @@ int run_client(std::string const& ip, int gpu) {
   s = drive(wr);
   std::printf("   status %s\n", to_string(s));
 
-  /* The same situation that leaves UCCL's poll_async waiting forever: a read
-   * against an address the peer never exported. The RDMA layer raises a
-   * remote access error; what matters is whether the caller learns of it and
-   * whether the request reaches a terminal state so its memory can be freed. */
+#ifdef HUX_LOOPBACK_CUDA
+  /* GPU produces, then the NIC may read. The dependency has to hold back the
+   * transfer without holding back the calling thread -- both halves matter,
+   * and a wrong answer on either is invisible without timing it. */
+  if (buf.on_gpu) {
+    std::printf("\n=== GPU dependency: produce, then transfer ===\n");
+    std::shared_ptr<DeviceBackend> dev;
+    if (CudaBackend::create(gpu, &dev) == Status::kOk) {
+      cudaStream_t raw = nullptr;
+      cudaStreamCreate(&raw);
+      DeviceStreamPtr stream;
+      dev->import_stream(raw, &stream);
+
+      /* Enough work that the event is still outstanding when the transfer is
+       * submitted. */
+      void* scratch = nullptr;
+      cudaMalloc(&scratch, 256u << 20);
+      for (int i = 0; i < 8; ++i)
+        cudaMemsetAsync(scratch, i, 256u << 20, raw);
+
+      DeviceEventPtr ev;
+      Status es = dev->record_event(stream.get(), &ev);
+      std::printf("   event recorded: %s\n", to_string(es));
+
+      TransferOptions opts;
+      opts.after.push_back(ev);
+
+      auto t0 = std::chrono::steady_clock::now();
+      RequestPtr dep;
+      Status ds = engine->write(peer.get(), lv, rv, opts, &dep);
+      auto submit_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - t0).count();
+
+      EngineStats mid = engine->stats();
+      std::printf("   submit returned in %lld us (status %s)\n",
+                  (long long)submit_us, to_string(ds));
+      std::printf("   state now: %s, waiting on dependency: %llu\n",
+                  to_string(dep->state()),
+                  (unsigned long long)mid.requests_waiting_on_dependency);
+
+      Status fs = drive(dep);
+      std::printf("   after the GPU work: %s, state %s\n", to_string(fs),
+                  to_string(dep->state()));
+      std::printf("   -> %s\n",
+                  submit_us < 1000
+                      ? "submission waited, the calling thread did not"
+                      : "submit blocked: the caller was made to wait");
+
+      cudaFree(scratch);
+      cudaStreamDestroy(raw);
+    }
+  }
+#endif
+
+  std::printf("\n=== payload copies on the whole path ===\n");
+  {
+    EngineStats st = engine->stats();
+    std::printf("   requested %llu B across %llu sub-operations\n",
+                (unsigned long long)st.payload_bytes,
+                (unsigned long long)st.subops_posted);
+    std::printf("   extra payload copied: %llu B\n",
+                (unsigned long long)st.payload_bytes_copied);
+    std::printf("   -> %s\n", st.payload_bytes_copied == 0
+                                  ? "zero-copy: the NIC used the caller's memory"
+                                  : "NOT zero-copy");
+    std::printf("   requests: accepted=%llu succeeded=%llu failed=%llu\n",
+                (unsigned long long)st.requests_accepted,
+                (unsigned long long)st.requests_succeeded,
+                (unsigned long long)st.requests_failed);
+  }
+
+  /* Last, because it destroys the connection: an RC queue pair that takes a
+   * fatal completion moves to ERROR and flushes everything posted after it.
+   *
+   * The case itself is the one that leaves UCCL's poll_async waiting forever
+   * -- a read against an address the peer never exported. What matters is
+   * whether the caller learns of it, and whether the request reaches a
+   * terminal state so its memory can be released. */
   std::printf("\n=== failure is reported, not hung ===\n");
   {
     RegionDescriptor bogus;
@@ -377,23 +451,6 @@ int run_client(std::string const& ip, int gpu) {
   /* The zero-copy claim, as a number rather than an assertion. A transfer in
    * place leaves payload_bytes_copied at zero; a path that staged through an
    * intermediate buffer would report what it moved. */
-  std::printf("\n=== payload copies on the whole path ===\n");
-  {
-    EngineStats st = engine->stats();
-    std::printf("   requested %llu B across %llu sub-operations\n",
-                (unsigned long long)st.payload_bytes,
-                (unsigned long long)st.subops_posted);
-    std::printf("   extra payload copied: %llu B\n",
-                (unsigned long long)st.payload_bytes_copied);
-    std::printf("   -> %s\n", st.payload_bytes_copied == 0
-                                  ? "zero-copy: the NIC used the caller's memory"
-                                  : "NOT zero-copy");
-    std::printf("   requests: accepted=%llu succeeded=%llu failed=%llu\n",
-                (unsigned long long)st.requests_accepted,
-                (unsigned long long)st.requests_succeeded,
-                (unsigned long long)st.requests_failed);
-  }
-
   std::printf("\n=== repeated queries agree ===\n");
   bool d1 = false, d2 = false;
   wr->test(&d1);

@@ -166,11 +166,18 @@ class RdmaConnection : public ProviderConnection {
   Status arm_receives(ibv_pd* pd, uint32_t count);
   Status repost_receive();
 
+  /* An RC queue pair that hits a fatal completion moves to ERROR and flushes
+   * everything after it. Without marking that, later requests fail one by one
+   * with no indication the connection itself is gone. */
+  bool failed() const { return failed_.load(std::memory_order_acquire); }
+  void mark_failed() { failed_.store(true, std::memory_order_release); }
+
  private:
   RdmaProvider* owner_;
   ibv_qp* qp_ = nullptr;
   RdmaEndpointInfo remote_;
   std::atomic<uint32_t> outstanding_{0};
+  std::atomic<bool> failed_{false};
   ibv_mr* recv_mr_ = nullptr;
   std::vector<uint8_t> recv_buf_;
 };
