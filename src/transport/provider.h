@@ -21,6 +21,13 @@
 
 namespace hux {
 
+/* Something the peer wrote into this engine's memory, surfaced by the
+ * provider once its arrival was signalled. */
+struct PeerArrival {
+  uint32_t token = 0;
+  PeerId from = 0;
+};
+
 /* What a provider has actually done. payload_bytes_copied is the one that
  * decides whether a path is zero-copy: a claim in a README cannot be checked,
  * a counter can. A provider that stages through an intermediate buffer adds
@@ -43,6 +50,10 @@ struct ProviderCaps {
   bool supports_vector = false;      /* Otherwise core splits into scalars. */
   bool supports_multi_qp = false;
   bool needs_explicit_flush = false; /* UCX: local put != remote visibility. */
+  /* Whether a write can tell the peer it landed. Without it the peer cannot
+   * hand the data to a consumer, and a write cannot honestly reach
+   * target_ready. */
+  bool supports_peer_signal = false;
   uint64_t max_segment_bytes = 0;    /* 0 if unbounded. */
   uint32_t max_sge = 1;
 };
@@ -51,6 +62,12 @@ struct ProviderCaps {
  * done; the provider only turns this into WRs and posts them. */
 struct SubOp {
   enum class Kind : uint8_t { kRead, kWrite };
+  /* Set on the last sub-operation of a write so the peer learns the data
+   * arrived. A one-sided write is invisible to the receiving CPU otherwise,
+   * which is why a write cannot reach target_ready on the sender's word
+   * alone. */
+  bool signal_peer = false;
+  uint32_t peer_token = 0;  /* carried to the peer with that signal */
   Kind kind = Kind::kRead;
   RequestId request = 0;
   uint64_t sub_id = 0;      /* Unique within the request; used to aggregate. */
@@ -118,6 +135,11 @@ class TransportProvider {
    * matching entry drops the completions of other requests in the same batch. */
   virtual Status poll(uint32_t max_events,
                       std::vector<CompletionEvent>* out) = 0;
+
+  /* Arrivals signalled by peers since the last call. Empty for providers that
+   * cannot signal, which report it through caps. */
+  virtual Status poll_peer_arrivals(uint32_t max_items,
+                                    std::vector<PeerArrival>* out) = 0;
 
   /* Required when needs_explicit_flush; others may return kOk. */
   virtual Status flush(ProviderConnection* conn) = 0;

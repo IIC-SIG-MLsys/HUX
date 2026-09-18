@@ -179,6 +179,17 @@ int run_server(int gpu) {
   send_blob(fd, meta.data(), static_cast<uint32_t>(meta.size()));
   send_blob(fd, desc.data(), static_cast<uint32_t>(desc.size()));
 
+  /* An engine over the same provider, so the arrival of a peer's write can be
+   * collected as a ReadyEvent -- the handoff a target owner needs before
+   * scheduling anything that consumes the data. */
+  EngineConfig ecfg;
+  ecfg.progress = ProgressMode::kExplicit;
+  std::unique_ptr<Engine> engine;
+  if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) {
+    std::printf("[server] engine create failed\n");
+    return 1;
+  }
+
   ProviderConnectionPtr conn;
   if (prov->accept(20000, &conn) != Status::kOk) {
     std::printf("[server] rdma accept failed\n");
@@ -187,7 +198,19 @@ int run_server(int gpu) {
   std::printf("[server] connected, holding memory\n");
 
   std::vector<uint8_t> ack;
-  recv_blob(fd, &ack);  /* client says it is done reading */
+  recv_blob(fd, &ack);  /* client says it is done reading and writing */
+
+  std::vector<ReadyEventPtr> ready;
+  for (int i = 0; i < 2000 && ready.empty(); ++i) {
+    engine->poll_ready_events(8, &ready);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::printf("[server] ready handoffs received: %zu\n", ready.size());
+  if (!ready.empty()) {
+    std::printf("[server]   first names request %llu from peer %llu\n",
+                (unsigned long long)ready[0]->request(),
+                (unsigned long long)ready[0]->peer());
+  }
 
   std::printf("[server] verifying what the client wrote: %s\n",
               verify(buf, 0x22) ? "OK" : "MISMATCH");

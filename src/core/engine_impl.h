@@ -144,6 +144,7 @@ class EngineImpl : public Engine {
   std::deque<RequestPtr> completed_;
   std::deque<PendingSubmit> pending_;
   std::deque<Notification> notifications_;
+  std::deque<ReadyEventPtr> ready_events_;
 
   std::atomic<uint64_t> next_region_{1};
   std::atomic<uint64_t> next_peer_{1};

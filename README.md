@@ -56,9 +56,14 @@ RDMA, host to host and device to device, verified byte for byte in both
 directions with no buffer owned by the library anywhere on the path.
 
 In place: the public API, the completion contract, the provider contract, a
-single-QP RDMA provider, a mock backend, device backends for all five targets
-above, and a test suite that runs without hardware. Not yet: multiple queue
-pairs, congestion control, `notify`, and the write-side ready handoff.
+single-QP RDMA provider, device dependencies, the write-side ready handoff,
+copy accounting, a mock backend, device backends for all five targets above,
+and a test suite that runs without hardware. Not yet: multiple queue pairs,
+congestion control, and `notify`.
+
+A ready handoff names the request it belongs to but not yet the region and
+span; the immediate value that signals arrival is 32 bits, enough to identify
+a handoff but not to describe one. Those arrive with the control message.
 
 The RDMA provider will be written rather than delegated to UCCL; the measured
 reasoning is in [docs/decisions/0001-rdma-provider.md](docs/decisions/0001-rdma-provider.md).

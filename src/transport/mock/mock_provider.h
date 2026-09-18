@@ -59,6 +59,7 @@ class MockProvider : public TransportProvider {
     c.supports_write = true;
     c.supports_vector = true;
     c.supports_multi_qp = cfg_.qp_count > 1;
+    c.supports_peer_signal = true;
     c.max_sge = 16;
     return c;
   }
@@ -94,6 +95,18 @@ class MockProvider : public TransportProvider {
   SubmitResult submit(ProviderConnection*,
                       std::vector<SubOp> const& ops) override;
   Status poll(uint32_t max_events, std::vector<CompletionEvent>* out) override;
+  Status poll_peer_arrivals(uint32_t max_items,
+                            std::vector<PeerArrival>* out) override {
+    if (out == nullptr) return Status::kInvalidArgument;
+    out->clear();
+    std::lock_guard<std::mutex> g(mu_);
+    while (!arrivals_.empty() && out->size() < max_items) {
+      out->push_back(arrivals_.front());
+      arrivals_.pop_front();
+    }
+    return Status::kOk;
+  }
+
   Status flush(ProviderConnection*) override { return Status::kOk; }
   Status drain(ProviderConnection*, int64_t) override { return Status::kOk; }
 
@@ -116,6 +129,7 @@ class MockProvider : public TransportProvider {
   std::mt19937 rng_;
   std::map<uint64_t, Reg> regions_;
   std::deque<CompletionEvent> pending_;
+  std::deque<PeerArrival> arrivals_;
   uint64_t next_key_ = 1;
   uint64_t submitted_ = 0;
   ProviderStats stats_;

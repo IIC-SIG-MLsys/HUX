@@ -29,6 +29,11 @@ SubmitResult MockProvider::submit(ProviderConnection*,
                             : op.local_addr;
       std::memcpy(dst, src, static_cast<size_t>(op.length));
     }
+    if (op.signal_peer) {
+      /* Loops back in-process: both ends of a mock transfer are the same
+       * engine, which is enough to exercise the handoff path. */
+      arrivals_.push_back(PeerArrival{op.peer_token, 0});
+    }
     CompletionEvent ev;
     ev.request = op.request;
     ev.sub_id = op.sub_id;

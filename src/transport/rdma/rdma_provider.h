@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <vector>
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -36,6 +37,9 @@ struct RdmaConfig {
   int gid_index = -1;        /* Negative asks for automatic selection. */
   uint32_t cq_depth = 4096;
   uint32_t sq_depth = 1024;
+  /* Receives exist only to catch peers' arrival signals. The queue has to be
+   * deep enough that a burst of writes does not exhaust it between polls. */
+  uint32_t rq_depth = 64;
   uint32_t max_sge = 1;
   uint16_t listen_port = 0;  /* 0 lets the kernel choose. */
   /* Address peers should dial back on. A provider cannot pick this itself on
@@ -81,6 +85,8 @@ class RdmaProvider : public TransportProvider {
   SubmitResult submit(ProviderConnection* conn,
                       std::vector<SubOp> const& ops) override;
   Status poll(uint32_t max_events, std::vector<CompletionEvent>* out) override;
+  Status poll_peer_arrivals(uint32_t max_items,
+                            std::vector<PeerArrival>* out) override;
   Status flush(ProviderConnection* conn) override;
   Status drain(ProviderConnection* conn, int64_t timeout_ms) override;
 
@@ -129,6 +135,17 @@ class RdmaProvider : public TransportProvider {
   std::mutex inflight_mu_;
   std::unordered_map<uint64_t, InflightOp> inflight_;
   uint64_t next_wr_id_ = 1;
+
+  std::mutex arrival_mu_;
+  std::deque<PeerArrival> arrivals_;
+
+  /* A receive completion names its QP, not its connection, so the two are
+   * mapped here to re-arm the right one. Entries are removed by the
+   * connection's destructor. */
+  std::mutex conn_mu_;
+  std::unordered_map<uint32_t, RdmaConnection*> conn_by_qp_;
+  void register_conn(uint32_t qp_num, RdmaConnection* c);
+  void forget_conn(uint32_t qp_num);
 };
 
 class RdmaConnection : public ProviderConnection {
@@ -143,11 +160,19 @@ class RdmaConnection : public ProviderConnection {
   void note_posted(uint32_t n);
   void note_completed(uint32_t n);
 
+  /* Receive work requests exist only to catch the immediate value a peer
+   * sends with its final write; no payload lands in them. One has to be
+   * posted before the peer writes, or the arrival is lost. */
+  Status arm_receives(ibv_pd* pd, uint32_t count);
+  Status repost_receive();
+
  private:
   RdmaProvider* owner_;
   ibv_qp* qp_ = nullptr;
   RdmaEndpointInfo remote_;
   std::atomic<uint32_t> outstanding_{0};
+  ibv_mr* recv_mr_ = nullptr;
+  std::vector<uint8_t> recv_buf_;
 };
 
 }  // namespace hux

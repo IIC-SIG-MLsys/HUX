@@ -3,6 +3,7 @@
 
 #include <chrono>
 
+#include "core/ready_event_impl.h"
 #include "hux/device.h"
 
 namespace hux {
@@ -344,6 +345,15 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
                           &target_addr, &target_bytes);
   if (s != Status::kOk) return s;
 
+  if (kind == SubOp::Kind::kWrite && !ops.empty() &&
+      provider_->caps().supports_peer_signal) {
+    /* One signal per logical request, on its final sub-operation: a write is
+     * invisible to the receiving CPU otherwise, and signalling every chunk
+     * would cost a receive each time. */
+    ops.back().signal_peer = true;
+    ops.back().peer_token = static_cast<uint32_t>(req_id);
+  }
+
   auto req = std::make_shared<RequestImpl>(
       req_id, kind, static_cast<uint32_t>(ops.size()), opts.context);
   for (auto& r : held) req->hold_region(std::move(r));
@@ -445,11 +455,17 @@ Status EngineImpl::poll_completions(uint32_t max_items,
   return Status::kOk;
 }
 
-Status EngineImpl::poll_ready_events(uint32_t /*max_items*/,
+Status EngineImpl::poll_ready_events(uint32_t max_items,
                                      std::vector<ReadyEventPtr>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
-  return Status::kOk;  /* Write-side ready handoff lands in M1. */
+  if (cfg_.progress == ProgressMode::kExplicit) progress();
+  std::lock_guard<std::mutex> g(mu_);
+  while (!ready_events_.empty() && out->size() < max_items) {
+    out->push_back(std::move(ready_events_.front()));
+    ready_events_.pop_front();
+  }
+  return Status::kOk;
 }
 
 Status EngineImpl::progress() {
@@ -470,6 +486,18 @@ Status EngineImpl::progress() {
       }
     }
     for (auto& p : ready) post_ops(&p);
+  }
+
+  {
+    std::vector<PeerArrival> arrivals;
+    if (provider_->poll_peer_arrivals(cfg_.cq_batch, &arrivals) == Status::kOk &&
+        !arrivals.empty()) {
+      std::lock_guard<std::mutex> g(mu_);
+      for (auto const& a : arrivals) {
+        ready_events_.push_back(std::make_shared<ReadyEventImpl>(
+            a.token, a.from, device_.get(), nullptr, 0));
+      }
+    }
   }
 
   std::vector<CompletionEvent> events;

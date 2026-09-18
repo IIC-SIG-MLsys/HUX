@@ -115,7 +115,45 @@ RdmaConnection::RdmaConnection(RdmaProvider* owner, ibv_qp* qp,
     : owner_(owner), qp_(qp), remote_(remote) {}
 
 RdmaConnection::~RdmaConnection() {
-  if (qp_ != nullptr) ibv_destroy_qp(qp_);
+  if (qp_ != nullptr) {
+    owner_->forget_conn(qp_->qp_num);
+    ibv_destroy_qp(qp_);
+  }
+  if (recv_mr_ != nullptr) ibv_dereg_mr(recv_mr_);
+}
+
+/* kRecvWrId marks a completion as belonging to the receive queue; the send
+ * side never uses it, so the two cannot be confused when the CQ is shared. */
+namespace {
+constexpr uint64_t kRecvWrId = (1ull << 63);
+}
+
+Status RdmaConnection::arm_receives(ibv_pd* pd, uint32_t count) {
+  recv_buf_.assign(count * 16, 0);
+  recv_mr_ = ibv_reg_mr(pd, recv_buf_.data(), recv_buf_.size(),
+                        IBV_ACCESS_LOCAL_WRITE);
+  if (recv_mr_ == nullptr) return Status::kDeviceError;
+  for (uint32_t i = 0; i < count; ++i) {
+    Status s = repost_receive();
+    if (s != Status::kOk) return s;
+  }
+  return Status::kOk;
+}
+
+Status RdmaConnection::repost_receive() {
+  if (recv_mr_ == nullptr) return Status::kUnsupported;
+  ibv_sge sge{};
+  sge.addr = reinterpret_cast<uint64_t>(recv_buf_.data());
+  sge.length = 16;
+  sge.lkey = recv_mr_->lkey;
+
+  ibv_recv_wr wr{};
+  wr.wr_id = kRecvWrId;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+  ibv_recv_wr* bad = nullptr;
+  return ibv_post_recv(qp_, &wr, &bad) == 0 ? Status::kOk
+                                            : Status::kTransportError;
 }
 
 uint32_t RdmaConnection::submit_capacity() const {
@@ -142,6 +180,16 @@ void RdmaConnection::note_completed(uint32_t n) {
 }
 
 // ---------------- RdmaProvider ----------------
+
+void RdmaProvider::register_conn(uint32_t qp_num, RdmaConnection* c) {
+  std::lock_guard<std::mutex> g(conn_mu_);
+  conn_by_qp_[qp_num] = c;
+}
+
+void RdmaProvider::forget_conn(uint32_t qp_num) {
+  std::lock_guard<std::mutex> g(conn_mu_);
+  conn_by_qp_.erase(qp_num);
+}
 
 Status RdmaProvider::create(RdmaConfig const& cfg,
                             std::shared_ptr<RdmaProvider>* out) {
@@ -253,6 +301,7 @@ ProviderCaps RdmaProvider::caps() const {
   c.supports_vector = false;  /* Core splits into scalar sub-operations. */
   c.supports_multi_qp = false;
   c.needs_explicit_flush = false;
+  c.supports_peer_signal = true;
   c.max_segment_bytes = 0;
   c.max_sge = cfg_.max_sge;
   return c;
@@ -317,7 +366,7 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
   init.recv_cq = cq_;
   init.qp_type = IBV_QPT_RC;
   init.cap.max_send_wr = cfg_.sq_depth;
-  init.cap.max_recv_wr = 1;
+  init.cap.max_recv_wr = cfg_.rq_depth;
   init.cap.max_send_sge = cfg_.max_sge;
   init.cap.max_recv_sge = 1;
 
@@ -401,7 +450,13 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
     return Status::kDeviceError;
   }
 
-  *out = std::make_shared<RdmaConnection>(this, qp, peer);
+  auto conn = std::make_shared<RdmaConnection>(this, qp, peer);
+  register_conn(qp->qp_num, conn.get());
+  /* Armed before the connection is handed out, so a peer writing immediately
+   * afterwards still finds a receive waiting. */
+  Status rs = conn->arm_receives(pd_, cfg_.rq_depth);
+  if (rs != Status::kOk) return rs;
+  *out = conn;
   return Status::kOk;
 }
 
@@ -508,8 +563,17 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     wr.wr_id = wr_id;
     wr.sg_list = &sge;
     wr.num_sge = 1;
-    wr.opcode = op.kind == SubOp::Kind::kWrite ? IBV_WR_RDMA_WRITE
-                                               : IBV_WR_RDMA_READ;
+    if (op.kind == SubOp::Kind::kWrite) {
+      /* The last sub-operation of a write carries an immediate value, which
+       * consumes a receive on the peer and so becomes visible to its CPU.
+       * Ordinary writes before it stay invisible, which is the point: one
+       * signal per logical request rather than per chunk. */
+      wr.opcode = op.signal_peer ? IBV_WR_RDMA_WRITE_WITH_IMM
+                                 : IBV_WR_RDMA_WRITE;
+      if (op.signal_peer) wr.imm_data = htonl(op.peer_token);
+    } else {
+      wr.opcode = IBV_WR_RDMA_READ;
+    }
     /* Every work request is signalled for now. Selective signalling belongs
      * with the multi-QP work, where the recovery anchors have to be reasoned
      * about properly rather than bolted on. */
@@ -555,6 +619,23 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
   if (n < 0) return Status::kTransportError;
 
   for (int i = 0; i < n; ++i) {
+    if ((wc[i].wr_id & kRecvWrId) != 0) {
+      /* A peer's write landed. The immediate value names the handoff; the
+       * receive buffer itself holds nothing. */
+      if (wc[i].status == IBV_WC_SUCCESS &&
+          wc[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+        std::lock_guard<std::mutex> g(arrival_mu_);
+        arrivals_.push_back(PeerArrival{ntohl(wc[i].imm_data), 0});
+      }
+      /* Re-arm regardless: a consumed receive that is not replaced silently
+       * lowers the number of arrivals that can still be caught. */
+      {
+        std::lock_guard<std::mutex> g(conn_mu_);
+        auto it = conn_by_qp_.find(wc[i].qp_num);
+        if (it != conn_by_qp_.end()) it->second->repost_receive();
+      }
+      continue;
+    }
     InflightOp op;
     bool known = false;
     {
@@ -583,6 +664,18 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
       else ++stats_.subops_failed;
     }
     out->push_back(ev);
+  }
+  return Status::kOk;
+}
+
+Status RdmaProvider::poll_peer_arrivals(uint32_t max_items,
+                                       std::vector<PeerArrival>* out) {
+  if (out == nullptr) return Status::kInvalidArgument;
+  out->clear();
+  std::lock_guard<std::mutex> g(arrival_mu_);
+  while (!arrivals_.empty() && out->size() < max_items) {
+    out->push_back(arrivals_.front());
+    arrivals_.pop_front();
   }
   return Status::kOk;
 }
