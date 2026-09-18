@@ -1,5 +1,24 @@
 # tools
 
+## hux_topology
+
+Which NIC each accelerator should use. On a machine with several of both, the
+pairing decides whether a transfer crosses a socket, which outweighs most
+other tuning.
+
+```bash
+g++ -std=c++17 hux_topology.cpp ../src/device/topology.cpp -o hux-topology \
+    -I../src -I../include -DHUX_TOPO_CUDA -I/usr/local/cuda/include -lcudart
+./hux-topology            # human readable
+./hux-topology --json     # for a run to record
+```
+
+`-DHUX_TOPO_ROCM` and `-DHUX_TOPO_NEUWARE` cover the other vendors. Without
+any of them it reports NICs only and needs nothing installed.
+
+`cross_numa` is worth acting on. `unknown` means the machine did not say --
+not that the devices are far apart.
+
 ## probe_registration
 
 Asks whether an accelerator's device memory can be registered for RDMA, and up
