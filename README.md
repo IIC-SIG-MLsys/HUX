@@ -116,6 +116,18 @@ Enabling one whose dependency is missing fails at configure time rather than
 being skipped, so a build never quietly comes out without the transport it was
 asked for.
 
+## What CI checks
+
+Everything in the pipeline runs on a machine with no GPU, no RDMA device and
+no vendor SDK: the core and mock suite (94 cases, none of them skipped), the
+Python bindings, formatting, and that enabling a backend whose dependency is
+absent fails at configure time rather than producing a build without the
+transport it was asked for.
+
+Hardware paths are exercised on the machines that have the hardware —
+`tests/manual/` for transfers and sweeps, `tools/` for what a new device can
+do. A pipeline that could only run there would check nothing on most changes.
+
 ## Formatting
 
 ```bash

@@ -1,0 +1,80 @@
+# Checks that hold without any hardware.
+#
+# Everything here runs on a machine with no GPU, no RDMA device and no vendor
+# SDK. That is deliberate: the parts of this library that need hardware are
+# tested on the machines that have it, and a pipeline that could only run
+# there would check nothing on most changes.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    name: core and mock, no hardware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        # No backend is enabled. If this ever needs one, the dependency has
+        # crept into code that is supposed to build anywhere.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  missing-dependency:
+    name: enabling an absent backend fails at configure time
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: UCX is not installed, so this must fail
+        # A build that quietly comes out without the transport it was asked
+        # for is worse than one that refuses, so the refusal is tested.
+        run: |
+          if cmake -S . -B build-ucx -DHUX_ENABLE_UCX=ON 2>err.txt; then
+            echo "configure succeeded without UCX installed"
+            exit 1
+          fi
+          grep -q "UCX was not found" err.txt
+
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install nanobind
+        run: pip install nanobind
+
+      - name: Build and test
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHUX_BUILD_PYTHON=ON
+          cmake --build build -j
+          PYTHONPATH=build python tests/python/test_bindings.py
+
+  format:
+    name: formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        # Pinned: versions disagree on details, and a range would mean
+        # whoever ran last decides the diff.
+        run: pip install clang-format==14.0.6
+
+      - name: Check
+        # Reports and fails; it must not leave a modified tree behind.
+        run: ./format.sh --check
