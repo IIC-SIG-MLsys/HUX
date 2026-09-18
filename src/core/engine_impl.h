@@ -170,6 +170,9 @@ class EngineImpl : public Engine {
   std::atomic<uint64_t> next_peer_{1};
   std::atomic<uint64_t> next_request_{1};
   std::atomic<uint32_t> generation_{1};
+  /* Distinguishes this engine from others in the same process, so two of them
+   * do not mistake each other for themselves. */
+  uint64_t const engine_id_;
 
   mutable std::mutex stats_mu_;
   EngineStats stats_;

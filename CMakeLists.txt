@@ -27,6 +27,7 @@ add_library(hux_core
   src/core/request_impl.cpp
   src/core/engine_impl.cpp
   src/control/control_message.cpp
+  src/control/identity.cpp
   src/device/host_backend.cpp
   src/device/topology.cpp
   src/transport/local/local_provider.cpp

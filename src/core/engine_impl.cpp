@@ -5,6 +5,7 @@
 #include <chrono>
 
 #include "control/control_message.h"
+#include "control/identity.h"
 #include "core/ready_event_impl.h"
 #include "hux/device.h"
 
@@ -58,7 +59,8 @@ EngineImpl::EngineImpl(EngineConfig cfg, std::shared_ptr<DeviceBackend> device,
                        TransportProviderPtr provider)
     : cfg_(std::move(cfg)),
       device_(std::move(device)),
-      provider_(std::move(provider)) {
+      provider_(std::move(provider)),
+      engine_id_(next_engine_id()) {
   if (cfg_.progress == ProgressMode::kThread) {
     progress_thread_ = std::thread([this] { progress_loop(); });
   }
@@ -257,19 +259,57 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
 
 Status EngineImpl::local_metadata(std::vector<uint8_t>* out) const {
   if (out == nullptr) return Status::kInvalidArgument;
-  return provider_->local_metadata(out);
+  /* Identity first, then whatever the provider needs. A peer reads the
+   * identity to decide which path can reach this engine at all, before it
+   * cares how to dial it. */
+  out->clear();
+  Identity id = local_identity();
+  id.engine = engine_id_;
+  encode_identity(id, out);
+  std::vector<uint8_t> provider_meta;
+  Status s = provider_->local_metadata(&provider_meta);
+  if (s != Status::kOk) return s;
+  out->insert(out->end(), provider_meta.begin(), provider_meta.end());
+  return Status::kOk;
 }
 
 Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
                             PeerPtr* out) {
   if (out == nullptr) return Status::kInvalidArgument;
+
+  /* Where the peer is decides which path can reach it, so it is read before
+   * dialling: a peer in this process needs no connection at all. */
+  Identity peer_id;
+  Locality locality = Locality::kRemote;
+  std::vector<uint8_t> provider_meta = metadata;
+  if (decode_identity(metadata, 0, &peer_id) == Status::kOk) {
+    Identity mine = local_identity();
+    mine.engine = engine_id_;
+    locality = locality_of(mine, peer_id);
+    provider_meta.assign(metadata.begin() + kIdentityBytes, metadata.end());
+  }
+
   ProviderConnectionPtr conn;
-  Status s = provider_->connect(metadata, &conn);
+  Status s = provider_->connect(provider_meta, &conn);
   if (s != Status::kOk) return s;
 
   PeerCaps caps;
   caps.provider = provider_->caps().name;
-  caps.path = PathKind::kRdma;
+  /* Reported as observed rather than assumed, so a caller that needs to know
+   * whether a transfer crosses the network can ask instead of inferring it
+   * from throughput. */
+  switch (locality) {
+    case Locality::kSameEngine:
+    case Locality::kSameProcess:
+      caps.path = PathKind::kSameProcess;
+      break;
+    case Locality::kSameHost:
+      caps.path = PathKind::kIpc;
+      break;
+    case Locality::kRemote:
+      caps.path = PathKind::kRdma;
+      break;
+  }
   caps.qp_count = conn->qp_count();
   if (device_ != nullptr) {
     caps.remote_max_registration_bytes = device_->caps().max_registration_bytes;
