@@ -48,6 +48,9 @@ cannot be registered at any size, so that backend stages through pinned host
 memory and reports `supports_peer_registration = false`. `tools/` holds the
 probe those numbers come from; run it first on any new device.
 
+Moving an application from HMC: [docs/migration.md](docs/migration.md), with
+a working example in [apps/transfer_example.cpp](apps/transfer_example.cpp).
+
 ### Relation to HMC
 
 HUX replaces HMC's `ConnBuffer`-centred interface, in which a communicator was
