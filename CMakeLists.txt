@@ -46,6 +46,10 @@ if(HUX_ENABLE_RDMA)
       "HUX_ENABLE_RDMA=ON but libibverbs was not found. "
       "Install rdma-core development files, or configure with -DHUX_ENABLE_RDMA=OFF.")
   endif()
+  add_library(hux_transport_rdma src/transport/rdma/rdma_provider.cpp)
+  target_include_directories(hux_transport_rdma PUBLIC ${IBVERBS_INCLUDE_DIR})
+  target_link_libraries(hux_transport_rdma PUBLIC hux_core ${IBVERBS_LIBRARY})
+  target_compile_options(hux_transport_rdma PRIVATE -Wall -Wextra)
   message(STATUS "HUX: RDMA provider enabled (${IBVERBS_LIBRARY})")
 endif()
 
