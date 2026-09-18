@@ -38,6 +38,13 @@ struct EngineConfig {
   /* Submission queue bound; kWouldBlock above it. */
   uint32_t max_inflight_requests = 4096;
 
+  /* Bytes a single request may submit before the scheduler moves on. Without
+   * a bound, a large request submits everything it has and a small one behind
+   * it waits for the whole transfer -- a delay that does not show up in
+   * aggregate throughput. Rounded up to one chunk, since yielding mid-chunk
+   * would split work the provider takes as a unit. */
+  uint64_t scheduler_quantum_bytes = 1u << 20;
+
   CongestionControl cc = CongestionControl::kOff;
   uint64_t cc_window_bytes = 1u << 22;
 

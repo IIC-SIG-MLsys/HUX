@@ -31,6 +31,9 @@ struct MockConfig {
   Status subop_error = Status::kTransportError;
   /* Actually move bytes so tests can verify content end to end. */
   bool move_data = true;
+  /* Cap on bytes in flight, 0 for none. Stands in for a congestion window so
+   * contention between requests can be reproduced without hardware. */
+  uint64_t budget_bytes = 0;
 };
 
 class MockConnection : public ProviderConnection {
@@ -156,6 +159,7 @@ class MockProvider : public TransportProvider {
   std::deque<ControlMessage> control_;
   uint64_t next_key_ = 1;
   uint64_t submitted_ = 0;
+  uint64_t inflight_bytes_ = 0;
   ProviderStats stats_;
 };
 

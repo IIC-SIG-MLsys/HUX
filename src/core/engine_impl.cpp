@@ -1,6 +1,7 @@
 /* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "core/engine_impl.h"
 
+#include <algorithm>
 #include <chrono>
 
 #include "control/control_message.h"
@@ -283,27 +284,40 @@ bool EngineImpl::dependencies_met(
 
 /* Hands sub-operations to the provider and records how many it took.
  *
- * A provider that accepts only part of a batch is saying one of two things.
- * Out of budget or queue space means the rest should be offered again later,
- * and dropping it would lose data the caller believes is on its way. A real
- * error means no more will be accepted, and the request has to stop waiting
- * for completions that will never arrive. */
-void EngineImpl::post_ops(PendingSubmit* p) {
+ * At most max_bytes is offered in one turn. A provider that accepts only part
+ * of what it is given is saying one of two things. Out of budget or queue
+ * space means the rest should be offered again later, and dropping it would
+ * lose data the caller believes is on its way. A real error means no more
+ * will be accepted, and the request has to stop waiting for completions that
+ * will never arrive.
+ *
+ * Returns true when nothing is left to submit for this request. */
+bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
+  if (p->ops.empty()) return true;
+
+  /* Take whole sub-operations up to the quantum, and always at least one:
+   * a quantum smaller than a chunk must still make progress rather than
+   * stall. */
+  size_t take = 0;
+  uint64_t bytes = 0;
+  while (take < p->ops.size()) {
+    if (take > 0 && bytes + p->ops[take].length > max_bytes) break;
+    bytes += p->ops[take].length;
+    ++take;
+  }
+
+  std::vector<SubOp> slice(p->ops.begin(), p->ops.begin() + take);
   p->req->set_state(RequestState::kInflight);
-  SubmitResult sr = provider_->submit(p->conn.get(), p->ops);
+  SubmitResult sr = provider_->submit(p->conn.get(), slice);
   p->req->add_accepted_subops(sr.accepted);
 
-  if (sr.accepted < p->ops.size() && sr.status == Status::kWouldBlock) {
-    /* Deferred, not failed. The remainder is kept and offered again on a
-     * later pass; the caller sees a request still in flight. */
-    p->ops.erase(p->ops.begin(), p->ops.begin() + sr.accepted);
-    std::lock_guard<std::mutex> g(mu_);
-    pending_.push_back(std::move(*p));
-    {
-      std::lock_guard<std::mutex> sg(stats_mu_);
-      ++stats_.submit_deferred;
-    }
-    return;
+  p->ops.erase(p->ops.begin(), p->ops.begin() + sr.accepted);
+
+  if (sr.accepted < slice.size() && sr.status == Status::kWouldBlock) {
+    /* Deferred, not failed. */
+    std::lock_guard<std::mutex> sg(stats_mu_);
+    ++stats_.submit_deferred;
+    return false;
   }
 
   if (sr.accepted == 0 && sr.status != Status::kOk) {
@@ -320,9 +334,9 @@ void EngineImpl::post_ops(PendingSubmit* p) {
       completed_.push_back(p->req);
     }
     p->req->fail(e);
-    return;
+    return true;
   }
-  if (sr.accepted < p->ops.size()) {
+  if (sr.accepted < slice.size()) {
     ErrorInfo e;
     e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
     e.provider = provider_->caps().name;
@@ -332,6 +346,42 @@ void EngineImpl::post_ops(PendingSubmit* p) {
     e.detail = "partial submit";
     p->req->seal_accepted();
     p->req->fail(e);
+    return true;
+  }
+  return p->ops.empty();
+}
+
+/* One scheduling pass: every waiting request gets a turn of at most a
+ * quantum, starting from a rotating position so none of them is permanently
+ * first. */
+void EngineImpl::drain_pending() {
+  std::vector<PendingSubmit> turn;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    if (pending_.empty()) return;
+    size_t const n = pending_.size();
+    if (rr_cursor_ >= n) rr_cursor_ = 0;
+    /* Rotate so the pass starts at a different request each time. */
+    std::rotate(pending_.begin(), pending_.begin() + rr_cursor_, pending_.end());
+    turn.assign(std::make_move_iterator(pending_.begin()),
+                std::make_move_iterator(pending_.end()));
+    pending_.clear();
+    rr_cursor_ = n > 1 ? 1 : 0;
+  }
+
+  std::vector<PendingSubmit> still_waiting;
+  for (auto& p : turn) {
+    if (!dependencies_met(p.after)) {
+      still_waiting.push_back(std::move(p));
+      continue;
+    }
+    if (!post_ops(&p, cfg_.scheduler_quantum_bytes))
+      still_waiting.push_back(std::move(p));
+  }
+
+  if (!still_waiting.empty()) {
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto& p : still_waiting) pending_.push_back(std::move(p));
   }
 }
 
@@ -409,7 +459,11 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
     return Status::kOk;
   }
 
-  post_ops(&ps);
+  if (!post_ops(&ps, cfg_.scheduler_quantum_bytes)) {
+    /* Not all of it fit in one turn; the rest waits for a later pass. */
+    std::lock_guard<std::mutex> g(mu_);
+    pending_.push_back(std::move(ps));
+  }
   *out = req;
   if (req->accepted_subops() > 0 || req->error().ok()) return Status::kOk;
   return req->error().status;
@@ -533,26 +587,9 @@ Status EngineImpl::poll_ready_events(uint32_t max_items,
 }
 
 Status EngineImpl::progress() {
-  /* Release anything whose device dependencies have since been met. Done
-   * before polling so a request that becomes ready is posted in this same
-   * pass rather than a later one. */
-  {
-    std::vector<PendingSubmit> ready;
-    {
-      std::lock_guard<std::mutex> g(mu_);
-      for (auto it = pending_.begin(); it != pending_.end();) {
-        /* Entries with no events are deferred submissions rather than
-         * dependency waits; both are released from here. */
-        if (dependencies_met(it->after)) {
-          ready.push_back(std::move(*it));
-          it = pending_.erase(it);
-        } else {
-          ++it;
-        }
-      }
-    }
-    for (auto& p : ready) post_ops(&p);
-  }
+  /* One scheduling pass first, so a request that has become ready is offered
+   * in this same call rather than a later one. */
+  drain_pending();
 
   {
     std::vector<ControlMessage> msgs;

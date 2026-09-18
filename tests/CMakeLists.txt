@@ -4,6 +4,7 @@ add_executable(hux_contract_tests
   contract/test_contract.cpp
   contract/test_dependencies.cpp
   contract/test_control.cpp
+  contract/test_fairness.cpp
   device/test_host_backend.cpp
 )
 target_include_directories(hux_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

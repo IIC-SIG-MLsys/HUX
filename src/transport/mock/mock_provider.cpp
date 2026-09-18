@@ -15,8 +15,18 @@ SubmitResult MockProvider::submit(ProviderConnection*,
           : std::min<uint32_t>(cfg_.accept_limit,
                                static_cast<uint32_t>(ops.size()));
 
+  uint32_t taken = 0;
   for (uint32_t i = 0; i < limit; ++i) {
     SubOp const& op = ops[i];
+    if (cfg_.budget_bytes != 0 &&
+        inflight_bytes_ + op.length > cfg_.budget_bytes) {
+      /* Out of budget: the rest is not refused outright, it is offered again
+       * later. */
+      r.status = Status::kWouldBlock;
+      break;
+    }
+    inflight_bytes_ += op.length;
+    ++taken;
     if (cfg_.move_data) {
       /* One-sided transfer simulated in-process: both ends share an address
        * space in tests, so remote_addr can be dereferenced. A real provider
@@ -37,6 +47,7 @@ SubmitResult MockProvider::submit(ProviderConnection*,
     CompletionEvent ev;
     ev.request = op.request;
     ev.sub_id = op.sub_id;
+    ev.bytes = op.length;
     ev.status = cfg_.fail_subops ? cfg_.subop_error : Status::kOk;
     ev.may_have_modified_target =
         cfg_.fail_subops && op.kind == SubOp::Kind::kWrite;
@@ -50,8 +61,9 @@ SubmitResult MockProvider::submit(ProviderConnection*,
       stats_.payload_bytes_copied += op.length;
     }
   }
-  r.accepted = limit;
-  r.status = limit < ops.size() ? cfg_.submit_status_on_partial : Status::kOk;
+  r.accepted = taken;
+  if (taken < ops.size() && r.status == Status::kOk)
+    r.status = cfg_.submit_status_on_partial;
 
   if (cfg_.shuffle_completions && pending_.size() > 1) {
     std::vector<CompletionEvent> v(pending_.begin(), pending_.end());
@@ -71,6 +83,8 @@ Status MockProvider::poll(uint32_t max_events,
     out->push_back(pending_.front());
     if (pending_.front().status == Status::kOk) ++stats_.subops_completed;
     else ++stats_.subops_failed;
+    uint64_t const b = pending_.front().bytes;
+    inflight_bytes_ -= b < inflight_bytes_ ? b : inflight_bytes_;
     pending_.pop_front();
   }
   return Status::kOk;

@@ -881,6 +881,7 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
       CompletionEvent ev;
       ev.request = key.request;
       ev.sub_id = key.sub_id;
+      ev.bytes = key.bytes;
       ev.status = st;
       ev.provider_errno = static_cast<int32_t>(wc[i].status);
       /* Only a write can have changed the remote side. */

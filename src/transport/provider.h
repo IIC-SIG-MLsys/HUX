@@ -103,6 +103,7 @@ struct SubOp {
 struct CompletionEvent {
   RequestId request = 0;
   uint64_t sub_id = 0;
+  uint64_t bytes = 0;
   Status status = Status::kOk;
   int32_t provider_errno = 0;
   bool may_have_modified_target = false;

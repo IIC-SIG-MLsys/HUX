@@ -127,7 +127,10 @@ class EngineImpl : public Engine {
    * unrecorded event captures no work, so treating it as satisfied would
    * release the NIC against data that does not exist yet. */
   bool dependencies_met(std::vector<DeviceEventPtr> const& after) const;
-  void post_ops(PendingSubmit* p);
+  /* Submits at most max_bytes worth of sub-operations, leaving the rest for a
+   * later turn. Returns true when the request has nothing left to submit. */
+  bool post_ops(PendingSubmit* p, uint64_t max_bytes);
+  void drain_pending();
   std::shared_ptr<MemoryRegionImpl> find_region(RegionId id) const;
   std::shared_ptr<RemoteRegionImpl> find_remote(RegionId id) const;
   void progress_loop();
@@ -143,6 +146,9 @@ class EngineImpl : public Engine {
   std::unordered_map<RequestId, RequestImplPtr> inflight_;
   std::deque<RequestPtr> completed_;
   std::deque<PendingSubmit> pending_;
+  /* Where the next scheduling pass starts, so no request is permanently
+   * first. */
+  size_t rr_cursor_ = 0;
   std::deque<Notification> notifications_;
   std::deque<ReadyEventPtr> ready_events_;
   /* Notification requests waiting for the peer to confirm receipt, keyed by
