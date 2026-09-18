@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "core/region_impl.h"
 
 #include <cstring>
@@ -30,7 +30,7 @@ uint64_t get_u64(uint8_t const* p) {
   return v;
 }
 
-// major(2) minor(2) region(8) gen(4) base(8) len(8) rkey(8) kind(1) idx(4) access(4)
+/* major(2) minor(2) region(8) gen(4) base(8) len(8) rkey(8) kind(1) idx(4) access(4) */
 constexpr size_t kDescriptorBytes = 2 + 2 + 8 + 4 + 8 + 8 + 8 + 1 + 4 + 4;
 
 }  // namespace
@@ -56,7 +56,7 @@ Status decode_descriptor(std::vector<uint8_t> const& buf, RegionDescriptor* out)
   uint8_t const* p = buf.data();
   out->major = get_u16(p); p += 2;
   out->minor = get_u16(p); p += 2;
-  // major 不兼容时明确拒绝，不做"尽力而为"的解析。
+  /* Reject an incompatible major rather than parsing best-effort. */
   if (out->major != kDescriptorMajor) return Status::kUnsupported;
   out->region = get_u64(p); p += 8;
   out->generation = get_u32(p); p += 4;
@@ -80,7 +80,7 @@ Status MemoryRegionImpl::view(uint64_t offset, uint64_t length,
                               RegionView* out) const {
   if (out == nullptr) return Status::kInvalidArgument;
   Span s{offset, length};
-  // within() 先比较再相加，offset+length 回绕不会被误判成合法范围。
+  /* within() compares before adding, so a wrapping range cannot pass. */
   if (!s.within(length_)) return Status::kOutOfRange;
   out->region = id_;
   out->span = s;
@@ -94,8 +94,8 @@ Status MemoryRegionImpl::export_descriptor(std::vector<uint8_t>* out) const {
   d.generation = gen_;
   d.base = reinterpret_cast<uint64_t>(base_);
   d.length = length_;
-  // 导出给对端的必须是 remote_key。旧实现曾拿 lkey 顶替 rkey，
-  // 在两者偶然相等的设备上能跑通，换一台就悄悄坏掉。
+  /* Must export the rkey. Substituting the lkey happens to work where the two
+   * coincide and breaks silently elsewhere. */
   d.remote_key = remote_key_;
   d.device_kind = dev_.kind;
   d.device_index = dev_.index;

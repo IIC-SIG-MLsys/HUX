@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "core/engine_impl.h"
 
 #include <chrono>
@@ -39,7 +39,8 @@ Status PeerImpl::import_region_batch(
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
   out->reserve(descs.size());
-  // 逐项处理：某一项畸形不影响其余项，调用方从返回的空指针识别失败项。
+  /* Per item: a malformed entry does not affect the rest; the caller spots
+   * failures by the null pointer. */
   for (auto const& d : descs) {
     RemoteRegionPtr r;
     if (import_region(d, &r) != Status::kOk) r = nullptr;
@@ -71,10 +72,11 @@ Status Engine::create(EngineConfig const& cfg,
   std::string reason;
   Status s = cfg.validate(&reason);
   if (s != Status::kOk) return s;
-  return Status::kInvalidArgument;  // provider 由工厂注入，见 hux::make_engine
+  return Status::kInvalidArgument;  /* Provider is injected; see make_engine. */
 }
 
-// 测试与上层工厂使用的构造入口：provider 显式注入，便于用 mock 替换。
+/* Construction entry used by tests and the upper factory: the provider is
+ * injected so a mock can take its place. */
 Status make_engine(EngineConfig const& cfg,
                    std::shared_ptr<DeviceBackend> device,
                    TransportProviderPtr provider,
@@ -96,15 +98,16 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
   DeviceId dev = cfg_.device;
   MemoryKind mem = MemoryKind::kHostPageable;
   if (device_ != nullptr) {
-    // 指针实际属于哪个设备由 backend 判定，不能凭调用方声明。
+    /* The backend decides which device a pointer belongs to. */
     DeviceId probed;
     MemoryKind probed_kind;
     if (device_->probe_pointer(addr, &probed, &probed_kind) == Status::kOk) {
       dev = probed;
       mem = probed_kind;
     }
-    // 设备有注册上限时（寒武纪 MLU 实测约 32 MiB），超限必须如实拒绝，
-    // 而不是静默改走 staging 让调用方以为自己在做直传。
+    /* Where a device caps registration (Cambricon MLU sits near 32 MiB),
+     * exceeding it is refused rather than silently rerouted through staging
+     * while the caller believes it transfers in place. */
     uint64_t const cap = device_->caps().max_registration_bytes;
     if (cap != 0 && length > cap) return Status::kResourceExhausted;
   }
@@ -132,7 +135,7 @@ Status EngineImpl::register_memory_batch(
   if (addrs.size() != lengths.size()) return Status::kInvalidArgument;
   out->clear();
   out->reserve(addrs.size());
-  // 逐项返回结果，部分失败不丢失已成功项的所有权。
+  /* Per-item results; a partial failure keeps the successful ones. */
   for (size_t i = 0; i < addrs.size(); ++i) {
     RegistrationResult r;
     r.status = register_memory(addrs[i], lengths[i], access, &r.region);
@@ -144,9 +147,9 @@ Status EngineImpl::register_memory_batch(
 Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
   if (region == nullptr) return Status::kInvalidArgument;
   auto impl = std::static_pointer_cast<MemoryRegionImpl>(region);
-  // 第一步：阻止新提交。
+  /* Step one: block new submissions. */
   impl->retire();
-  // 第二步：确认没有在途请求还引用它。有则报告仍在 drain，不强行注销。
+  /* Step two: refuse while in-flight requests may still reference it. */
   {
     std::lock_guard<std::mutex> g(mu_);
     if (!inflight_.empty()) return Status::kWouldBlock;
@@ -223,7 +226,7 @@ Status EngineImpl::build_subops(std::vector<RegionView> const& local,
     if (rr == nullptr) return Status::kNotFound;
     if (!rr->valid()) return Status::kStaleGeneration;
 
-    // 本地与远端分段按项配对，长度必须相等。
+    /* Segments pair up by index and must have equal lengths. */
     if (local[i].span.length != remote[i].span.length)
       return Status::kInvalidArgument;
     if (!local[i].span.within(lr->length())) return Status::kOutOfRange;
@@ -232,8 +235,8 @@ Status EngineImpl::build_subops(std::vector<RegionView> const& local,
     held->push_back(lr);
     total += local[i].span.length;
 
-    // 按 chunk_bytes 切分。chunk 是调度与限流的粒度，与应用的 segment
-    // 和后端的 wr_batch 是三件不同的事，不共用一个参数。
+    /* Split by chunk_bytes. A chunk is the scheduling and pacing unit, which
+     * is neither the application segment nor the backend's wr_batch. */
     uint64_t off = 0;
     while (off < local[i].span.length) {
       uint64_t n = local[i].span.length - off;
@@ -274,8 +277,8 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
   auto* p = static_cast<PeerImpl*>(peer);
   if (!p->connected()) return Status::kPeerDisconnected;
 
-  // 提交队列有上限。满时返回 kWouldBlock——逻辑请求未被接受，
-  // 没有任何网络副作用，调用方可以原样重试。
+  /* Bounded submission queue. kWouldBlock means the request was not accepted
+   * and had no network side effect, so it can be retried as is. */
   {
     std::lock_guard<std::mutex> g(mu_);
     if (inflight_.size() >= cfg_.max_inflight_requests)
@@ -308,7 +311,7 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
   req->set_accepted_subops(sr.accepted);
 
   if (sr.accepted == 0 && sr.status != Status::kOk) {
-    // 一个子操作都没被接受：没有网络副作用，直接失败即可。
+    /* Nothing was accepted, so there is no side effect to drain. */
     ErrorInfo e;
     e.status = sr.status;
     e.provider = provider_->caps().name;
@@ -324,8 +327,9 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
     return sr.status;
   }
   if (sr.accepted < ops.size()) {
-    // 部分提交失败：只回滚未被接受的部分，已接受部分继续 drain，
-    // 由 poll 阶段按实际接受数聚合完成。不丢 chunk，也不重复发送。
+    /* Partial submit: roll back only what was refused. The accepted part keeps
+     * draining and aggregates against the accepted count, so no chunk is lost
+     * and none is sent twice. */
     ErrorInfo e;
     e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
     e.provider = provider_->caps().name;
@@ -343,7 +347,7 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
 Status EngineImpl::read(Peer* peer, RegionView const& local,
                         RegionView const& remote, TransferOptions const& opts,
                         RequestPtr* out) {
-  // 标量是单分段便捷入口，复用同一条提交与等待逻辑。
+  /* Scalar is a single-segment shortcut over the same path. */
   return submit_vector(peer, {local}, {remote}, opts, SubOp::Kind::kRead, out);
 }
 
@@ -369,7 +373,7 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
                           RequestPtr* out) {  // NOLINT
   if (peer == nullptr || out == nullptr) return Status::kInvalidArgument;
   if (payload.size() > cfg_.notify_max_payload) return Status::kInvalidArgument;
-  return Status::kUnsupported;  // NTF-01，见里程碑 M4
+  return Status::kUnsupported;  /* NTF-01, milestone M4. */
 }
 
 Status EngineImpl::poll_notifications(uint32_t max_items,
@@ -404,13 +408,13 @@ Status EngineImpl::poll_ready_events(uint32_t /*max_items*/,
                                      std::vector<ReadyEventPtr>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
-  return Status::kOk;  // 写方向的 ready 交接属于 M1，见里程碑
+  return Status::kOk;  /* Write-side ready handoff lands in M1. */
 }
 
 Status EngineImpl::progress() {
   std::vector<CompletionEvent> events;
-  // 整批取出、整批处理。provider 契约要求它交出全部取到的事件——
-  // "遇到目标即返回"会丢掉同批里其他请求的完成。
+  /* Take and handle the whole batch. The provider contract requires every
+   * event it collected; returning early drops other requests' completions. */
   Status s = provider_->poll(cfg_.cq_batch, &events);
   if (s != Status::kOk) return s;
 
@@ -419,7 +423,7 @@ Status EngineImpl::progress() {
     {
       std::lock_guard<std::mutex> g(mu_);
       auto it = inflight_.find(ev.request);
-      if (it == inflight_.end()) continue;  // 已终态或已被取走
+      if (it == inflight_.end()) continue;  /* Terminal or already taken. */
       req = it->second;
     }
     bool last = req->on_subop_complete(ev);
@@ -430,11 +434,12 @@ Status EngineImpl::progress() {
     } else if (!req->error().ok()) {
       req->fail(req->error());
     } else {
-      // 所有已接受的子操作都已完成 → transfer_complete。
-      // 目标可见性由 DeviceBackend 负责，随后才是 target_ready。
+      /* Every accepted sub-operation is done, so transfer_complete holds.
+       * Device visibility comes next, and only then target_ready. */
       req->mark_stage(Stage::kTransferComplete);
       if (device_ != nullptr && req->kind() == SubOp::Kind::kRead) {
-        // GPU 显存直写本身不建立与消费 kernel 的执行顺序，这一步不能省。
+        /* A direct write to device memory orders nothing against a consuming
+         * kernel on its own. */
         req->mark_stage(Stage::kTargetReady);
       }
       req->finish_success();
@@ -471,8 +476,8 @@ Status EngineImpl::close(int64_t timeout_ms) {
       if (inflight_.empty()) break;
     }
     if (timeout_ms >= 0 && std::chrono::steady_clock::now() >= deadline) {
-      // 超时则保留必要资源并返回未完成状态。
-      // 绝不销毁仍可能被 DMA 访问的对象。
+      /* On timeout keep the resources and report the incomplete state; never
+       * destroy objects that DMA may still touch. */
       return Status::kTimeout;
     }
     progress();

@@ -1,30 +1,62 @@
-# HUX — Heterogeneous Unified eXchange
+## What is HUX?
 
-面向异构 GPU 的点对点通信引擎。目标是让应用把**自己已有的显存**直接注册并传输，
-同机与跨机使用同一套接口，并把传输接进 GPU 的执行顺序。
+HUX (Heterogeneous Unified eXchange) is a point-to-point transport engine for
+heterogeneous accelerators. Applications register the memory they already own
+and transfer in place, over one interface for same-host and cross-host paths,
+with the transfer tied into the GPU's own execution order.
 
-本仓库按 `transport_roadmap.md` 实施。它不是 HMC 的分支：HMC 以 `ConnBuffer`
-为中心的接口按路线图是要退役的，这里从空目录起步，只按需搬运其中经过验证的部分
-（厂商内存适配、RDMA 建连知识、以及已知问题对应的回归用例）。
+* **Application-owned memory**
+  `register_memory` takes any pointer the application already holds. There is
+  no communication buffer to copy through and no allocator to adopt.
+* **Batched asynchronous transfers**
+  `Engine` / `Peer` / `MemoryRegion` / `Request`, with scalar and vector
+  `read`/`write`, batch registration, exportable descriptors and completion
+  polling.
+* **One interface for local and remote**
+  CPU-CPU, CPU-GPU and GPU-GPU over direct access, IPC, native RDMA or UCX,
+  selected by device, process and topology, with the choice queryable.
+* **GPU stream and event dependencies**
+  Transfers hook into the producing and consuming streams without
+  synchronizing the whole device and without an extra payload copy.
+* **Completion as part of the design**
+  Source reuse, transfer completion and target readiness are separate,
+  separately provable states.
 
-## 当前状态
+### Supported devices
 
-**M0 契约与基线** —— 已完成。公共 API、完成契约、provider 契约、mock 后端与
-无硬件测试可用。尚未接入任何真实传输后端，`notify` 与写方向的 ready 交接尚未实现。
+Vendor support comes from device backends and transport providers combined;
+the public interface binds to no vendor SDK.
 
-| 里程碑 | 状态 |
-|---|---|
-| M0 契约与基线 | 完成 |
-| M0.5 provider 选型决断 | 未开始 |
-| M1 单连接直传闭环 | 未开始 |
-| M2 并行与拥塞控制 | 未开始 |
-| M3 设备与路径能力 | 未开始 |
-| M4 绑定与运行保障 | 未开始 |
-| M5 验收交付 | 未开始 |
+| Device | Backend | State |
+| --- | --- | --- |
+| NVIDIA GPUs | CUDA | planned |
+| AMD GPUs / Hygon DCUs | ROCm / DTK | planned |
+| Cambricon MLUs | CNRT / Neuware | planned |
+| Moore Threads GPUs | MUSA | planned |
+| CPU memory | host | planned |
 
-## 构建
+Each backend is independently enabled, built and tested. Capabilities are
+reported as they are: where a device caps registration size or lacks DMA-BUF
+export, that shows up in `DeviceCaps` rather than as a silent fallback.
 
-core 与 mock 不依赖任何 GPU 或 RDMA SDK，在没有硬件的机器上可以完整构建并自测：
+### Relation to HMC
+
+HUX replaces HMC's `ConnBuffer`-centred interface, in which a communicator was
+bound to one library-owned buffer and every request carried an IP, a port and a
+transport type. The vendor memory layer and the RDMA connection setup carry
+over; the public API does not. HMC remains available for existing callers.
+
+## Status
+
+Under construction. The public API, the completion contract, the provider
+contract, a mock backend and the hardware-free test suite are in place. No real
+transport backend is wired up yet; `notify` and the write-side ready handoff
+are not implemented.
+
+## Building
+
+Core and the mock backend depend on no GPU or RDMA SDK, so the library builds
+and self-tests on a machine without either:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -32,48 +64,52 @@ cmake --build build -j
 cd build && ctest --output-on-failure
 ```
 
-各后端独立开关，默认全部关闭：
+Backends are opt-in and off by default:
 
 ```
 -DHUX_ENABLE_RDMA=ON      Native RDMA provider (libibverbs)
 -DHUX_ENABLE_UCX=ON       UCX provider
 -DHUX_ENABLE_CUDA=ON      NVIDIA
--DHUX_ENABLE_ROCM=ON      AMD / 海光 DCU
--DHUX_ENABLE_NEUWARE=ON   寒武纪
--DHUX_ENABLE_MUSA=ON      摩尔线程
+-DHUX_ENABLE_ROCM=ON      AMD / Hygon
+-DHUX_ENABLE_NEUWARE=ON   Cambricon
+-DHUX_ENABLE_MUSA=ON      Moore Threads
 ```
 
-**启用了却找不到依赖会在配置阶段直接失败**，不会静默跳过——否则会构建出一个
-自以为带 RDMA 的库。
+Enabling one whose dependency is missing fails at configure time rather than
+being skipped, so a build never quietly comes out without the transport it was
+asked for.
 
-## 设计要点
+## Design notes
 
-几个容易做错、因此在代码和测试里被反复盯住的地方：
+A few places that are easy to get wrong, and are therefore pinned down by
+tests:
 
-- **完成阶段必须能分别证明。** 一个 CQE 既不证明数据对目标设备的 kernel 可见，
-  也不证明同一逻辑请求在其他 QP 上的子操作已完成。`accepted` / `source_reusable` /
-  `transfer_complete` / `target_ready` 是四件不同的事。
-- **超时不是取消。** `wait(timeout)` 超时只表示本次等待结束，请求仍在途，
-  DMA 未必停止，注册也没有解除。
-- **`WOULD_BLOCK` 不是失败。** 它表示逻辑请求未被接受、没有任何网络副作用。
-- **批量传输不承诺原子性。** 失败可能已经改了部分目标，错误里带
-  `may_have_modified_target`，不自动重放结果不明的写入。
-- **导出给对端的必须是 rkey。** 拿 lkey 顶替在两者偶然相等的设备上能跑通，换一台就坏。
-- **设备限制如实声明。** 寒武纪的注册上限、海光的 DMA-BUF 缺失通过 capability 暴露，
-  不用静默降级掩盖。
+* **A CQE is not a completion.** It proves neither that the data is visible to
+  kernels on the target device, nor that the other QPs of the same request are
+  done. `accepted`, `source_reusable`, `transfer_complete` and `target_ready`
+  are four different things.
+* **A timeout is not a cancellation.** `wait(timeout)` ending says nothing
+  about whether DMA has stopped or the registration still stands.
+* **`kWouldBlock` is not a failure.** The request was never accepted and had no
+  network side effect.
+* **Batches are not atomic.** A failure may have modified part of the target;
+  the error carries `may_have_modified_target` and nothing is replayed
+  automatically.
+* **Export the rkey, not the lkey.** Substituting one for the other happens to
+  work where they coincide and breaks silently elsewhere.
 
-## 目录
+## Layout
 
 ```
-include/hux/      公共 API，不出现任何厂商 SDK 类型
-src/core/         请求状态、调度、完成聚合
-src/memory/       区域生命周期与注册
-src/device/       各厂商 DeviceBackend
-src/transport/    provider 契约与各后端实现（mock / rdma / ucx / ipc）
-src/control/      peer 与 region 元数据、能力协商、epoch
-tests/            契约测试与 mock 故障注入
+include/hux/      Public API; no vendor SDK types
+src/core/         Request state, scheduling, completion aggregation
+src/memory/       Region lifetime and registration
+src/device/       Per-vendor DeviceBackend
+src/transport/    Provider contract and backends (mock / rdma / ucx / ipc)
+src/control/      Peer and region metadata, capability negotiation, epochs
+tests/            Contract tests and mock fault injection
 ```
 
-## 许可
+## License
 
-Apache License 2.0。
+Apache License 2.0.

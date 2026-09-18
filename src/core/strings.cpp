@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include <string>
 
 #include "hux/config.h"
@@ -82,8 +82,8 @@ char const* to_string(PathKind p) {
   return "unknown";
 }
 
-// 冲突的参数应当被拒绝并给出原因，而不是静默改写成"合理"值——
-// 静默改写会让调用方以为自己跑的是 A 配置，实际跑的是 B。
+/* Conflicting parameters are rejected with a reason. Silently rewriting them
+ * would leave the caller believing it runs a configuration it does not. */
 Status EngineConfig::validate(std::string* reason) const {
   auto fail = [&](char const* why) {
     if (reason != nullptr) *reason = why;

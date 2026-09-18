@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "test_main.h"
 
 namespace huxtest {

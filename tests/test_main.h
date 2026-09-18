@@ -1,6 +1,6 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
-// 轻量测试框架：core 必须能在没有 GPU/RDMA SDK 的机器上构建并自测，
-// 所以这里不引入任何外部测试依赖。
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
+/* Minimal harness: core must build and self-test on a machine without any
+ * GPU or RDMA SDK, so no external test dependency is pulled in. */
 #ifndef HUX_TESTS_TEST_MAIN_H
 #define HUX_TESTS_TEST_MAIN_H
 

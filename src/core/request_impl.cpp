@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "core/request_impl.h"
 
 #include <chrono>
@@ -69,7 +69,7 @@ bool RequestImpl::on_subop_complete(CompletionEvent const& ev) {
     error_.may_have_modified_target = ev.may_have_modified_target;
   }
   ++completed_subops_;
-  // 只有当已接受的子操作全部回报后，才谈得上整体完成。
+  /* Complete only once every accepted sub-operation has reported. */
   uint32_t const expected =
       accepted_subops_ > 0 ? accepted_subops_ : total_subops_;
   return completed_subops_ >= expected;
@@ -91,8 +91,8 @@ Status RequestImpl::wait(int64_t timeout_ms) {
   } else {
     bool got = cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms),
                             [this] { return terminal_locked(); });
-    // 超时只是本次等待结束：请求仍在途，不取消、不解除注册，
-    // 更不表示 DMA 已经停止。调用方要终止它必须显式 cancel()。
+    /* A timeout ends this wait only: the request is still in flight, nothing
+     * is cancelled or deregistered, and DMA may well be running. */
     if (!got) return Status::kTimeout;
   }
   if (state_ == RequestState::kCancelled) return Status::kCancelled;
@@ -102,7 +102,7 @@ Status RequestImpl::wait(int64_t timeout_ms) {
 Status RequestImpl::cancel() {
   std::lock_guard<std::mutex> g(mu_);
   if (state_ == RequestState::kSucceeded) {
-    // ready 交接已不可撤回，如实报告取消过迟而不是假装取消成功。
+    /* The ready handoff is irrevocable; report cancel-too-late honestly. */
     return Status::kInvalidArgument;
   }
   if (terminal_locked()) return Status::kOk;
@@ -146,7 +146,7 @@ void RequestImpl::finish_cancelled() {
 Status RequestImpl::wait_on(DeviceStream* stream) {
   if (stream == nullptr) return Status::kInvalidArgument;
   if (device_ == nullptr) return Status::kUnsupported;
-  // 安装依赖后立即返回，不阻塞调用线程等待网络传输。
+  /* Installs the dependency and returns; never blocks on the network. */
   return device_->make_visible(stream, target_addr_, target_bytes_);
 }
 

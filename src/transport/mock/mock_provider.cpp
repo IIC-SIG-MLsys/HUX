@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "transport/mock/mock_provider.h"
 
 #include <algorithm>
@@ -18,8 +18,9 @@ SubmitResult MockProvider::submit(ProviderConnection*,
   for (uint32_t i = 0; i < limit; ++i) {
     SubOp const& op = ops[i];
     if (cfg_.move_data) {
-      // 在同一进程内模拟单边传输：remote_addr 是对端"虚拟地址"，
-      // 测试里两端在同一地址空间，因此可以直接搬。真实 provider 不会这样做。
+      /* One-sided transfer simulated in-process: both ends share an address
+       * space in tests, so remote_addr can be dereferenced. A real provider
+       * never does this. */
       void* dst = op.kind == SubOp::Kind::kRead
                       ? op.local_addr
                       : reinterpret_cast<void*>(op.remote_addr);
@@ -53,7 +54,7 @@ Status MockProvider::poll(uint32_t max_events,
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
   std::lock_guard<std::mutex> g(mu_);
-  // 整批交出：取到多少给多少，不做"遇到某个目标就提前返回"。
+  /* Hand over the whole batch; never return early on a matching entry. */
   while (!pending_.empty() && out->size() < max_events) {
     out->push_back(pending_.front());
     pending_.pop_front();

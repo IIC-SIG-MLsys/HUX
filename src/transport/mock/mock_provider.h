@@ -1,8 +1,9 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 //
-// 无硬件 provider。它存在的意义不是"假装能传数据"，而是让那些**在真实硬件上
-// 极难构造**的情形变成确定性用例：乱序完成、部分提交失败、一批 CQE 里混着
-// 多个请求、完成比提交先到等等。这些正是旧实现里出过错的地方。
+/* Hardware-free provider. Its point is not to pretend to move data, but to
+ * make the situations that are hard to stage on real hardware deterministic:
+ * out-of-order completions, partial submits, one CQ batch mixing several
+ * requests. Those are exactly where earlier implementations went wrong. */
 #ifndef HUX_TRANSPORT_MOCK_PROVIDER_H
 #define HUX_TRANSPORT_MOCK_PROVIDER_H
 
@@ -20,16 +21,15 @@ namespace hux {
 struct MockConfig {
   uint32_t qp_count = 1;
   uint32_t submit_capacity = 1024;
-  // 每次 submit 最多接受这么多个 SubOp；0 表示不限制。
-  // 用来构造"部分 post 失败"。
+  /* Cap on accepted SubOps per submit, 0 for no cap; stages partial posts. */
   uint32_t accept_limit = 0;
   Status submit_status_on_partial = Status::kResourceExhausted;
-  // 打乱完成事件顺序，验证 core 不依赖 CQE 的到达次序。
+  /* Shuffles completions to prove core does not rely on CQE order. */
   bool shuffle_completions = false;
-  // 让指定 sub_id 的完成报错。
+  /* Makes completions report an error. */
   bool fail_subops = false;
   Status subop_error = Status::kTransportError;
-  // 真实搬运数据，便于端到端校验；关掉则只走记账路径。
+  /* Actually move bytes so tests can verify content end to end. */
   bool move_data = true;
 };
 
@@ -64,8 +64,8 @@ class MockProvider : public TransportProvider {
     uint64_t key = next_key_++;
     regions_[key] = {addr, length};
     *local_key = key;
-    // 故意让 rkey != lkey：旧实现拿 lkey 当 rkey 导出，在两者偶然相等的
-    // 设备上能跑通，换一台就坏。这里让它们必然不同，把问题暴露在测试里。
+    /* Deliberately rkey != lkey, so that exporting the lkey by mistake fails
+     * here rather than on the one device where they happen to match. */
     *remote_key = key + kRemoteKeyOffset;
     return Status::kOk;
   }
@@ -92,7 +92,7 @@ class MockProvider : public TransportProvider {
   Status flush(ProviderConnection*) override { return Status::kOk; }
   Status drain(ProviderConnection*, int64_t) override { return Status::kOk; }
 
-  // --- 测试辅助 ---
+  /* Test helpers. */
   size_t pending() const {
     std::lock_guard<std::mutex> g(mu_);
     return pending_.size();

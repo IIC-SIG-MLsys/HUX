@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #ifndef HUX_CORE_ENGINE_IMPL_H
 #define HUX_CORE_ENGINE_IMPL_H
 
@@ -37,7 +37,7 @@ class PeerImpl : public Peer {
 
   ProviderConnection* conn() const { return conn_.get(); }
   ProviderConnectionPtr conn_ptr() const { return conn_; }
-  // 断连时递增 epoch，旧请求不会被转移到新连接上重试。
+  /* Bumping the epoch keeps old requests off a new connection. */
   void bump_epoch() {
     epoch_.fetch_add(1, std::memory_order_acq_rel);
     connected_.store(false, std::memory_order_release);
@@ -97,7 +97,7 @@ class EngineImpl : public Engine {
   Status record_event(DeviceStream* stream, DeviceEventPtr* out) override;
   Status close(int64_t timeout_ms) override;
 
-  // 供 PeerImpl 使用
+  /* For PeerImpl. */
   TransportProvider* provider() const { return provider_.get(); }
 
  private:
@@ -105,7 +105,7 @@ class EngineImpl : public Engine {
                        std::vector<RegionView> const& remote,
                        TransferOptions const& opts, SubOp::Kind kind,
                        RequestPtr* out);
-  // 把配对好的分段按 chunk_bytes 切成 SubOp。
+  /* Splits paired segments into SubOps of at most chunk_bytes. */
   Status build_subops(std::vector<RegionView> const& local,
                       std::vector<RegionView> const& remote, SubOp::Kind kind,
                       RequestId req, std::vector<SubOp>* out,

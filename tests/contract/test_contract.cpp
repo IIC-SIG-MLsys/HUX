@@ -1,8 +1,10 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
-//
-// M0 契约测试：覆盖 roadmap §14「无硬件 core/mock」那一列。
-// 这些用例刻意针对旧实现出过错的地方——乱序完成、部分 post、lkey 顶替 rkey、
-// 超时被当成取消——把它们变成会失败的测试，而不是靠人读代码发现。
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+ *
+ * M0 contract tests, covering the hardware-free core/mock column of the
+ * roadmap's verification matrix. The cases deliberately target where earlier
+ * implementations went wrong -- out-of-order completions, partial posts, an
+ * lkey exported in place of an rkey, a timeout mistaken for a cancellation --
+ * so those show up as failing tests instead of during a code read. */
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -27,8 +29,9 @@ struct Fixture {
   PeerPtr peer;
   RemoteRegionPtr remote_src;
 
-  // 搭一个可跑的最小环境：两块本地内存，一块当本地区域，另一块当"对端"区域。
-  // mock provider 在同一地址空间里搬数据，因此可以做逐字节校验。
+  /* Minimal working setup: two local buffers, one acting as the local region
+   * and one as the peer's. The mock moves bytes within one address space, so
+   * content can be verified directly. */
   bool setup(EngineConfig cfg = {}, MockConfig mock = {}, size_t bytes = 4096) {
     provider = std::make_shared<MockProvider>(mock);
     if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk) return false;
@@ -51,7 +54,8 @@ struct Fixture {
     return true;
   }
 
-  // 把请求推进到终态。显式模式下 poll_completions 内部会驱动 progress。
+  /* Drives the request to a terminal state; in explicit mode
+   * poll_completions pumps progress itself. */
   Status drain(RequestPtr const& req, int64_t ms = 2000) {
     std::vector<RequestPtr> done;
     for (int i = 0; i < 2000; ++i) {
@@ -73,14 +77,14 @@ EngineConfig explicit_cfg() {
 
 }  // namespace
 
-// ---- 描述符编解码 ----
+/* ---- Descriptor codec ---- */
 
 HUX_TEST(descriptor_roundtrip) {
   RegionDescriptor d;
   d.region = 42;
   d.generation = 7;
   d.base = 0x7f0000001000ull;
-  d.length = 1ull << 33;  // >4GiB，验证 64 位字段没被截断
+  d.length = 1ull << 33;  /* >4 GiB: catches a truncated 64-bit field. */
   d.remote_key = 0xdeadbeefull;
   d.device_kind = DeviceKind::kCambricon;
   d.device_index = 3;
@@ -103,7 +107,7 @@ HUX_TEST(descriptor_rejects_incompatible_major) {
   RegionDescriptor d;
   std::vector<uint8_t> buf;
   encode_descriptor(d, &buf);
-  buf[0] = static_cast<uint8_t>(kDescriptorMajor + 1);  // 改 major
+  buf[0] = static_cast<uint8_t>(kDescriptorMajor + 1);
   RegionDescriptor got;
   CHECK_STATUS(decode_descriptor(buf, &got), Status::kUnsupported);
 }
@@ -117,20 +121,21 @@ HUX_TEST(descriptor_rejects_truncated) {
   CHECK_STATUS(decode_descriptor(buf, &got), Status::kInvalidArgument);
 }
 
-// ---- 范围检查 ----
+/* ---- Range checks ---- */
 
 HUX_TEST(view_rejects_overflow) {
   Fixture f;
   CHECK(f.setup(explicit_cfg()));
   RegionView v;
-  // offset + length 回绕。先比较再相加的写法能挡住，直接相加的写法会放行。
+  /* offset + length wraps. Comparing before adding catches it; adding first
+   * lets it through. */
   CHECK_STATUS(f.src_region->view(0xffffffffffffff00ull, 0x200, &v),
                Status::kOutOfRange);
   CHECK_STATUS(f.src_region->view(4000, 1000, &v), Status::kOutOfRange);
   CHECK_STATUS(f.src_region->view(0, 4096, &v), Status::kOk);
 }
 
-// ---- 基本传输与数据正确性 ----
+/* ---- Basic transfers and data correctness ---- */
 
 HUX_TEST(read_moves_data) {
   Fixture f;
@@ -162,7 +167,7 @@ HUX_TEST(readv_pairs_segments) {
   CHECK_STATUS(f.drain(req), Status::kOk);
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 1024), 0);
   CHECK_EQ(std::memcmp(f.dst.data() + 2048, f.src.data() + 2048, 1024), 0);
-  // 没被传的那段必须还是 0——否则说明分段边界算错了。
+  /* The untouched gap must stay zero, or a segment boundary is wrong. */
   for (size_t i = 1024; i < 2048; ++i) CHECK_EQ(f.dst[i], 0);
 }
 
@@ -177,11 +182,11 @@ HUX_TEST(mismatched_segment_lengths_rejected) {
                Status::kInvalidArgument);
 }
 
-// ---- 分片：chunk 边界 ----
+/* ---- Chunking ---- */
 
 HUX_TEST(chunking_covers_whole_range) {
   EngineConfig cfg = explicit_cfg();
-  cfg.chunk_bytes = 512;  // 4096 字节会被切成 8 个 chunk
+  cfg.chunk_bytes = 512;  /* 4096 bytes becomes 8 chunks. */
   Fixture f;
   CHECK(f.setup(cfg));
   RegionView local, remote;
@@ -195,13 +200,13 @@ HUX_TEST(chunking_covers_whole_range) {
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
 }
 
-// ---- 乱序完成 ----
+/* ---- Out-of-order completions ---- */
 
 HUX_TEST(out_of_order_completions_aggregate_correctly) {
   EngineConfig cfg = explicit_cfg();
-  cfg.chunk_bytes = 256;  // 16 个 chunk
+  cfg.chunk_bytes = 256;  /* 16 chunks. */
   MockConfig mock;
-  mock.shuffle_completions = true;  // 打乱 CQE 顺序
+  mock.shuffle_completions = true;
   Fixture f;
   CHECK(f.setup(cfg, mock));
   RegionView local, remote;
@@ -211,11 +216,11 @@ HUX_TEST(out_of_order_completions_aggregate_correctly) {
   CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
                Status::kOk);
   CHECK_STATUS(f.drain(req), Status::kOk);
-  // 乱序不能影响聚合结果：必须等全部 16 个子操作回报才算成功。
+  /* Order must not affect aggregation: success needs all 16 to report. */
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
 }
 
-// ---- 一批 CQE 里混着多个请求 ----
+/* ---- One CQ batch spanning several requests ---- */
 
 HUX_TEST(batch_poll_does_not_drop_other_requests) {
   EngineConfig cfg = explicit_cfg();
@@ -233,19 +238,19 @@ HUX_TEST(batch_poll_does_not_drop_other_requests) {
                  Status::kOk);
     reqs.push_back(r);
   }
-  // 旧实现"取得一批 CQE 后遇到目标即返回"会丢掉同批其他请求的完成，
-  // 表现为这里有请求永远不终态。
+  /* Returning early on a matching entry drops the other requests in the same
+   * batch, which shows up as a request that never reaches a terminal state. */
   for (auto& r : reqs) CHECK_STATUS(f.drain(r), Status::kOk);
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
 }
 
-// ---- 部分提交失败 ----
+/* ---- Partial submit ---- */
 
 HUX_TEST(partial_submit_reports_and_keeps_accepted) {
   EngineConfig cfg = explicit_cfg();
-  cfg.chunk_bytes = 512;  // 8 个 chunk
+  cfg.chunk_bytes = 512;  /* 8 chunks. */
   MockConfig mock;
-  mock.accept_limit = 3;  // 只接受前 3 个
+  mock.accept_limit = 3;
   Fixture f;
   CHECK(f.setup(cfg, mock));
   RegionView local, remote;
@@ -253,9 +258,10 @@ HUX_TEST(partial_submit_reports_and_keeps_accepted) {
   CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
   RequestPtr req;
   Status s = f.engine->read(f.peer.get(), local, remote, {}, &req);
-  CHECK_STATUS(s, Status::kOk);  // 有部分被接受，请求算已接受
+  CHECK_STATUS(s, Status::kOk);  /* Partly accepted counts as accepted. */
   CHECK(req != nullptr);
-  // 已接受的部分必须继续 drain，且错误要如实带上"可能已改动目标"。
+  /* The accepted part keeps draining, and the error must carry
+   * may_have_modified_target. */
   f.drain(req, 500);
   CHECK(!req->error().ok());
   CHECK_EQ(f.provider->submitted_subops(), 3u);
@@ -268,8 +274,8 @@ HUX_TEST(full_submit_rejection_has_no_side_effect) {
   mock.submit_status_on_partial = Status::kResourceExhausted;
   Fixture f;
   CHECK(f.setup(cfg, mock));
-  // accept_limit=0 在 mock 里表示"不限制"，这里换成显式构造全拒绝的场景：
-  // 用一个长度为 0 的请求触发参数校验，确认没有任何子操作被提交。
+  /* accept_limit = 0 means unlimited in the mock, so full rejection is staged
+   * with a zero-length request: nothing may reach the provider. */
   RegionView local, remote;
   CHECK_STATUS(f.dst_region->view(0, 0, &local), Status::kOk);
   CHECK_STATUS(f.remote_src->view(0, 0, &remote), Status::kOk);
@@ -278,7 +284,7 @@ HUX_TEST(full_submit_rejection_has_no_side_effect) {
   CHECK_EQ(f.provider->submitted_subops(), 0u);
 }
 
-// ---- 提交队列上限 ----
+/* ---- Submission queue bound ---- */
 
 HUX_TEST(queue_full_returns_would_block) {
   EngineConfig cfg = explicit_cfg();
@@ -299,12 +305,12 @@ HUX_TEST(queue_full_returns_would_block) {
     if (last != Status::kOk) break;
     reqs.push_back(r);
   }
-  // 队列满时必须是 WOULD_BLOCK —— 表示逻辑请求未被接受、无网络副作用，
-  // 与"传输失败"是两回事，调用方对两者的反应完全不同。
+  /* A full queue must yield kWouldBlock: not accepted, no side effect. That
+   * is a different thing from a failed transfer. */
   CHECK_STATUS(last, Status::kWouldBlock);
 }
 
-// ---- 取消与超时 ----
+/* ---- Cancel and timeout ---- */
 
 HUX_TEST(timeout_does_not_cancel_request) {
   EngineConfig cfg = explicit_cfg();
@@ -319,14 +325,14 @@ HUX_TEST(timeout_does_not_cancel_request) {
   CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
                Status::kOk);
 
-  // 不驱动 progress，请求停在 inflight。
+  /* Without progress the request stays in flight. */
   CHECK_STATUS(req->wait(10), Status::kTimeout);
-  // 超时之后请求必须仍然存活：既没被取消，也没进终态。
+  /* After the timeout the request is still alive and not terminal. */
   bool done = true;
   CHECK_STATUS(req->test(&done), Status::kOk);
   CHECK_EQ(done, false);
   CHECK(req->state() != RequestState::kCancelled);
-  // 重复 wait 返回一致结果。
+  /* Repeated waits agree. */
   CHECK_STATUS(req->wait(10), Status::kTimeout);
 }
 
@@ -351,7 +357,7 @@ HUX_TEST(cancel_reaches_cancelled_safe) {
     if (req->state() == RequestState::kCancelled) break;
   }
   CHECK(req->state() == RequestState::kCancelled);
-  // 取消成功的请求不得再发布成功 ready。
+  /* A cancelled request must never publish a success ready. */
   CHECK(req->reached(Stage::kCancelledSafe));
   CHECK(!req->reached(Stage::kTargetReady));
 }
@@ -366,11 +372,12 @@ HUX_TEST(cancel_after_success_reports_too_late) {
   CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
                Status::kOk);
   CHECK_STATUS(f.drain(req), Status::kOk);
-  // ready 交接已不可撤回，必须明确报告取消过迟，而不是假装取消成功。
+  /* The handoff is irrevocable, so report cancel-too-late rather than
+   * pretending it worked. */
   CHECK_STATUS(req->cancel(), Status::kInvalidArgument);
 }
 
-// ---- 传输错误 ----
+/* ---- Transfer errors ---- */
 
 HUX_TEST(subop_error_marks_may_have_modified_target) {
   EngineConfig cfg = explicit_cfg();
@@ -387,12 +394,13 @@ HUX_TEST(subop_error_marks_may_have_modified_target) {
                Status::kOk);
   f.drain(req, 500);
   CHECK(!req->error().ok());
-  // 批量传输不承诺原子性，失败可能已改了部分目标，这一位必须传上来。
+  /* Batches are not atomic, so a failure may have changed part of the
+   * target; that bit has to reach the caller. */
   CHECK_EQ(req->error().may_have_modified_target, true);
   CHECK(req->reached(Stage::kFailedSafe));
 }
 
-// ---- region 生命周期 ----
+/* ---- Region lifetime ---- */
 
 HUX_TEST(retired_region_rejects_new_submits) {
   Fixture f;
@@ -400,7 +408,7 @@ HUX_TEST(retired_region_rejects_new_submits) {
   RegionView local, remote;
   CHECK_STATUS(f.dst_region->view(0, 256, &local), Status::kOk);
   CHECK_STATUS(f.remote_src->view(0, 256, &remote), Status::kOk);
-  // 注销第一步是阻止新提交。
+  /* Deregistration blocks new submissions first. */
   std::static_pointer_cast<MemoryRegionImpl>(f.dst_region)->retire();
   RequestPtr req;
   CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
@@ -415,7 +423,7 @@ HUX_TEST(invalidated_remote_region_rejects_view) {
   CHECK_STATUS(f.remote_src->view(0, 256, &v), Status::kStaleGeneration);
 }
 
-// ---- rkey / lkey ----
+/* ---- rkey vs lkey ---- */
 
 HUX_TEST(exported_descriptor_uses_remote_key_not_local) {
   Fixture f;
@@ -425,13 +433,13 @@ HUX_TEST(exported_descriptor_uses_remote_key_not_local) {
   CHECK_STATUS(impl->export_descriptor(&desc), Status::kOk);
   RegionDescriptor d;
   CHECK_STATUS(decode_descriptor(desc, &d), Status::kOk);
-  // mock 刻意让 rkey != lkey。导出的必须是 rkey——
-  // 旧实现拿 lkey 顶替，在两者偶然相等的设备上能跑通，换一台就坏。
+  /* The mock keeps rkey != lkey, so exporting the lkey by mistake fails here
+   * rather than on the one device where the two coincide. */
   CHECK_EQ(d.remote_key, impl->remote_key());
   CHECK(d.remote_key != impl->local_key());
 }
 
-// ---- 两种 progress 模式 ----
+/* ---- Both progress modes ---- */
 
 HUX_TEST(thread_progress_mode_completes_without_explicit_poll) {
   EngineConfig cfg;
@@ -444,12 +452,12 @@ HUX_TEST(thread_progress_mode_completes_without_explicit_poll) {
   RequestPtr req;
   CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
                Status::kOk);
-  // 线程模式下不能依赖"调用方恰好调了 wait 才推进"。
+  /* Thread mode must not depend on the caller happening to call wait(). */
   CHECK_STATUS(req->wait(3000), Status::kOk);
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
 }
 
-// ---- 并发提交 ----
+/* ---- Concurrent submission ---- */
 
 HUX_TEST(concurrent_submits_are_accounted_correctly) {
   EngineConfig cfg;
@@ -481,7 +489,7 @@ HUX_TEST(concurrent_submits_are_accounted_correctly) {
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), kThreads * kPerThread * 256), 0);
 }
 
-// ---- 配置校验 ----
+/* ---- Configuration validation ---- */
 
 HUX_TEST(config_rejects_conflicting_parameters) {
   std::string why;
@@ -493,7 +501,7 @@ HUX_TEST(config_rejects_conflicting_parameters) {
   EngineConfig c2;
   c2.cc = CongestionControl::kFixedWindow;
   c2.chunk_bytes = 1 << 20;
-  c2.cc_window_bytes = 1024;  // 窗口比 chunk 还小，每个请求都会卡住
+  c2.cc_window_bytes = 1024;  /* Smaller than a chunk: every request stalls. */
   CHECK_STATUS(c2.validate(&why), Status::kInvalidArgument);
 
   EngineConfig ok_cfg;
@@ -501,7 +509,7 @@ HUX_TEST(config_rejects_conflicting_parameters) {
   CHECK(why.empty());
 }
 
-// ---- close ----
+/* ---- close ---- */
 
 HUX_TEST(close_drains_then_succeeds) {
   Fixture f;
@@ -513,7 +521,7 @@ HUX_TEST(close_drains_then_succeeds) {
   CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
                Status::kOk);
   CHECK_STATUS(f.engine->close(2000), Status::kOk);
-  // close 之后不再接受新任务。
+  /* No new work is accepted after close. */
   RequestPtr req2;
   CHECK(f.engine->read(f.peer.get(), local, remote, {}, &req2) != Status::kOk);
 }

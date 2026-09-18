@@ -1,4 +1,4 @@
-// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+/* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #ifndef HUX_CORE_REQUEST_IMPL_H
 #define HUX_CORE_REQUEST_IMPL_H
 
@@ -16,10 +16,9 @@ namespace hux {
 
 class DeviceBackend;
 
-// 一次逻辑请求的内部状态。
-//
-// 它持有 Region 与连接的引用直到安全释放为止：调用方提前丢掉 RequestPtr
-// 不会让底层资源在 DMA 还在进行时被回收。
+/* Internal state of one logical request. It holds references to its regions
+ * and connection until they are safe to release, so dropping the RequestPtr
+ * early cannot free memory that is still under DMA. */
 class RequestImpl : public Request {
  public:
   RequestImpl(RequestId id, SubOp::Kind kind, uint32_t total_subops,
@@ -36,20 +35,21 @@ class RequestImpl : public Request {
   ErrorInfo const& error() const override { return error_; }
   void* context() const override { return context_; }
 
-  // --- 以下供 core 内部推进状态，不属于公共接口 ---
+  /* Internal state transitions below; not part of the public interface. */
 
   SubOp::Kind kind() const { return kind_; }
-  // 是否已被取消请求过。已提交的子操作仍需 drain。
+  /* Cancellation requested; posted sub-operations still have to drain. */
   bool cancel_requested() const;
 
   void set_state(RequestState s);
   void mark_stage(Stage s);
 
-  // 记录一个子操作完成。返回 true 表示这是最后一个未决子操作。
-  // **完成聚合必须按实际子操作计数**，不能凭某一条 QP 上的单个 signal 推断整体。
+  /* Returns true when this was the last outstanding sub-operation.
+   * Aggregation counts actual sub-operations; a single signalled WR on one
+   * QP proves nothing about the others. */
   bool on_subop_complete(CompletionEvent const& ev);
 
-  // 记录已被 provider 接受的子操作数。部分提交失败时只回滚未接受部分。
+  /* How many the provider accepted; a partial submit rolls back only the rest. */
   void set_accepted_subops(uint32_t n);
   uint32_t accepted_subops() const;
   uint32_t total_subops() const { return total_subops_; }
@@ -79,7 +79,7 @@ class RequestImpl : public Request {
   uint32_t completed_subops_ = 0;
   uint32_t accepted_subops_ = 0;
   bool cancel_requested_ = false;
-  // 位图：每个 Stage 一位。reached() 查它，保证重复查询返回一致结果。
+  /* One bit per Stage, so reached() is stable across repeated queries. */
   uint32_t stages_ = 0;
   ErrorInfo error_;
 
