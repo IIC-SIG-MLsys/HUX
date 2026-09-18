@@ -51,10 +51,13 @@ over; the public API does not. HMC remains available for existing callers.
 
 ## Status
 
-Under construction. The public API, the completion contract, the provider
-contract, a mock backend and the hardware-free test suite are in place. No real
-transport backend is wired up yet; `notify` and the write-side ready handoff
-are not implemented.
+Under construction. In place: the public API, the completion contract, the
+provider contract, a mock backend, device backends for all five targets above,
+and a test suite that runs without hardware. Not yet: any real transport
+provider, `notify`, and the write-side ready handoff.
+
+The RDMA provider will be written rather than delegated to UCCL; the measured
+reasoning is in [docs/decisions/0001-rdma-provider.md](docs/decisions/0001-rdma-provider.md).
 
 ## Building
 
