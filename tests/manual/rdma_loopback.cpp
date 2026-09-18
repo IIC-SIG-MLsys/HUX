@@ -418,10 +418,12 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
                 st.subops_posted == st.subops_completed + st.subops_failed
                     ? "   (balanced)"
                     : "   *** UNBALANCED ***");
-    std::printf("   congestion control: %s window=%llu B, deferred=%llu\n",
-                cc->name(),
-                (unsigned long long)cc->window_bytes(CcDirection::kWrite),
-                (unsigned long long)st.submit_deferred);
+    std::printf(
+        "   congestion control: %s window=%llu B rate=%.1f MB/s,"
+        " deferred=%llu\n",
+        cc->name(), (unsigned long long)cc->window_bytes(CcDirection::kWrite),
+        cc->rate_bytes_per_sec(CcDirection::kWrite) / 1e6,
+        (unsigned long long)st.submit_deferred);
     std::printf("   requests: accepted=%llu succeeded=%llu failed=%llu\n",
                 (unsigned long long)st.requests_accepted,
                 (unsigned long long)st.requests_succeeded,
@@ -539,6 +541,8 @@ int main(int argc, char** argv) {
     std::string spec = argv[i + 1];
     if (spec.rfind("fixed:", 0) == 0)
       cc = make_cc_fixed_window(std::strtoull(spec.c_str() + 6, nullptr, 10));
+    else if (spec == "timely")
+      cc = make_cc_timely();
   }
 
   if (std::strcmp(argv[1], "server") == 0) return run_server(gpu, qps, cc);

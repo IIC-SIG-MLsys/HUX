@@ -58,10 +58,10 @@ directions with no buffer owned by the library anywhere on the path.
 In place: the public API, the completion contract, the provider contract, a
 single-QP RDMA provider, device dependencies, the write-side ready handoff,
 an engine-level control channel, acknowledged notifications, copy accounting,
-multiple queue pairs with per-queue accounting, byte-window congestion
-control, a mock backend, device backends for all five targets above, and a
-test suite that runs without hardware. Not yet: an adaptive controller, fair
-scheduling across peers, Python bindings, and paths other than RDMA.
+multiple queue pairs with per-queue accounting, three congestion control
+configurations, byte-quantum scheduling between requests, a mock backend,
+device backends for all five targets above, and a test suite that runs without
+hardware. Not yet: Python bindings, multiple NICs, and paths other than RDMA.
 
 Control traffic runs on its own channel rather than sharing the data path's
 budget, so a stalled transfer cannot starve the message that would explain
@@ -134,6 +134,10 @@ tests:
   stalls with nothing to wait for.
 * **Out of budget is not a failure.** The remainder is offered again later;
   dropping it would lose data the caller believes is on its way.
+* **The delay a controller reacts to is not a network round trip.** It is
+  measured from the post to its completion, so it includes serialization,
+  queueing at the NIC and host, and polling delay. The algorithm works on it;
+  results must not be labelled as RTT.
 
 ## Layout
 
