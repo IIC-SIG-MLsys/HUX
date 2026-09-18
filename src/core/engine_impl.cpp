@@ -265,6 +265,53 @@ Status EngineImpl::build_subops(std::vector<RegionView> const& local,
   return Status::kOk;
 }
 
+bool EngineImpl::dependencies_met(
+    std::vector<DeviceEventPtr> const& after) const {
+  for (auto const& e : after) {
+    if (e == nullptr) continue;
+    /* Never recorded means it captures no work at all; waiting on it would
+     * order nothing, so it can never count as satisfied. */
+    if (!e->recorded()) return false;
+    bool complete = false;
+    if (e->query(&complete) != Status::kOk) return false;
+    if (!complete) return false;
+  }
+  return true;
+}
+
+/* Hands the sub-operations to the provider and records how many it took. */
+void EngineImpl::post_ops(PendingSubmit* p) {
+  p->req->set_state(RequestState::kInflight);
+  SubmitResult sr = provider_->submit(p->conn.get(), p->ops);
+  p->req->set_accepted_subops(sr.accepted);
+
+  if (sr.accepted == 0 && sr.status != Status::kOk) {
+    ErrorInfo e;
+    e.status = sr.status;
+    e.provider = provider_->caps().name;
+    e.peer_id = p->peer;
+    e.provider_errno = sr.provider_errno;
+    e.detail = "submit rejected";
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      inflight_.erase(p->req->id());
+      completed_.push_back(p->req);
+    }
+    p->req->fail(e);
+    return;
+  }
+  if (sr.accepted < p->ops.size()) {
+    ErrorInfo e;
+    e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
+    e.provider = provider_->caps().name;
+    e.peer_id = p->peer;
+    e.provider_errno = sr.provider_errno;
+    e.may_have_modified_target = true;
+    e.detail = "partial submit";
+    p->req->fail(e);
+  }
+}
+
 Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& local,
                                  std::vector<RegionView> const& remote,
                                  TransferOptions const& opts, SubOp::Kind kind,
@@ -306,42 +353,29 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
     inflight_[req_id] = req;
   }
 
-  req->set_state(RequestState::kInflight);
-  SubmitResult sr = provider_->submit(p->conn(), ops);
-  req->set_accepted_subops(sr.accepted);
+  PendingSubmit ps;
+  ps.req = req;
+  ps.ops = std::move(ops);
+  ps.conn = p->conn_ptr();
+  ps.peer = p->id();
+  ps.after = opts.after;
 
-  if (sr.accepted == 0 && sr.status != Status::kOk) {
-    /* Nothing was accepted, so there is no side effect to drain. */
-    ErrorInfo e;
-    e.status = sr.status;
-    e.provider = provider_->caps().name;
-    e.peer_id = p->id();
-    e.provider_errno = sr.provider_errno;
-    e.detail = "submit rejected";
+  if (!ps.after.empty() && !dependencies_met(ps.after)) {
+    /* The request is accepted and handed back now; only its submission waits,
+     * so the calling thread never blocks on the device. */
+    req->set_state(RequestState::kWaitDependency);
     {
       std::lock_guard<std::mutex> g(mu_);
-      inflight_.erase(req_id);
+      pending_.push_back(std::move(ps));
     }
-    req->fail(e);
     *out = req;
-    return sr.status;
-  }
-  if (sr.accepted < ops.size()) {
-    /* Partial submit: roll back only what was refused. The accepted part keeps
-     * draining and aggregates against the accepted count, so no chunk is lost
-     * and none is sent twice. */
-    ErrorInfo e;
-    e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
-    e.provider = provider_->caps().name;
-    e.peer_id = p->id();
-    e.provider_errno = sr.provider_errno;
-    e.may_have_modified_target = true;
-    e.detail = "partial submit";
-    req->fail(e);
+    return Status::kOk;
   }
 
+  post_ops(&ps);
   *out = req;
-  return Status::kOk;
+  if (req->accepted_subops() > 0 || req->error().ok()) return Status::kOk;
+  return req->error().status;
 }
 
 Status EngineImpl::read(Peer* peer, RegionView const& local,
@@ -412,6 +446,25 @@ Status EngineImpl::poll_ready_events(uint32_t /*max_items*/,
 }
 
 Status EngineImpl::progress() {
+  /* Release anything whose device dependencies have since been met. Done
+   * before polling so a request that becomes ready is posted in this same
+   * pass rather than a later one. */
+  {
+    std::vector<PendingSubmit> ready;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      for (auto it = pending_.begin(); it != pending_.end();) {
+        if (dependencies_met(it->after)) {
+          ready.push_back(std::move(*it));
+          it = pending_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    for (auto& p : ready) post_ops(&p);
+  }
+
   std::vector<CompletionEvent> events;
   /* Take and handle the whole batch. The provider contract requires every
    * event it collected; returning early drops other requests' completions. */

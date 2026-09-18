@@ -111,6 +111,22 @@ class EngineImpl : public Engine {
                       RequestId req, std::vector<SubOp>* out,
                       std::vector<MemoryRegionPtr>* held, void** target_addr,
                       uint64_t* target_bytes);
+  /* A request whose device dependencies have not been met yet. It is admitted
+   * and returned to the caller immediately -- submission is what waits, not
+   * the calling thread. */
+  struct PendingSubmit {
+    RequestImplPtr req;
+    std::vector<SubOp> ops;
+    ProviderConnectionPtr conn;
+    PeerId peer = 0;
+    std::vector<DeviceEventPtr> after;
+  };
+
+  /* Returns true once every event has been recorded and completed. An
+   * unrecorded event captures no work, so treating it as satisfied would
+   * release the NIC against data that does not exist yet. */
+  bool dependencies_met(std::vector<DeviceEventPtr> const& after) const;
+  void post_ops(PendingSubmit* p);
   std::shared_ptr<MemoryRegionImpl> find_region(RegionId id) const;
   std::shared_ptr<RemoteRegionImpl> find_remote(RegionId id) const;
   void progress_loop();
@@ -125,6 +141,7 @@ class EngineImpl : public Engine {
   std::unordered_map<PeerId, std::shared_ptr<PeerImpl>> peers_;
   std::unordered_map<RequestId, RequestImplPtr> inflight_;
   std::deque<RequestPtr> completed_;
+  std::deque<PendingSubmit> pending_;
   std::deque<Notification> notifications_;
 
   std::atomic<uint64_t> next_region_{1};
