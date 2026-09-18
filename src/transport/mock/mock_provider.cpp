@@ -51,7 +51,7 @@ SubmitResult MockProvider::submit(ProviderConnection*,
     ev.status = cfg_.fail_subops ? cfg_.subop_error : Status::kOk;
     ev.may_have_modified_target =
         cfg_.fail_subops && op.kind == SubOp::Kind::kWrite;
-    pending_.push_back(ev);
+    if (!cfg_.never_complete) pending_.push_back(ev);
     ++submitted_;
     ++stats_.subops_posted;
     stats_.payload_bytes += op.length;

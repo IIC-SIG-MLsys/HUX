@@ -68,6 +68,22 @@ Status decode_u64(std::vector<uint8_t> const& in, uint64_t* out) {
   return Status::kOk;
 }
 
+void encode_region_invalidate(RegionInvalidateBody const& b,
+                              std::vector<uint8_t>* out) {
+  out->assign(kRegionInvalidateBytes, 0);
+  put_u64(out->data(), b.region);
+  put_u32(out->data() + 8, b.generation);
+}
+
+Status decode_region_invalidate(std::vector<uint8_t> const& in,
+                                RegionInvalidateBody* out) {
+  if (out == nullptr || in.size() != kRegionInvalidateBytes)
+    return Status::kInvalidArgument;
+  out->region = get_u64(in.data());
+  out->generation = get_u32(in.data() + 8);
+  return Status::kOk;
+}
+
 void encode_ready_handoff(ReadyHandoffBody const& b,
                           std::vector<uint8_t>* out) {
   out->assign(kReadyHandoffBytes, 0);

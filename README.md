@@ -59,7 +59,8 @@ In place: the public API, the completion contract, the provider contract, a
 single-QP RDMA provider, device dependencies, the write-side ready handoff,
 an engine-level control channel, acknowledged notifications, copy accounting,
 multiple queue pairs with per-queue accounting, three congestion control
-configurations, byte-quantum scheduling between requests, a mock backend,
+configurations, byte-quantum scheduling between requests, registration reuse,
+peer and region invalidation, a mock backend,
 device backends for all five targets above, and a test suite that runs without
 hardware. Not yet: Python bindings, multiple NICs, and paths other than RDMA.
 

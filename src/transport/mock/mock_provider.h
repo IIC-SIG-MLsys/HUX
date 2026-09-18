@@ -34,6 +34,9 @@ struct MockConfig {
   /* Cap on bytes in flight, 0 for none. Stands in for a congestion window so
    * contention between requests can be reproduced without hardware. */
   uint64_t budget_bytes = 0;
+  /* Accept work and never complete it, so a close that must report a timeout
+   * has something outstanding to wait on. */
+  bool never_complete = false;
 };
 
 class MockConnection : public ProviderConnection {

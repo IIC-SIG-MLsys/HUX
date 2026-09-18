@@ -50,6 +50,20 @@ constexpr size_t kNotificationHeaderBytes = 8;
 void encode_u64(uint64_t v, std::vector<uint8_t>* out);
 Status decode_u64(std::vector<uint8_t> const& in, uint64_t* out);
 
+/* Body of a kRegionInvalidate: which region, and at which generation. The
+ * generation matters because an id can be reused, and a notice for an older
+ * incarnation must not retire a newer one. */
+struct RegionInvalidateBody {
+  uint64_t region = 0;
+  uint32_t generation = 0;
+};
+constexpr size_t kRegionInvalidateBytes = 8 + 4;
+
+void encode_region_invalidate(RegionInvalidateBody const& b,
+                              std::vector<uint8_t>* out);
+Status decode_region_invalidate(std::vector<uint8_t> const& in,
+                                RegionInvalidateBody* out);
+
 struct ControlHeader {
   uint16_t major = kControlMajor;
   uint16_t minor = kControlMinor;

@@ -214,6 +214,27 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
     if (!inflight_.empty()) return Status::kWouldBlock;
     regions_.erase(impl->id());
   }
+  /* Peers holding a descriptor for this region are told to stop using it.
+   * Without the notice they keep submitting against memory this side has
+   * taken back, and find out only when the hardware refuses -- far from here,
+   * and with no way to tell why. */
+  RegionInvalidateBody b;
+  b.region = impl->id();
+  b.generation = impl->generation();
+  std::vector<uint8_t> payload;
+  encode_region_invalidate(b, &payload);
+  std::vector<std::shared_ptr<PeerImpl>> peers;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto& kv : peers_) peers.push_back(kv.second);
+  }
+  for (auto& p : peers) {
+    if (!p->connected()) continue;
+    provider_->send_control(
+        p->conn(), static_cast<uint16_t>(ControlType::kRegionInvalidate),
+        payload);
+  }
+
   /* The underlying registration is released when the last reference to it
    * goes -- another handle over the same range, or the cache. Releasing it
    * here would pull it out from under a handle still transferring. */
@@ -701,6 +722,21 @@ Status EngineImpl::progress() {
             provider_->send_control(
                 m.conn, static_cast<uint16_t>(ControlType::kNotificationAck),
                 ack);
+          }
+        } else if (static_cast<ControlType>(m.type) ==
+                   ControlType::kRegionInvalidate) {
+          RegionInvalidateBody b;
+          if (decode_region_invalidate(m.payload, &b) != Status::kOk) continue;
+          std::shared_ptr<RemoteRegionImpl> rr;
+          {
+            std::lock_guard<std::mutex> g(mu_);
+            auto it = remotes_.find(b.region);
+            if (it != remotes_.end()) rr = it->second;
+          }
+          /* Only if the generations match: an id can be reused, and a notice
+           * for an older incarnation must not retire a newer one. */
+          if (rr != nullptr && rr->generation() == b.generation) {
+            rr->invalidate();
           }
         } else if (static_cast<ControlType>(m.type) ==
                    ControlType::kNotificationAck) {
