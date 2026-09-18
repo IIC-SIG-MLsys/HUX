@@ -12,7 +12,7 @@
 using namespace hux;
 
 namespace {
-constexpr uint64_t kWindow = 1u << 20;  /* 1 MiB */
+constexpr uint64_t kWindow = 1u << 20; /* 1 MiB */
 CcTime now() { return CcClock::now(); }
 }  // namespace
 
@@ -20,7 +20,8 @@ HUX_TEST(cc_off_never_refuses) {
   auto cc = make_cc_off();
   CHECK(std::string(cc->name()) == "off");
   for (int i = 0; i < 1000; ++i) {
-    CHECK(cc->allow(CcDirection::kWrite, 1u << 20, now()) == CcVerdict::kAllowed);
+    CHECK(cc->allow(CcDirection::kWrite, 1u << 20, now()) ==
+          CcVerdict::kAllowed);
     cc->on_post(CcDirection::kWrite, 1u << 20, now());
   }
   /* It still accounts for what is in flight -- "off" means unlimited, not
@@ -30,9 +31,11 @@ HUX_TEST(cc_off_never_refuses) {
 
 HUX_TEST(fixed_window_refuses_past_its_limit) {
   auto cc = make_cc_fixed_window(kWindow);
-  CHECK(cc->allow(CcDirection::kWrite, kWindow / 2, now()) == CcVerdict::kAllowed);
+  CHECK(cc->allow(CcDirection::kWrite, kWindow / 2, now()) ==
+        CcVerdict::kAllowed);
   cc->on_post(CcDirection::kWrite, kWindow / 2, now());
-  CHECK(cc->allow(CcDirection::kWrite, kWindow / 2, now()) == CcVerdict::kAllowed);
+  CHECK(cc->allow(CcDirection::kWrite, kWindow / 2, now()) ==
+        CcVerdict::kAllowed);
   cc->on_post(CcDirection::kWrite, kWindow / 2, now());
 
   /* Full. */
@@ -47,7 +50,8 @@ HUX_TEST(fixed_window_reopens_on_completion) {
 
   cc->on_feedback(CcDirection::kWrite, kWindow / 2,
                   std::chrono::nanoseconds(1000), now());
-  CHECK(cc->allow(CcDirection::kWrite, kWindow / 2, now()) == CcVerdict::kAllowed);
+  CHECK(cc->allow(CcDirection::kWrite, kWindow / 2, now()) ==
+        CcVerdict::kAllowed);
   CHECK_EQ(cc->inflight_bytes(CcDirection::kWrite), kWindow / 2);
 }
 
@@ -65,7 +69,8 @@ HUX_TEST(an_operation_larger_than_the_window_still_goes_out) {
   /* Otherwise it could never be allowed and the transfer would stall for
    * good. It goes alone, once nothing else is outstanding. */
   auto cc = make_cc_fixed_window(kWindow);
-  CHECK(cc->allow(CcDirection::kWrite, kWindow * 4, now()) == CcVerdict::kAllowed);
+  CHECK(cc->allow(CcDirection::kWrite, kWindow * 4, now()) ==
+        CcVerdict::kAllowed);
   cc->on_post(CcDirection::kWrite, kWindow * 4, now());
   /* While it is in flight nothing else may join it. */
   CHECK(cc->allow(CcDirection::kWrite, 1, now()) == CcVerdict::kOverBudget);
@@ -88,7 +93,8 @@ HUX_TEST(releasing_more_than_is_outstanding_does_not_wrap) {
    * the window would never close again. */
   auto cc = make_cc_fixed_window(kWindow);
   cc->on_post(CcDirection::kWrite, 1024, now());
-  cc->on_feedback(CcDirection::kWrite, 4096, std::chrono::nanoseconds(1), now());
+  cc->on_feedback(CcDirection::kWrite, 4096, std::chrono::nanoseconds(1),
+                  now());
   CHECK_EQ(cc->inflight_bytes(CcDirection::kWrite), 0u);
   CHECK(cc->allow(CcDirection::kWrite, kWindow, now()) == CcVerdict::kAllowed);
 

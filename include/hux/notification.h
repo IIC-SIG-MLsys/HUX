@@ -19,7 +19,7 @@ struct Notification {
   PeerId peer = 0;
   Epoch epoch = 0;
   NotificationId id = 0;
-  RequestId related_request = 0;  /* 0 if not tied to a data transfer. */
+  RequestId related_request = 0; /* 0 if not tied to a data transfer. */
   std::vector<uint8_t> payload;
 };
 
@@ -28,7 +28,7 @@ struct Notification {
  * resend. */
 enum class DeliveryState : uint8_t {
   kPending = 0,
-  kDelivered,      /* Queued at the peer engine, not necessarily handled. */
+  kDelivered, /* Queued at the peer engine, not necessarily handled. */
   kFailed,
   kIndeterminate,
 };

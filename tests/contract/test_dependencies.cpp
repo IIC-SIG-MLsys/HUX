@@ -53,13 +53,16 @@ struct Fixture {
     EngineConfig cfg;
     cfg.progress = ProgressMode::kExplicit;
     provider = std::make_shared<MockProvider>(MockConfig{});
-    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk) return false;
+    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk)
+      return false;
     src.assign(bytes, 0xAB);
     dst.assign(bytes, 0);
     if (engine->register_memory(src.data(), bytes, AccessFlags::kRemoteRead,
-                                &src_region) != Status::kOk) return false;
+                                &src_region) != Status::kOk)
+      return false;
     if (engine->register_memory(dst.data(), bytes, AccessFlags::kLocalWrite,
-                                &dst_region) != Status::kOk) return false;
+                                &dst_region) != Status::kOk)
+      return false;
     std::vector<uint8_t> meta;
     engine->local_metadata(&meta);
     if (engine->add_peer(meta, &peer) != Status::kOk) return false;
@@ -82,7 +85,7 @@ HUX_TEST(pending_dependency_holds_submission_not_the_caller) {
   RegionView lv, rv;
   f.views(&lv, &rv);
 
-  auto ev = std::make_shared<FakeEvent>(true, false);  /* recorded, pending */
+  auto ev = std::make_shared<FakeEvent>(true, false); /* recorded, pending */
   TransferOptions opts;
   opts.after.push_back(ev);
 
@@ -116,7 +119,7 @@ class HipLikeEvent : public DeviceEvent {
   bool recorded() const override { return false; }
   void* native_handle() const override { return nullptr; }
   Status query(bool* complete) override {
-    *complete = true;      /* success for work that was never captured */
+    *complete = true; /* success for work that was never captured */
     return Status::kOk;
   }
 };
@@ -224,7 +227,7 @@ HUX_TEST(a_copying_provider_reports_what_it_copied) {
 
   EngineStats st = f.engine->stats();
   CHECK_EQ(st.payload_bytes, 4096u);
-  CHECK_EQ(st.payload_bytes_copied, 4096u);  /* the mock really copied */
+  CHECK_EQ(st.payload_bytes_copied, 4096u); /* the mock really copied */
   CHECK_EQ(st.requests_accepted, 1u);
   CHECK_EQ(st.requests_succeeded, 1u);
   CHECK(st.subops_posted > 0u);
@@ -242,10 +245,12 @@ HUX_TEST(stats_count_failures_and_would_block_separately) {
 
   std::vector<uint8_t> src(4096, 1), dst(4096, 0);
   MemoryRegionPtr sr, dr;
-  CHECK_STATUS(engine->register_memory(src.data(), 4096, AccessFlags::kRemoteRead, &sr),
-               Status::kOk);
-  CHECK_STATUS(engine->register_memory(dst.data(), 4096, AccessFlags::kLocalWrite, &dr),
-               Status::kOk);
+  CHECK_STATUS(
+      engine->register_memory(src.data(), 4096, AccessFlags::kRemoteRead, &sr),
+      Status::kOk);
+  CHECK_STATUS(
+      engine->register_memory(dst.data(), 4096, AccessFlags::kLocalWrite, &dr),
+      Status::kOk);
   std::vector<uint8_t> meta, desc;
   engine->local_metadata(&meta);
   PeerPtr peer;

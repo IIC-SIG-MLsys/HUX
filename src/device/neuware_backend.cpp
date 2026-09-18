@@ -142,8 +142,7 @@ Status NeuwareBackend::import_stream(void* native_stream,
   return Status::kOk;
 }
 
-Status NeuwareBackend::record_event(DeviceStream* stream,
-                                    DeviceEventPtr* out) {
+Status NeuwareBackend::record_event(DeviceStream* stream, DeviceEventPtr* out) {
   if (stream == nullptr || out == nullptr) return Status::kInvalidArgument;
   auto* s = static_cast<NeuwareStream*>(stream);
   if (s->device().kind != DeviceKind::kCambricon)

@@ -4,14 +4,16 @@
  * has to behave the same way here, which is what keeps "supported" from
  * meaning something different on each device.
  *
- * Built with exactly one of HUX_TEST_ROCM / HUX_TEST_NEUWARE / HUX_TEST_MUSA. */
+ * Built with exactly one of HUX_TEST_ROCM / HUX_TEST_NEUWARE / HUX_TEST_MUSA.
+ */
 #include <memory>
 
 #include "test_main.h"
 
 #if defined(HUX_TEST_ROCM)
-#include "device/rocm_backend.h"
 #include <hip/hip_runtime.h>
+
+#include "device/rocm_backend.h"
 using VendorBackend = hux::RocmBackend;
 using VendorStream = hipStream_t;
 #define VENDOR_NAME "ROCm/DTK"
@@ -23,8 +25,9 @@ using VendorStream = hipStream_t;
 #define VENDOR_STREAM_SYNC(s) (hipStreamSynchronize(s) == hipSuccess)
 
 #elif defined(HUX_TEST_NEUWARE)
-#include "device/neuware_backend.h"
 #include <cnrt.h>
+
+#include "device/neuware_backend.h"
 using VendorBackend = hux::NeuwareBackend;
 using VendorStream = cnrtQueue_t;
 #define VENDOR_NAME "Cambricon"
@@ -36,8 +39,9 @@ using VendorStream = cnrtQueue_t;
 #define VENDOR_STREAM_SYNC(s) (cnrtQueueSync(s) == cnrtSuccess)
 
 #elif defined(HUX_TEST_MUSA)
-#include "device/musa_backend.h"
 #include <musa_runtime.h>
+
+#include "device/musa_backend.h"
 using VendorBackend = hux::MusaBackend;
 using VendorStream = musaStream_t;
 #define VENDOR_NAME "Moore Threads"
@@ -133,7 +137,8 @@ HUX_TEST(vendor_backend_rejects_null_arguments) {
   DeviceId dev;
   MemoryKind mem;
   CHECK_STATUS(b->probe_pointer(nullptr, &dev, &mem), Status::kInvalidArgument);
-  CHECK_STATUS(b->stream_wait_event(nullptr, nullptr), Status::kInvalidArgument);
+  CHECK_STATUS(b->stream_wait_event(nullptr, nullptr),
+               Status::kInvalidArgument);
   DeviceEventPtr e;
   CHECK_STATUS(b->record_event(nullptr, &e), Status::kInvalidArgument);
 }
@@ -155,8 +160,9 @@ HUX_TEST(vendor_backend_states_registration_limits) {
     CHECK(c.max_registration_bytes <= c.max_total_registration_bytes);
   }
 
-  std::printf("       %s: peer_registration=%s single=%llu MiB total=%llu MiB\n",
-              VENDOR_NAME, c.supports_peer_registration ? "yes" : "no",
-              (unsigned long long)(c.max_registration_bytes >> 20),
-              (unsigned long long)(c.max_total_registration_bytes >> 20));
+  std::printf(
+      "       %s: peer_registration=%s single=%llu MiB total=%llu MiB\n",
+      VENDOR_NAME, c.supports_peer_registration ? "yes" : "no",
+      (unsigned long long)(c.max_registration_bytes >> 20),
+      (unsigned long long)(c.max_total_registration_bytes >> 20));
 }

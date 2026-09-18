@@ -9,8 +9,8 @@
 
 #include <cstring>
 #include <deque>
-#include <mutex>
 #include <map>
+#include <mutex>
 #include <random>
 #include <vector>
 
@@ -148,7 +148,10 @@ class MockProvider : public TransportProvider {
 
  private:
   static constexpr uint64_t kRemoteKeyOffset = 0x1000000;
-  struct Reg { void* addr; uint64_t length; };
+  struct Reg {
+    void* addr;
+    uint64_t length;
+  };
 
   mutable std::mutex mu_;
   MockConfig cfg_;

@@ -29,8 +29,8 @@ enum class CcDirection : uint8_t { kWrite = 0, kRead = 1 };
  * "never". */
 enum class CcVerdict : uint8_t {
   kAllowed = 0,
-  kOverBudget,   /* in-flight bytes would exceed the window */
-  kPaced,        /* allowed by budget, but not until next_send_time */
+  kOverBudget, /* in-flight bytes would exceed the window */
+  kPaced,      /* allowed by budget, but not until next_send_time */
 };
 
 class CongestionController {

@@ -96,6 +96,18 @@ Enabling one whose dependency is missing fails at configure time rather than
 being skipped, so a build never quietly comes out without the transport it was
 asked for.
 
+## Formatting
+
+```bash
+./format.sh           # rewrite in place
+./format.sh --check   # report and fail, for CI
+```
+
+Google style with left-aligned pointers and east const, matching UCCL, so
+code moving between the two does not churn on formatting alone. One
+clang-format version is pinned rather than a range: versions disagree on
+details, and allowing several would mean whoever ran last decides the diff.
+
 ## Design notes
 
 A few places that are easy to get wrong, and are therefore pinned down by

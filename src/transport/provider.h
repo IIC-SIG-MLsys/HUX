@@ -52,8 +52,8 @@ struct ProviderStats {
   uint64_t subops_posted = 0;
   uint64_t subops_completed = 0;
   uint64_t subops_failed = 0;
-  uint64_t payload_bytes = 0;         /* requested by the caller */
-  uint64_t payload_bytes_copied = 0;  /* extra copies on top of that */
+  uint64_t payload_bytes = 0;        /* requested by the caller */
+  uint64_t payload_bytes_copied = 0; /* extra copies on top of that */
 };
 
 /* Reported as-is. A missing capability returns false rather than being faked
@@ -62,12 +62,12 @@ struct ProviderCaps {
   std::string name;
   bool supports_read = false;
   bool supports_write = false;
-  bool supports_vector = false;      /* Otherwise core splits into scalars. */
+  bool supports_vector = false; /* Otherwise core splits into scalars. */
   bool supports_multi_qp = false;
   bool needs_explicit_flush = false; /* UCX: local put != remote visibility. */
   /* Reserved alongside SubOp::signal_peer; see the note there. */
   bool supports_peer_signal = false;
-  uint64_t max_segment_bytes = 0;    /* 0 if unbounded. */
+  uint64_t max_segment_bytes = 0; /* 0 if unbounded. */
   uint32_t max_sge = 1;
 };
 
@@ -86,11 +86,11 @@ struct SubOp {
   uint32_t peer_token = 0;
   Kind kind = Kind::kRead;
   RequestId request = 0;
-  uint64_t sub_id = 0;      /* Unique within the request; used to aggregate. */
+  uint64_t sub_id = 0; /* Unique within the request; used to aggregate. */
   void* local_addr = nullptr;
-  uint64_t local_key = 0;   /* Provider-private registration handle. */
+  uint64_t local_key = 0; /* Provider-private registration handle. */
   uint64_t remote_addr = 0;
-  uint64_t remote_key = 0;  /* The peer's rkey, never a local lkey. */
+  uint64_t remote_key = 0; /* The peer's rkey, never a local lkey. */
   uint64_t length = 0;
 };
 
@@ -149,7 +149,8 @@ class TransportProvider {
                               std::vector<SubOp> const& ops) = 0;
 
   /* Must hand over every event it took from the CQ. Returning early on a
-   * matching entry drops the completions of other requests in the same batch. */
+   * matching entry drops the completions of other requests in the same batch.
+   */
   virtual Status poll(uint32_t max_events,
                       std::vector<CompletionEvent>* out) = 0;
 

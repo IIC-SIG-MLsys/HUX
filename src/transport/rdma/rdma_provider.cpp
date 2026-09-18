@@ -1,20 +1,20 @@
 /* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "transport/rdma/rdma_provider.h"
 
-#include "control/control_message.h"
-
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
-#include <fcntl.h>
-#include <utility>
 #include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <utility>
+
+#include "control/control_message.h"
 
 namespace hux {
 namespace {
@@ -174,7 +174,7 @@ Status RdmaConnection::repost_receive() {
   wr.num_sge = 1;
   ibv_recv_wr* bad = nullptr;
   return ibv_post_recv(qps_[0].qp, &wr, &bad) == 0 ? Status::kOk
-                                            : Status::kTransportError;
+                                                   : Status::kTransportError;
 }
 
 uint32_t RdmaConnection::submit_capacity() const {
@@ -298,7 +298,8 @@ Status RdmaProvider::open_device() {
 
   pd_ = ibv_alloc_pd(ctx_);
   if (pd_ == nullptr) return Status::kDeviceError;
-  cq_ = ibv_create_cq(ctx_, static_cast<int>(cfg_.cq_depth), nullptr, nullptr, 0);
+  cq_ =
+      ibv_create_cq(ctx_, static_cast<int>(cfg_.cq_depth), nullptr, nullptr, 0);
   if (cq_ == nullptr) return Status::kDeviceError;
   return Status::kOk;
 }
@@ -329,7 +330,7 @@ ProviderCaps RdmaProvider::caps() const {
   c.name = "rdma";
   c.supports_read = true;
   c.supports_write = true;
-  c.supports_vector = false;  /* Core splits into scalar sub-operations. */
+  c.supports_vector = false; /* Core splits into scalar sub-operations. */
   c.supports_multi_qp = false;
   c.needs_explicit_flush = false;
   /* False deliberately: an immediate value rides one queue pair, and one
@@ -467,7 +468,8 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
   }
 
   std::vector<RdmaEndpointInfo> peers(n);
-  for (uint32_t i = 0; i < n; ++i) decode_ep(rx.data() + i * kEpInfoBytes, &peers[i]);
+  for (uint32_t i = 0; i < n; ++i)
+    decode_ep(rx.data() + i * kEpInfoBytes, &peers[i]);
 
   Status vs = check_wire_version(peers[0].major, peers[0].minor);
   if (vs != Status::kOk) {
@@ -523,8 +525,8 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
     if (ibv_modify_qp(qp, &attr,
                       IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
                           IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
-                          IBV_QP_MAX_DEST_RD_ATOMIC |
-                          IBV_QP_MIN_RNR_TIMER) != 0) {
+                          IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER) !=
+        0) {
       destroy_all();
       return Status::kDeviceError;
     }
@@ -545,7 +547,8 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
     }
   }
 
-  auto conn = std::make_shared<RdmaConnection>(this, std::move(qps), std::move(peers));
+  auto conn =
+      std::make_shared<RdmaConnection>(this, std::move(qps), std::move(peers));
   /* Hand the socket to the connection instead of closing it; it becomes the
    * control channel. Non-blocking so polling never stalls progress. */
   int flags = ::fcntl(sock, F_GETFL, 0);
@@ -568,11 +571,13 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
 
 Status RdmaProvider::connect(std::vector<uint8_t> const& peer_metadata,
                              ProviderConnectionPtr* out) {
-  if (out == nullptr || peer_metadata.size() < 6) return Status::kInvalidArgument;
+  if (out == nullptr || peer_metadata.size() < 6)
+    return Status::kInvalidArgument;
   uint16_t port = get_u16(peer_metadata.data());
   uint16_t ip_len = get_u16(peer_metadata.data() + 4);
   if (peer_metadata.size() != 6u + ip_len) return Status::kInvalidArgument;
-  std::string ip(reinterpret_cast<char const*>(peer_metadata.data() + 6), ip_len);
+  std::string ip(reinterpret_cast<char const*>(peer_metadata.data() + 6),
+                 ip_len);
 
   int sock = ::socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) return Status::kInternal;
@@ -626,7 +631,8 @@ Status RdmaProvider::accept(int64_t timeout_ms, ProviderConnectionPtr* out) {
 namespace {
 constexpr uint64_t kQpShift = 48;
 inline uint64_t make_wr_id(uint32_t qp_index, uint64_t seq) {
-  return (static_cast<uint64_t>(qp_index) << kQpShift) | (seq & ((1ull << kQpShift) - 1));
+  return (static_cast<uint64_t>(qp_index) << kQpShift) |
+         (seq & ((1ull << kQpShift) - 1));
 }
 inline uint32_t wr_qp_index(uint64_t id) {
   return static_cast<uint32_t>((id >> kQpShift) & 0x7fff);
@@ -715,7 +721,10 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
      * anchor before the queue can fill with nothing to wait for. */
     p.signal = (since[qi] + 1 >= cfg_.signal_period) ||
                (used + 1 >= depth - depth / 4);
-    if (p.signal) since[qi] = 0; else ++since[qi];
+    if (p.signal)
+      since[qi] = 0;
+    else
+      ++since[qi];
     ++next_seq[qi];
     last_on_qp[qi] = plan.size();
     plan.push_back(p);
@@ -754,8 +763,8 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     wr.wr_id = make_wr_id(p.qp_index, seq);
     wr.sg_list = &sge;
     wr.num_sge = 1;
-    wr.opcode = op.kind == SubOp::Kind::kWrite ? IBV_WR_RDMA_WRITE
-                                               : IBV_WR_RDMA_READ;
+    wr.opcode =
+        op.kind == SubOp::Kind::kWrite ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
     wr.send_flags = p.signal ? IBV_SEND_SIGNALED : 0;
     wr.wr.rdma.remote_addr = op.remote_addr;
     wr.wr.rdma.rkey = static_cast<uint32_t>(op.remote_key);
@@ -774,9 +783,8 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     CcTime const posted_at = CcClock::now();
 
     q.unsignalled.push_back(
-        {seq, InflightKey{op.request, op.sub_id,
-                          op.kind == SubOp::Kind::kWrite, op.length,
-                          posted_at}});
+        {seq, InflightKey{op.request, op.sub_id, op.kind == SubOp::Kind::kWrite,
+                          op.length, posted_at}});
     ++q.posted;
     q.since_signal = p.signal ? 0 : q.since_signal + 1;
 
@@ -805,7 +813,8 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
 /* Drains up to max_events completions and hands back every one of them.
  * Stopping early on a particular request would lose the completions sharing
  * the batch, and those requests would never reach a terminal state. */
-Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out) {
+Status RdmaProvider::poll(uint32_t max_events,
+                          std::vector<CompletionEvent>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
   if (max_events == 0) return Status::kOk;
@@ -888,8 +897,10 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
       ev.may_have_modified_target = modified && key.is_write;
       {
         std::lock_guard<std::mutex> g(mu_);
-        if (ev.status == Status::kOk) ++stats_.subops_completed;
-        else ++stats_.subops_failed;
+        if (ev.status == Status::kOk)
+          ++stats_.subops_completed;
+        else
+          ++stats_.subops_failed;
       }
       out->push_back(ev);
     }
@@ -917,8 +928,7 @@ Status RdmaProvider::send_control(ProviderConnection* conn, uint16_t type,
   std::lock_guard<std::mutex> g(c->send_mu_);
   if (!send_all(c->ctrl_fd, hdr, kControlHeaderBytes))
     return Status::kPeerDisconnected;
-  if (!payload.empty() &&
-      !send_all(c->ctrl_fd, payload.data(), payload.size()))
+  if (!payload.empty() && !send_all(c->ctrl_fd, payload.data(), payload.size()))
     return Status::kPeerDisconnected;
   return Status::kOk;
 }
@@ -963,7 +973,7 @@ Status RdmaProvider::poll_control(uint32_t max_items,
         break;
       }
       size_t total = kControlHeaderBytes + h.payload_len;
-      if (c->rx.size() < total) break;  /* wait for the remainder */
+      if (c->rx.size() < total) break; /* wait for the remainder */
 
       ControlMessage m;
       m.conn = c.get();
@@ -978,7 +988,7 @@ Status RdmaProvider::poll_control(uint32_t max_items,
 }
 
 Status RdmaProvider::poll_peer_arrivals(uint32_t max_items,
-                                       std::vector<PeerArrival>* out) {
+                                        std::vector<PeerArrival>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
   std::lock_guard<std::mutex> g(arrival_mu_);
@@ -1009,7 +1019,8 @@ Status RdmaProvider::drain(ProviderConnection* conn, int64_t timeout_ms) {
     size_t outstanding = 0;
     {
       std::lock_guard<std::mutex> g(c->qp_mutex());
-      for (auto const& q : c->queue_pairs()) outstanding += q.unsignalled.size();
+      for (auto const& q : c->queue_pairs())
+        outstanding += q.unsignalled.size();
     }
     if (outstanding == 0) return Status::kOk;
 

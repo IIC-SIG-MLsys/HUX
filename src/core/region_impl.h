@@ -17,7 +17,7 @@ struct RegionDescriptor {
   uint16_t minor = 0;
   RegionId region = 0;
   Generation generation = 0;
-  uint64_t base = 0;      /* Peer virtual address; never dereferenced here. */
+  uint64_t base = 0; /* Peer virtual address; never dereferenced here. */
   uint64_t length = 0;
   uint64_t remote_key = 0;
   DeviceKind device_kind = DeviceKind::kHost;
@@ -28,7 +28,8 @@ struct RegionDescriptor {
 /* Little-endian, fixed-width fields. */
 void encode_descriptor(RegionDescriptor const& d, std::vector<uint8_t>* out);
 /* Rejects a major mismatch outright instead of parsing best-effort. */
-Status decode_descriptor(std::vector<uint8_t> const& buf, RegionDescriptor* out);
+Status decode_descriptor(std::vector<uint8_t> const& buf,
+                         RegionDescriptor* out);
 
 class MemoryRegionImpl : public MemoryRegion {
  public:

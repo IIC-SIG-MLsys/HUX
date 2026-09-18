@@ -14,8 +14,7 @@ namespace hux {
  * EngineConfig::preferred_provider. */
 Status make_engine(EngineConfig const& cfg,
                    std::shared_ptr<DeviceBackend> device,
-                   TransportProviderPtr provider,
-                   std::unique_ptr<Engine>* out);
+                   TransportProviderPtr provider, std::unique_ptr<Engine>* out);
 
 }  // namespace hux
 #endif  // HUX_CORE_FACTORY_H

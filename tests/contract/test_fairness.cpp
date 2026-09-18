@@ -39,13 +39,18 @@ struct OrderingFixture {
     mc.budget_bytes = budget;
     mc.submit_status_on_partial = Status::kWouldBlock;
     provider = std::make_shared<MockProvider>(mc);
-    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk) return false;
+    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk)
+      return false;
 
     buf.assign(1 << 20, 0);
-    if (engine->register_memory(buf.data(), buf.size(), AccessFlags::kRemoteRead,
-                                &remote_src_region) != Status::kOk) return false;
-    if (engine->register_memory(buf.data(), buf.size(), AccessFlags::kLocalWrite,
-                                &local) != Status::kOk) return false;
+    if (engine->register_memory(buf.data(), buf.size(),
+                                AccessFlags::kRemoteRead,
+                                &remote_src_region) != Status::kOk)
+      return false;
+    if (engine->register_memory(buf.data(), buf.size(),
+                                AccessFlags::kLocalWrite,
+                                &local) != Status::kOk)
+      return false;
     std::vector<uint8_t> meta, desc;
     engine->local_metadata(&meta);
     if (engine->add_peer(meta, &peer) != Status::kOk) return false;
@@ -86,7 +91,8 @@ HUX_TEST(a_small_request_does_not_wait_for_a_large_one) {
 
   CHECK(small->state() == RequestState::kSucceeded);
   /* The large request needs at least 8 passes on its own. If the small one
-   * only finished after that, it was queued behind it rather than interleaved. */
+   * only finished after that, it was queued behind it rather than interleaved.
+   */
   std::printf("       small finished after %d passes\n", passes);
   CHECK(passes < 8);
 }
@@ -102,8 +108,8 @@ HUX_TEST(both_requests_still_complete_in_full) {
   CHECK_STATUS(f.submit(4 << 16, &b), Status::kOk);
 
   std::vector<RequestPtr> done;
-  for (int i = 0; i < 600 &&
-                  !(is_terminal(a->state()) && is_terminal(b->state())); ++i)
+  for (int i = 0;
+       i < 600 && !(is_terminal(a->state()) && is_terminal(b->state())); ++i)
     f.engine->poll_completions(32, &done);
 
   CHECK(a->state() == RequestState::kSucceeded);
@@ -128,7 +134,7 @@ HUX_TEST(a_turn_submits_no_more_than_the_quantum) {
   cfg.scheduler_quantum_bytes = 256 << 10;
 
   MockConfig mc;
-  mc.move_data = false;  /* no budget: the provider accepts whatever it gets */
+  mc.move_data = false; /* no budget: the provider accepts whatever it gets */
   auto provider = std::make_shared<MockProvider>(mc);
   std::unique_ptr<Engine> engine;
   CHECK_STATUS(make_engine(cfg, nullptr, provider, &engine), Status::kOk);
@@ -150,7 +156,7 @@ HUX_TEST(a_turn_submits_no_more_than_the_quantum) {
   CHECK_STATUS(peer->import_region(desc, &remote), Status::kOk);
 
   RegionView lv, rv;
-  CHECK_STATUS(dst->view(0, 1 << 20, &lv), Status::kOk);   /* 16 chunks */
+  CHECK_STATUS(dst->view(0, 1 << 20, &lv), Status::kOk); /* 16 chunks */
   CHECK_STATUS(remote->view(0, 1 << 20, &rv), Status::kOk);
 
   RequestPtr req;

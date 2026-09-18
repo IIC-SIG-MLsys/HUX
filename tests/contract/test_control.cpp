@@ -56,7 +56,7 @@ HUX_TEST(ready_handoff_roundtrip_keeps_64_bit_fields) {
   b.request = 0x1122334455667788ull;
   b.region = 42;
   b.generation = 7;
-  b.offset = 1ull << 35;    /* beyond 32 bits on both */
+  b.offset = 1ull << 35; /* beyond 32 bits on both */
   b.length = 1ull << 33;
   std::vector<uint8_t> buf;
   encode_ready_handoff(b, &buf);
@@ -93,7 +93,8 @@ struct NotifyFixture {
     cfg.progress = ProgressMode::kExplicit;
     cfg.notify_queue_depth = queue_depth;
     provider = std::make_shared<MockProvider>(MockConfig{});
-    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk) return false;
+    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk)
+      return false;
     std::vector<uint8_t> meta;
     engine->local_metadata(&meta);
     return engine->add_peer(meta, &peer) == Status::kOk;
@@ -117,7 +118,8 @@ HUX_TEST(notification_reaches_the_queue_with_its_payload) {
 
   CHECK_EQ(notes.size(), 1u);
   CHECK_EQ(notes[0].payload.size(), payload.size());
-  CHECK_EQ(std::memcmp(notes[0].payload.data(), payload.data(), payload.size()), 0);
+  CHECK_EQ(std::memcmp(notes[0].payload.data(), payload.data(), payload.size()),
+           0);
 }
 
 HUX_TEST(notification_succeeds_only_once_acknowledged) {

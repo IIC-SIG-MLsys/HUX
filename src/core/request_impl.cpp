@@ -137,7 +137,8 @@ void RequestImpl::finish_success() {
     std::lock_guard<std::mutex> g(mu_);
     if (terminal_locked()) return;
     stages_ |= stage_bit(Stage::kTransferComplete) |
-               stage_bit(Stage::kTargetReady) | stage_bit(Stage::kSourceReusable);
+               stage_bit(Stage::kTargetReady) |
+               stage_bit(Stage::kSourceReusable);
     state_ = RequestState::kSucceeded;
   }
   cv_.notify_all();

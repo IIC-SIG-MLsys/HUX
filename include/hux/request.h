@@ -17,12 +17,12 @@ class DeviceStream;
  * QPs of the same logical request are done. Each stage must be provable
  * separately. */
 enum class Stage : uint8_t {
-  kAccepted = 0,      /* Admitted to the engine. No data has moved. */
-  kSourceReusable,    /* Write only: the NIC no longer reads the source. */
-  kTransferComplete,  /* Provider-level completion. Not yet target_ready. */
-  kTargetReady,       /* Data complete and visible; consumers may be ordered. */
-  kFailedSafe,        /* Failed; local DMA has stopped or is isolated. */
-  kCancelledSafe,     /* Cancelled and drained; no success ready was published. */
+  kAccepted = 0,     /* Admitted to the engine. No data has moved. */
+  kSourceReusable,   /* Write only: the NIC no longer reads the source. */
+  kTransferComplete, /* Provider-level completion. Not yet target_ready. */
+  kTargetReady,      /* Data complete and visible; consumers may be ordered. */
+  kFailedSafe,       /* Failed; local DMA has stopped or is isolated. */
+  kCancelledSafe, /* Cancelled and drained; no success ready was published. */
 };
 
 char const* to_string(Stage s);

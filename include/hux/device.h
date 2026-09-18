@@ -22,7 +22,8 @@ class DeviceStream {
 
 /* Vendor semantics differ: CUDA waits only on work already captured by the
  * event, while HIP may report success for an event that was never recorded.
- * An unrecorded event is therefore not a generic "wait for the future" signal. */
+ * An unrecorded event is therefore not a generic "wait for the future" signal.
+ */
 class DeviceEvent {
  public:
   virtual ~DeviceEvent() = default;
@@ -39,9 +40,9 @@ using DeviceEventPtr = std::shared_ptr<DeviceEvent>;
  * capability with a silent sync or an extra copy. */
 struct DeviceCaps {
   bool supports_stream = false;
-  bool supports_graph_capture = false;  /* Tracked separately from streams. */
+  bool supports_graph_capture = false; /* Tracked separately from streams. */
   bool supports_peer_registration = false;
-  bool supports_dmabuf_export = false;  /* False on Hygon DTK. */
+  bool supports_dmabuf_export = false; /* False on Hygon DTK. */
 
   /* Largest single registration, 0 if unbounded. */
   uint64_t max_registration_bytes = 0;
@@ -73,7 +74,8 @@ class DeviceBackend {
   virtual Status stream_wait_event(DeviceStream* stream, DeviceEvent* ev) = 0;
 
   /* Makes transferred data visible to later kernels. A direct RDMA write to
-   * device memory establishes no ordering against a consuming kernel by itself. */
+   * device memory establishes no ordering against a consuming kernel by itself.
+   */
   virtual Status make_visible(DeviceStream* stream, void* addr,
                               uint64_t bytes) = 0;
 };

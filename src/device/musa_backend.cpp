@@ -62,14 +62,16 @@ inline void clear_sticky_error() { (void)musaGetLastError(); }
 
 }  // namespace
 
-Status MusaBackend::create(int device_index, std::shared_ptr<DeviceBackend>* out) {
+Status MusaBackend::create(int device_index,
+                           std::shared_ptr<DeviceBackend>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   int count = 0;
   if (musaGetDeviceCount(&count) != musaSuccess || count <= 0) {
     clear_sticky_error();
     return Status::kDeviceError;
   }
-  if (device_index < 0 || device_index >= count) return Status::kInvalidArgument;
+  if (device_index < 0 || device_index >= count)
+    return Status::kInvalidArgument;
   if (musaSetDevice(device_index) != musaSuccess) {
     clear_sticky_error();
     return Status::kDeviceError;
@@ -138,7 +140,8 @@ Status MusaBackend::import_stream(void* native_stream, DeviceStreamPtr* out) {
   DeviceId d;
   d.kind = DeviceKind::kMoore;
   d.index = device_index_;
-  *out = std::make_shared<MusaStream>(static_cast<musaStream_t>(native_stream), d);
+  *out =
+      std::make_shared<MusaStream>(static_cast<musaStream_t>(native_stream), d);
   return Status::kOk;
 }
 

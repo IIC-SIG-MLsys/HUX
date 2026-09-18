@@ -12,7 +12,8 @@ using RegionId = uint64_t;
 using RequestId = uint64_t;
 using NotificationId = uint64_t;
 
-/* Bumped on reconnect. Old requests are never carried over to a new connection. */
+/* Bumped on reconnect. Old requests are never carried over to a new connection.
+ */
 using Generation = uint32_t;
 using Epoch = uint32_t;
 
@@ -21,7 +22,7 @@ using Epoch = uint32_t;
 enum class DeviceKind : uint8_t {
   kHost = 0,
   kCuda,
-  kRocm,       /* AMD and Hygon DCU share the HIP runtime. */
+  kRocm, /* AMD and Hygon DCU share the HIP runtime. */
   kCambricon,
   kMoore,
 };

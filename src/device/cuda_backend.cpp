@@ -66,14 +66,16 @@ inline void clear_sticky_error() { (void)cudaGetLastError(); }
 
 }  // namespace
 
-Status CudaBackend::create(int device_index, std::shared_ptr<DeviceBackend>* out) {
+Status CudaBackend::create(int device_index,
+                           std::shared_ptr<DeviceBackend>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   int count = 0;
   if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0) {
     clear_sticky_error();
     return Status::kDeviceError;
   }
-  if (device_index < 0 || device_index >= count) return Status::kInvalidArgument;
+  if (device_index < 0 || device_index >= count)
+    return Status::kInvalidArgument;
   if (cudaSetDevice(device_index) != cudaSuccess) {
     clear_sticky_error();
     return Status::kDeviceError;
@@ -85,7 +87,7 @@ Status CudaBackend::create(int device_index, std::shared_ptr<DeviceBackend>* out
 DeviceCaps CudaBackend::caps() const {
   DeviceCaps c;
   c.supports_stream = true;
-  c.supports_graph_capture = false;  /* Tracked separately; not yet verified. */
+  c.supports_graph_capture = false; /* Tracked separately; not yet verified. */
   c.supports_peer_registration = true;
   /* DMA-BUF export needs both a recent driver and kernel support, so it is
    * probed rather than assumed. */
@@ -97,7 +99,7 @@ DeviceCaps CudaBackend::caps() const {
   } else {
     clear_sticky_error();
   }
-  c.max_registration_bytes = 0;  /* No practical cap on NVIDIA. */
+  c.max_registration_bytes = 0; /* No practical cap on NVIDIA. */
   return c;
 }
 
@@ -153,7 +155,8 @@ Status CudaBackend::import_stream(void* native_stream, DeviceStreamPtr* out) {
   DeviceId d;
   d.kind = DeviceKind::kCuda;
   d.index = device_index_;
-  *out = std::make_shared<CudaStream>(static_cast<cudaStream_t>(native_stream), d);
+  *out =
+      std::make_shared<CudaStream>(static_cast<cudaStream_t>(native_stream), d);
   return Status::kOk;
 }
 

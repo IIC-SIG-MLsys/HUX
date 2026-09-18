@@ -11,14 +11,14 @@ namespace hux {
  * purpose: the caller's correct reaction differs for each. */
 enum class Status : int32_t {
   kOk = 0,
-  kWouldBlock,       /* Not accepted, no network side effect; safe to retry. */
-  kTimeout,          /* This wait ended; the request is still in flight. */
+  kWouldBlock, /* Not accepted, no network side effect; safe to retry. */
+  kTimeout,    /* This wait ended; the request is still in flight. */
   kCancelled,
-  kUnsupported,      /* Capability is absent, not a transient failure. */
+  kUnsupported, /* Capability is absent, not a transient failure. */
   kInvalidArgument,
-  kOutOfRange,       /* Offset/length outside the region, or integer overflow. */
-  kNotFound,         /* Unknown peer, region or request handle. */
-  kStaleGeneration,  /* Descriptor generation no longer valid. */
+  kOutOfRange,      /* Offset/length outside the region, or integer overflow. */
+  kNotFound,        /* Unknown peer, region or request handle. */
+  kStaleGeneration, /* Descriptor generation no longer valid. */
   kPeerDisconnected,
   kResourceExhausted,
   kDeviceError,
@@ -30,7 +30,8 @@ char const* to_string(Status s);
 inline bool ok(Status s) { return s == Status::kOk; }
 
 /* Failure detail. Batch transfers are not atomic, so may_have_modified_target
- * is the only thing a caller can rely on to decide what the remote side holds. */
+ * is the only thing a caller can rely on to decide what the remote side holds.
+ */
 struct ErrorInfo {
   Status status = Status::kOk;
   std::string provider;

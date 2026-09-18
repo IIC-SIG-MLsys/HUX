@@ -34,49 +34,49 @@ void report_skip(std::string const& why);
 
 }  // namespace huxtest
 
-#define HUX_TEST(name)                                                  \
-  static void name();                                                   \
-  static ::huxtest::Registrar reg_##name(#name, name);                  \
+#define HUX_TEST(name)                                 \
+  static void name();                                  \
+  static ::huxtest::Registrar reg_##name(#name, name); \
   static void name()
 
 /* Marks the case as skipped and returns. A case that silently returns when its
  * hardware is absent would be reported as passing, which is how a whole suite
  * comes to mean nothing on a machine without the device. */
-#define SKIP(why)                                                       \
-  do {                                                                  \
-    ::huxtest::report_skip(why);                                        \
-    return;                                                             \
+#define SKIP(why)                \
+  do {                           \
+    ::huxtest::report_skip(why); \
+    return;                      \
   } while (0)
 
-#define CHECK(cond)                                                     \
-  do {                                                                  \
-    if (!(cond)) {                                                      \
+#define CHECK(cond)                                                      \
+  do {                                                                   \
+    if (!(cond)) {                                                       \
       ::huxtest::report_failure(__FILE__, __LINE__, "CHECK(" #cond ")"); \
-      return;                                                           \
-    }                                                                   \
+      return;                                                            \
+    }                                                                    \
   } while (0)
 
-#define CHECK_EQ(a, b)                                                  \
-  do {                                                                  \
-    auto const& _a = (a);                                               \
-    auto const& _b = (b);                                               \
-    if (!(_a == _b)) {                                                  \
-      ::huxtest::report_failure(__FILE__, __LINE__,                     \
-                                "CHECK_EQ(" #a ", " #b ")");            \
-      return;                                                           \
-    }                                                                   \
+#define CHECK_EQ(a, b)                                       \
+  do {                                                       \
+    auto const& _a = (a);                                    \
+    auto const& _b = (b);                                    \
+    if (!(_a == _b)) {                                       \
+      ::huxtest::report_failure(__FILE__, __LINE__,          \
+                                "CHECK_EQ(" #a ", " #b ")"); \
+      return;                                                \
+    }                                                        \
   } while (0)
 
-#define CHECK_STATUS(expr, expected)                                    \
-  do {                                                                  \
-    ::hux::Status _s = (expr);                                          \
-    if (_s != (expected)) {                                             \
-      ::huxtest::report_failure(                                        \
-          __FILE__, __LINE__,                                           \
-          std::string(#expr " -> ") + ::hux::to_string(_s) +            \
-              ", want " + ::hux::to_string(expected));                  \
-      return;                                                           \
-    }                                                                   \
+#define CHECK_STATUS(expr, expected)                                   \
+  do {                                                                 \
+    ::hux::Status _s = (expr);                                         \
+    if (_s != (expected)) {                                            \
+      ::huxtest::report_failure(__FILE__, __LINE__,                    \
+                                std::string(#expr " -> ") +            \
+                                    ::hux::to_string(_s) + ", want " + \
+                                    ::hux::to_string(expected));       \
+      return;                                                          \
+    }                                                                  \
   } while (0)
 
 #endif  // HUX_TESTS_TEST_MAIN_H

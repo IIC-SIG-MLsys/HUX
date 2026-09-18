@@ -53,7 +53,7 @@ struct EngineConfig {
   uint32_t notify_queue_depth = 1024;
   uint32_t notify_max_payload = 4096;
 
-  std::string preferred_provider;  /* Empty selects automatically. */
+  std::string preferred_provider; /* Empty selects automatically. */
 
   /* Reports conflicting parameters instead of silently rewriting them. */
   Status validate(std::string* reason) const;

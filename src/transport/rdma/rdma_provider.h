@@ -18,14 +18,14 @@
 
 #include <infiniband/verbs.h>
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
-#include <vector>
 #include <memory>
-#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "transport/cc/controller.h"
 #include "transport/provider.h"
@@ -33,7 +33,7 @@
 namespace hux {
 
 struct RdmaConfig {
-  std::string device_name;   /* Empty selects the first port that is up. */
+  std::string device_name; /* Empty selects the first port that is up. */
   uint8_t ib_port = 1;
   /* Queue pairs per connection. More of them raises the number of requests in
    * flight, not the number of network paths -- the two are often confused.
@@ -46,14 +46,14 @@ struct RdmaConfig {
   /* Off by default. Every other configuration is measured against it, so it
    * has to stay available rather than being replaced by a window. */
   CongestionControllerPtr cc;
-  int gid_index = -1;        /* Negative asks for automatic selection. */
+  int gid_index = -1; /* Negative asks for automatic selection. */
   uint32_t cq_depth = 4096;
   uint32_t sq_depth = 1024;
   /* Receives exist only to catch peers' arrival signals. The queue has to be
    * deep enough that a burst of writes does not exhaust it between polls. */
   uint32_t rq_depth = 64;
   uint32_t max_sge = 1;
-  uint16_t listen_port = 0;  /* 0 lets the kernel choose. */
+  uint16_t listen_port = 0; /* 0 lets the kernel choose. */
   /* Address peers should dial back on. A provider cannot pick this itself on
    * a multi-homed host, so the caller states it. */
   std::string advertise_ip = "127.0.0.1";
@@ -201,8 +201,8 @@ class RdmaProvider : public TransportProvider {
  * at all and no way to reclaim its queue. */
 struct QueuePair {
   ibv_qp* qp = nullptr;
-  uint64_t posted = 0;      /* sequence number of the next work request */
-  uint64_t reclaimed = 0;   /* everything below this has completed */
+  uint64_t posted = 0;    /* sequence number of the next work request */
+  uint64_t reclaimed = 0; /* everything below this has completed */
   uint32_t since_signal = 0;
   /* Sub-operations posted without a signal, waiting for the next signalled
    * completion to retire them. Within one queue pair completion order follows
@@ -258,8 +258,8 @@ class RdmaConnection : public ProviderConnection {
    * after the handshake. It is independent of the RDMA path, so control
    * traffic keeps moving when the data path is congested or broken. */
   int ctrl_fd = -1;
-  std::mutex send_mu_;      /* serializes header and payload together */
-  std::vector<uint8_t> rx;  /* partial message carried between polls */
+  std::mutex send_mu_;     /* serializes header and payload together */
+  std::vector<uint8_t> rx; /* partial message carried between polls */
 };
 
 }  // namespace hux

@@ -26,7 +26,7 @@ struct TransferOptions {
   std::vector<uint8_t> notify_payload;
   bool notify = false;
 
-  void* context = nullptr;  /* Local only. */
+  void* context = nullptr; /* Local only. */
 };
 
 /* Observable counters. payload_bytes_copied is the one that settles whether a
@@ -64,8 +64,7 @@ class Engine {
   /* Registration. Works on memory the application already owns; it is not
    * required to adopt a HUX allocator. */
   virtual Status register_memory(void* addr, uint64_t length,
-                                 AccessFlags access,
-                                 MemoryRegionPtr* out) = 0;
+                                 AccessFlags access, MemoryRegionPtr* out) = 0;
   virtual Status register_memory_batch(
       std::vector<void*> const& addrs, std::vector<uint64_t> const& lengths,
       AccessFlags access, std::vector<RegistrationResult>* out) = 0;

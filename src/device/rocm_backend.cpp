@@ -65,14 +65,16 @@ inline void clear_sticky_error() { (void)hipGetLastError(); }
 
 }  // namespace
 
-Status RocmBackend::create(int device_index, std::shared_ptr<DeviceBackend>* out) {
+Status RocmBackend::create(int device_index,
+                           std::shared_ptr<DeviceBackend>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   int count = 0;
   if (hipGetDeviceCount(&count) != hipSuccess || count <= 0) {
     clear_sticky_error();
     return Status::kDeviceError;
   }
-  if (device_index < 0 || device_index >= count) return Status::kInvalidArgument;
+  if (device_index < 0 || device_index >= count)
+    return Status::kInvalidArgument;
   if (hipSetDevice(device_index) != hipSuccess) {
     clear_sticky_error();
     return Status::kDeviceError;
@@ -91,7 +93,7 @@ DeviceCaps RocmBackend::caps() const {
 #if defined(__UCCL_DTK__) || defined(HUX_HIP_NO_DMABUF)
   c.supports_dmabuf_export = false;
 #else
-  c.supports_dmabuf_export = false;  /* Not verified on this stack yet. */
+  c.supports_dmabuf_export = false; /* Not verified on this stack yet. */
 #endif
   c.max_registration_bytes = 0;
   c.max_total_registration_bytes = 0;
@@ -141,7 +143,8 @@ Status RocmBackend::import_stream(void* native_stream, DeviceStreamPtr* out) {
   DeviceId d;
   d.kind = DeviceKind::kRocm;
   d.index = device_index_;
-  *out = std::make_shared<RocmStream>(static_cast<hipStream_t>(native_stream), d);
+  *out =
+      std::make_shared<RocmStream>(static_cast<hipStream_t>(native_stream), d);
   return Status::kOk;
 }
 

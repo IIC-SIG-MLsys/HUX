@@ -11,10 +11,12 @@ void put_u16(std::vector<uint8_t>* o, uint16_t v) {
   o->push_back(static_cast<uint8_t>((v >> 8) & 0xff));
 }
 void put_u32(std::vector<uint8_t>* o, uint32_t v) {
-  for (int i = 0; i < 4; ++i) o->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+  for (int i = 0; i < 4; ++i)
+    o->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
 }
 void put_u64(std::vector<uint8_t>* o, uint64_t v) {
-  for (int i = 0; i < 8; ++i) o->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+  for (int i = 0; i < 8; ++i)
+    o->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
 }
 uint16_t get_u16(uint8_t const* p) {
   return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(p[1]) << 8;
@@ -30,7 +32,8 @@ uint64_t get_u64(uint8_t const* p) {
   return v;
 }
 
-/* major(2) minor(2) region(8) gen(4) base(8) len(8) rkey(8) kind(1) idx(4) access(4) */
+/* major(2) minor(2) region(8) gen(4) base(8) len(8) rkey(8) kind(1) idx(4)
+ * access(4) */
 constexpr size_t kDescriptorBytes = 2 + 2 + 8 + 4 + 8 + 8 + 8 + 1 + 4 + 4;
 
 }  // namespace
@@ -50,31 +53,48 @@ void encode_descriptor(RegionDescriptor const& d, std::vector<uint8_t>* out) {
   put_u32(out, static_cast<uint32_t>(d.access));
 }
 
-Status decode_descriptor(std::vector<uint8_t> const& buf, RegionDescriptor* out) {
+Status decode_descriptor(std::vector<uint8_t> const& buf,
+                         RegionDescriptor* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   if (buf.size() != kDescriptorBytes) return Status::kInvalidArgument;
   uint8_t const* p = buf.data();
-  out->major = get_u16(p); p += 2;
-  out->minor = get_u16(p); p += 2;
+  out->major = get_u16(p);
+  p += 2;
+  out->minor = get_u16(p);
+  p += 2;
   /* Reject an incompatible major rather than parsing best-effort. */
   if (out->major != kDescriptorMajor) return Status::kUnsupported;
-  out->region = get_u64(p); p += 8;
-  out->generation = get_u32(p); p += 4;
-  out->base = get_u64(p); p += 8;
-  out->length = get_u64(p); p += 8;
-  out->remote_key = get_u64(p); p += 8;
-  out->device_kind = static_cast<DeviceKind>(*p); p += 1;
-  out->device_index = static_cast<int32_t>(get_u32(p)); p += 4;
+  out->region = get_u64(p);
+  p += 8;
+  out->generation = get_u32(p);
+  p += 4;
+  out->base = get_u64(p);
+  p += 8;
+  out->length = get_u64(p);
+  p += 8;
+  out->remote_key = get_u64(p);
+  p += 8;
+  out->device_kind = static_cast<DeviceKind>(*p);
+  p += 1;
+  out->device_index = static_cast<int32_t>(get_u32(p));
+  p += 4;
   out->access = static_cast<AccessFlags>(get_u32(p));
   return Status::kOk;
 }
 
 MemoryRegionImpl::MemoryRegionImpl(RegionId id, Generation gen, void* base,
-                                   uint64_t length, DeviceId dev, MemoryKind mem,
-                                   AccessFlags access, uint64_t local_key,
-                                   uint64_t remote_key)
-    : id_(id), gen_(gen), base_(base), length_(length), dev_(dev), mem_(mem),
-      access_(access), local_key_(local_key), remote_key_(remote_key) {}
+                                   uint64_t length, DeviceId dev,
+                                   MemoryKind mem, AccessFlags access,
+                                   uint64_t local_key, uint64_t remote_key)
+    : id_(id),
+      gen_(gen),
+      base_(base),
+      length_(length),
+      dev_(dev),
+      mem_(mem),
+      access_(access),
+      local_key_(local_key),
+      remote_key_(remote_key) {}
 
 Status MemoryRegionImpl::view(uint64_t offset, uint64_t length,
                               RegionView* out) const {

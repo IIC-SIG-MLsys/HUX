@@ -18,8 +18,14 @@ class ReadyEventImpl : public ReadyEvent {
   ReadyEventImpl(RequestId req, PeerId peer, DeviceBackend* device, void* addr,
                  uint64_t bytes, RegionId region = 0, Generation gen = 0,
                  Span span = Span{})
-      : req_(req), peer_(peer), device_(device), addr_(addr), bytes_(bytes),
-        region_(region), gen_(gen), span_(span) {}
+      : req_(req),
+        peer_(peer),
+        device_(device),
+        addr_(addr),
+        bytes_(bytes),
+        region_(region),
+        gen_(gen),
+        span_(span) {}
 
   RequestId request() const override { return req_; }
   PeerId peer() const override { return peer_; }

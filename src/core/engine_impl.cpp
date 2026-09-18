@@ -56,7 +56,8 @@ Status PeerImpl::import_region_batch(
 
 EngineImpl::EngineImpl(EngineConfig cfg, std::shared_ptr<DeviceBackend> device,
                        TransportProviderPtr provider)
-    : cfg_(std::move(cfg)), device_(std::move(device)),
+    : cfg_(std::move(cfg)),
+      device_(std::move(device)),
       provider_(std::move(provider)) {
   if (cfg_.progress == ProgressMode::kThread) {
     progress_thread_ = std::thread([this] { progress_loop(); });
@@ -75,7 +76,7 @@ Status Engine::create(EngineConfig const& cfg,
   std::string reason;
   Status s = cfg.validate(&reason);
   if (s != Status::kOk) return s;
-  return Status::kInvalidArgument;  /* Provider is injected; see make_engine. */
+  return Status::kInvalidArgument; /* Provider is injected; see make_engine. */
 }
 
 /* Construction entry used by tests and the upper factory: the provider is
@@ -116,7 +117,8 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
   }
 
   uint64_t lkey = 0, rkey = 0;
-  Status s = provider_->register_region(addr, length, dev, access, &lkey, &rkey);
+  Status s =
+      provider_->register_region(addr, length, dev, access, &lkey, &rkey);
   if (s != Status::kOk) return s;
 
   RegionId id = next_region_.fetch_add(1, std::memory_order_relaxed);
@@ -131,9 +133,10 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
   return Status::kOk;
 }
 
-Status EngineImpl::register_memory_batch(
-    std::vector<void*> const& addrs, std::vector<uint64_t> const& lengths,
-    AccessFlags access, std::vector<RegistrationResult>* out) {
+Status EngineImpl::register_memory_batch(std::vector<void*> const& addrs,
+                                         std::vector<uint64_t> const& lengths,
+                                         AccessFlags access,
+                                         std::vector<RegistrationResult>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   if (addrs.size() != lengths.size()) return Status::kInvalidArgument;
   out->clear();
@@ -166,7 +169,8 @@ Status EngineImpl::local_metadata(std::vector<uint8_t>* out) const {
   return provider_->local_metadata(out);
 }
 
-Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata, PeerPtr* out) {
+Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
+                            PeerPtr* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   ProviderConnectionPtr conn;
   Status s = provider_->connect(metadata, &conn);
@@ -362,7 +366,8 @@ void EngineImpl::drain_pending() {
     size_t const n = pending_.size();
     if (rr_cursor_ >= n) rr_cursor_ = 0;
     /* Rotate so the pass starts at a different request each time. */
-    std::rotate(pending_.begin(), pending_.begin() + rr_cursor_, pending_.end());
+    std::rotate(pending_.begin(), pending_.begin() + rr_cursor_,
+                pending_.end());
     turn.assign(std::make_move_iterator(pending_.begin()),
                 std::make_move_iterator(pending_.end()));
     pending_.clear();
@@ -385,7 +390,8 @@ void EngineImpl::drain_pending() {
   }
 }
 
-Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& local,
+Status EngineImpl::submit_vector(Peer* peer,
+                                 std::vector<RegionView> const& local,
                                  std::vector<RegionView> const& remote,
                                  TransferOptions const& opts, SubOp::Kind kind,
                                  RequestPtr* out) {
@@ -507,8 +513,8 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
   RequestId req_id = next_request_.fetch_add(1, std::memory_order_relaxed);
   /* A notification is its own kind of request: no sub-operations, and it
    * completes on the peer's acknowledgement rather than on any CQE. */
-  auto req = std::make_shared<RequestImpl>(req_id, SubOp::Kind::kWrite, 0,
-                                           nullptr);
+  auto req =
+      std::make_shared<RequestImpl>(req_id, SubOp::Kind::kWrite, 0, nullptr);
   req->set_state(RequestState::kWaitNotifyAck);
 
   std::vector<uint8_t> body(kNotificationHeaderBytes + payload.size());
@@ -612,8 +618,8 @@ Status EngineImpl::progress() {
         } else if (static_cast<ControlType>(m.type) ==
                    ControlType::kNotification) {
           if (m.payload.size() < kNotificationHeaderBytes) continue;
-          std::vector<uint8_t> idbuf(m.payload.begin(),
-                                     m.payload.begin() + kNotificationHeaderBytes);
+          std::vector<uint8_t> idbuf(
+              m.payload.begin(), m.payload.begin() + kNotificationHeaderBytes);
           uint64_t id = 0;
           if (decode_u64(idbuf, &id) != Status::kOk) continue;
 
@@ -666,7 +672,8 @@ Status EngineImpl::progress() {
 
   {
     std::vector<PeerArrival> arrivals;
-    if (provider_->poll_peer_arrivals(cfg_.cq_batch, &arrivals) == Status::kOk &&
+    if (provider_->poll_peer_arrivals(cfg_.cq_batch, &arrivals) ==
+            Status::kOk &&
         !arrivals.empty()) {
       std::lock_guard<std::mutex> g(mu_);
       for (auto const& a : arrivals) {
@@ -687,7 +694,7 @@ Status EngineImpl::progress() {
     {
       std::lock_guard<std::mutex> g(mu_);
       auto it = inflight_.find(ev.request);
-      if (it == inflight_.end()) continue;  /* Terminal or already taken. */
+      if (it == inflight_.end()) continue; /* Terminal or already taken. */
       req = it->second;
     }
     bool last = req->on_subop_complete(ev);
@@ -778,8 +785,8 @@ Status EngineImpl::record_event(DeviceStream* stream, DeviceEventPtr* out) {
 Status EngineImpl::close(int64_t timeout_ms) {
   closed_.store(true, std::memory_order_release);
   auto const deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(
-          timeout_ms < 0 ? 0 : timeout_ms);
+      std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(timeout_ms < 0 ? 0 : timeout_ms);
   while (true) {
     {
       std::lock_guard<std::mutex> g(mu_);

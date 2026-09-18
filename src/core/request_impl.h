@@ -8,8 +8,8 @@
 #include <mutex>
 #include <vector>
 
-#include "hux/request.h"
 #include "hux/region.h"
+#include "hux/request.h"
 #include "transport/provider.h"
 
 namespace hux {

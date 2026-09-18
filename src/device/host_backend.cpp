@@ -7,7 +7,7 @@ DeviceCaps HostBackend::caps() const {
   DeviceCaps c;
   c.supports_stream = false;
   c.supports_graph_capture = false;
-  c.supports_peer_registration = true;  /* Host memory registers directly. */
+  c.supports_peer_registration = true; /* Host memory registers directly. */
   c.supports_dmabuf_export = false;
   c.max_registration_bytes = 0;
   return c;

@@ -1,0 +1,13 @@
+# Google style, matching the conventions UCCL uses, so code moving between the
+# two projects does not churn on formatting alone.
+BasedOnStyle: Google
+
+# "int* p" rather than "int *p". The style guide asks only for consistency
+# within a project; this is the one chosen here.
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# East const: "Foo const&" rather than "const Foo&".
+QualifierAlignment: Right
+
+ColumnLimit: 80

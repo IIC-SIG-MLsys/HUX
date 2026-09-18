@@ -30,7 +30,7 @@ struct PeerCaps {
   std::string provider;
   uint32_t qp_count = 0;
   bool remote_device_is_gpu = false;
-  uint64_t remote_max_registration_bytes = 0;  /* 0 if unbounded. */
+  uint64_t remote_max_registration_bytes = 0; /* 0 if unbounded. */
 };
 
 /* Stable peer handle. Connection identity no longer leaks into every request

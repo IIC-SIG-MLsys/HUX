@@ -34,17 +34,22 @@ struct Fixture {
    * content can be verified directly. */
   bool setup(EngineConfig cfg = {}, MockConfig mock = {}, size_t bytes = 4096) {
     provider = std::make_shared<MockProvider>(mock);
-    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk) return false;
+    if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk)
+      return false;
     src.assign(bytes, 0);
     dst.assign(bytes, 0);
     for (size_t i = 0; i < bytes; ++i) src[i] = static_cast<uint8_t>(i * 7 + 1);
 
-    if (engine->register_memory(src.data(), bytes,
-                                AccessFlags::kRemoteRead | AccessFlags::kLocalRead,
-                                &src_region) != Status::kOk) return false;
-    if (engine->register_memory(dst.data(), bytes,
-                                AccessFlags::kLocalWrite | AccessFlags::kRemoteWrite,
-                                &dst_region) != Status::kOk) return false;
+    if (engine->register_memory(
+            src.data(), bytes,
+            AccessFlags::kRemoteRead | AccessFlags::kLocalRead,
+            &src_region) != Status::kOk)
+      return false;
+    if (engine->register_memory(
+            dst.data(), bytes,
+            AccessFlags::kLocalWrite | AccessFlags::kRemoteWrite,
+            &dst_region) != Status::kOk)
+      return false;
     std::vector<uint8_t> meta;
     if (engine->local_metadata(&meta) != Status::kOk) return false;
     if (engine->add_peer(meta, &peer) != Status::kOk) return false;
@@ -84,7 +89,7 @@ HUX_TEST(descriptor_roundtrip) {
   d.region = 42;
   d.generation = 7;
   d.base = 0x7f0000001000ull;
-  d.length = 1ull << 33;  /* >4 GiB: catches a truncated 64-bit field. */
+  d.length = 1ull << 33; /* >4 GiB: catches a truncated 64-bit field. */
   d.remote_key = 0xdeadbeefull;
   d.device_kind = DeviceKind::kCambricon;
   d.device_index = 3;
@@ -148,7 +153,8 @@ HUX_TEST(read_moves_data) {
   CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
                Status::kOk);
   CHECK_STATUS(f.drain(req), Status::kOk);
-  CHECK(req->reached(Stage::kTargetReady) || req->reached(Stage::kTransferComplete));
+  CHECK(req->reached(Stage::kTargetReady) ||
+        req->reached(Stage::kTransferComplete));
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
 }
 
@@ -186,7 +192,7 @@ HUX_TEST(mismatched_segment_lengths_rejected) {
 
 HUX_TEST(chunking_covers_whole_range) {
   EngineConfig cfg = explicit_cfg();
-  cfg.chunk_bytes = 512;  /* 4096 bytes becomes 8 chunks. */
+  cfg.chunk_bytes = 512; /* 4096 bytes becomes 8 chunks. */
   Fixture f;
   CHECK(f.setup(cfg));
   RegionView local, remote;
@@ -204,7 +210,7 @@ HUX_TEST(chunking_covers_whole_range) {
 
 HUX_TEST(out_of_order_completions_aggregate_correctly) {
   EngineConfig cfg = explicit_cfg();
-  cfg.chunk_bytes = 256;  /* 16 chunks. */
+  cfg.chunk_bytes = 256; /* 16 chunks. */
   MockConfig mock;
   mock.shuffle_completions = true;
   Fixture f;
@@ -248,7 +254,7 @@ HUX_TEST(batch_poll_does_not_drop_other_requests) {
 
 HUX_TEST(partial_submit_reports_and_keeps_accepted) {
   EngineConfig cfg = explicit_cfg();
-  cfg.chunk_bytes = 512;  /* 8 chunks. */
+  cfg.chunk_bytes = 512; /* 8 chunks. */
   MockConfig mock;
   mock.accept_limit = 3;
   Fixture f;
@@ -258,7 +264,7 @@ HUX_TEST(partial_submit_reports_and_keeps_accepted) {
   CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
   RequestPtr req;
   Status s = f.engine->read(f.peer.get(), local, remote, {}, &req);
-  CHECK_STATUS(s, Status::kOk);  /* Partly accepted counts as accepted. */
+  CHECK_STATUS(s, Status::kOk); /* Partly accepted counts as accepted. */
   CHECK(req != nullptr);
   /* The accepted part keeps draining, and the error must carry
    * may_have_modified_target. */
@@ -486,7 +492,8 @@ HUX_TEST(concurrent_submits_are_accounted_correctly) {
   }
   for (auto& th : ts) th.join();
   CHECK_EQ(ok_count.load(), kThreads * kPerThread);
-  CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), kThreads * kPerThread * 256), 0);
+  CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), kThreads * kPerThread * 256),
+           0);
 }
 
 /* ---- Configuration validation ---- */
@@ -501,7 +508,7 @@ HUX_TEST(config_rejects_conflicting_parameters) {
   EngineConfig c2;
   c2.cc = CongestionControl::kFixedWindow;
   c2.chunk_bytes = 1 << 20;
-  c2.cc_window_bytes = 1024;  /* Smaller than a chunk: every request stalls. */
+  c2.cc_window_bytes = 1024; /* Smaller than a chunk: every request stalls. */
   CHECK_STATUS(c2.validate(&why), Status::kInvalidArgument);
 
   EngineConfig ok_cfg;

@@ -25,7 +25,9 @@ class PeerImpl : public Peer {
            EngineImpl* engine);
 
   PeerId id() const override { return id_; }
-  Epoch epoch() const override { return epoch_.load(std::memory_order_acquire); }
+  Epoch epoch() const override {
+    return epoch_.load(std::memory_order_acquire);
+  }
   PeerCaps caps() const override { return caps_; }
   bool connected() const override {
     return connected_.load(std::memory_order_acquire);

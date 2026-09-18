@@ -69,8 +69,8 @@ class FixedWindowController : public CongestionController {
     inflight_[idx(dir)] += bytes;
   }
 
-  void on_feedback(CcDirection dir, uint64_t bytes, std::chrono::nanoseconds rtt,
-                   CcTime) override {
+  void on_feedback(CcDirection dir, uint64_t bytes,
+                   std::chrono::nanoseconds rtt, CcTime) override {
     std::lock_guard<std::mutex> g(mu_);
     release_locked(dir, bytes);
     ++samples_[idx(dir)];

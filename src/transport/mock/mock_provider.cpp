@@ -81,8 +81,10 @@ Status MockProvider::poll(uint32_t max_events,
   /* Hand over the whole batch; never return early on a matching entry. */
   while (!pending_.empty() && out->size() < max_events) {
     out->push_back(pending_.front());
-    if (pending_.front().status == Status::kOk) ++stats_.subops_completed;
-    else ++stats_.subops_failed;
+    if (pending_.front().status == Status::kOk)
+      ++stats_.subops_completed;
+    else
+      ++stats_.subops_failed;
     uint64_t const b = pending_.front().bytes;
     inflight_bytes_ -= b < inflight_bytes_ ? b : inflight_bytes_;
     pending_.pop_front();

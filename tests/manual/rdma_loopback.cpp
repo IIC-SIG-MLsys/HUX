@@ -29,8 +29,9 @@
 #include "transport/rdma/rdma_provider.h"
 
 #ifdef HUX_LOOPBACK_CUDA
-#include "device/cuda_backend.h"
 #include <cuda_runtime.h>
+
+#include "device/cuda_backend.h"
 #endif
 
 using namespace hux;
@@ -154,15 +155,15 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc) {
   }
 
   Buffer buf = make_buffer(gpu);
-  buf.fill(0x11);  /* the client will read this, and later overwrite it */
+  buf.fill(0x11); /* the client will read this, and later overwrite it */
 
   /* Registered through the engine so both ends agree on the region id: a
    * handoff names the region the peer imported, and only a region this engine
    * holds can be handed to a consumer. */
   MemoryRegionPtr region;
-  if (engine->register_memory(buf.ptr, kBytes,
-                              AccessFlags::kRemoteRead | AccessFlags::kRemoteWrite,
-                              &region) != Status::kOk) {
+  if (engine->register_memory(
+          buf.ptr, kBytes, AccessFlags::kRemoteRead | AccessFlags::kRemoteWrite,
+          &region) != Status::kOk) {
     std::printf("register failed\n");
     return 1;
   }
@@ -196,7 +197,7 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc) {
   std::printf("[server] connected, holding memory\n");
 
   std::vector<uint8_t> ack;
-  recv_blob(fd, &ack);  /* client says it is done reading and writing */
+  recv_blob(fd, &ack); /* client says it is done reading and writing */
 
   std::vector<ReadyEventPtr> ready;
   for (int i = 0; i < 2000 && ready.empty(); ++i) {
@@ -273,7 +274,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
 
   EngineConfig ecfg;
   ecfg.progress = ProgressMode::kExplicit;
-  ecfg.chunk_bytes = 256u << 10;  /* forces several sub-operations */
+  ecfg.chunk_bytes = 256u << 10; /* forces several sub-operations */
   std::unique_ptr<Engine> engine;
   if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) {
     std::printf("engine create failed\n");
@@ -284,9 +285,9 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
   buf.fill(0x00);
 
   MemoryRegionPtr local;
-  if (engine->register_memory(buf.ptr, kBytes,
-                              AccessFlags::kLocalRead | AccessFlags::kLocalWrite,
-                              &local) != Status::kOk) {
+  if (engine->register_memory(
+          buf.ptr, kBytes, AccessFlags::kLocalRead | AccessFlags::kLocalWrite,
+          &local) != Status::kOk) {
     std::printf("register failed\n");
     return 1;
   }
@@ -361,8 +362,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
        * submitted. */
       void* scratch = nullptr;
       cudaMalloc(&scratch, 256u << 20);
-      for (int i = 0; i < 8; ++i)
-        cudaMemsetAsync(scratch, i, 256u << 20, raw);
+      for (int i = 0; i < 8; ++i) cudaMemsetAsync(scratch, i, 256u << 20, raw);
 
       DeviceEventPtr ev;
       Status es = dev->record_event(stream.get(), &ev);
@@ -375,7 +375,8 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
       RequestPtr dep;
       Status ds = engine->write(peer.get(), lv, rv, opts, &dep);
       auto submit_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                           std::chrono::steady_clock::now() - t0).count();
+                           std::chrono::steady_clock::now() - t0)
+                           .count();
 
       EngineStats mid = engine->stats();
       std::printf("   submit returned in %lld us (status %s)\n",
@@ -406,9 +407,10 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
                 (unsigned long long)st.subops_posted);
     std::printf("   extra payload copied: %llu B\n",
                 (unsigned long long)st.payload_bytes_copied);
-    std::printf("   -> %s\n", st.payload_bytes_copied == 0
-                                  ? "zero-copy: the NIC used the caller's memory"
-                                  : "NOT zero-copy");
+    std::printf("   -> %s\n",
+                st.payload_bytes_copied == 0
+                    ? "zero-copy: the NIC used the caller's memory"
+                    : "NOT zero-copy");
     std::printf("   sub-operations: posted=%llu completed=%llu failed=%llu%s\n",
                 (unsigned long long)st.subops_posted,
                 (unsigned long long)st.subops_completed,
@@ -439,10 +441,9 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
       Status fs = drive(note);
       std::printf("   send=%s  settle=%s  state=%s\n", to_string(ns),
                   to_string(fs), to_string(note->state()));
-      std::printf("   -> %s\n",
-                  note->state() == RequestState::kSucceeded
-                      ? "the peer confirmed it reached its queue"
-                      : "not confirmed");
+      std::printf("   -> %s\n", note->state() == RequestState::kSucceeded
+                                    ? "the peer confirmed it reached its queue"
+                                    : "not confirmed");
     } else {
       std::printf("   notify refused: %s\n", to_string(ns));
     }
@@ -460,7 +461,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
     RegionDescriptor bogus;
     bogus.region = 99;
     bogus.generation = 1;
-    bogus.base = 0xdead0000ull;   /* never registered by the peer */
+    bogus.base = 0xdead0000ull; /* never registered by the peer */
     bogus.length = kBytes;
     bogus.remote_key = 0x12345678u;
     bogus.access = AccessFlags::kRemoteRead;
@@ -477,7 +478,8 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
         auto t0 = std::chrono::steady_clock::now();
         Status ds = drive(bad);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - t0).count();
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
         bool terminal = is_terminal(bad->state());
         std::printf("   resolved in %lld ms: status=%s state=%s terminal=%d\n",
                     (long long)ms, to_string(ds), to_string(bad->state()),

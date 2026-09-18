@@ -33,13 +33,13 @@
 
 namespace {
 
-constexpr int kAccess = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
-                        IBV_ACCESS_REMOTE_WRITE;
+constexpr int kAccess =
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
 
 /* Sizes chosen to bracket the limits seen so far: a page, then powers up past
  * the Cambricon ceiling. */
-constexpr size_t kSizes[] = {4096,        1u << 20,   4u << 20,
-                             32u << 20,   128u << 20, 512u << 20};
+constexpr size_t kSizes[] = {4096,      1u << 20,   4u << 20,
+                             32u << 20, 128u << 20, 512u << 20};
 
 bool try_register(ibv_pd* pd, void* ptr, size_t bytes, char* out, size_t n) {
   errno = 0;
@@ -73,7 +73,8 @@ int main() {
     return 1;
   }
   std::printf("NIC: %s\n\n", ibv_get_device_name(list[0]));
-  std::printf("%-12s %-26s %s\n", "size", "device memory", "pinned host memory");
+  std::printf("%-12s %-26s %s\n", "size", "device memory",
+              "pinned host memory");
 
   for (size_t s : kSizes) {
     char dev_res[96], host_res[96];
