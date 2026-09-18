@@ -25,6 +25,7 @@ add_library(hux_core
   src/core/region_impl.cpp
   src/core/request_impl.cpp
   src/core/engine_impl.cpp
+  src/device/host_backend.cpp
   src/transport/mock/mock_provider.cpp
 )
 target_include_directories(hux_core PUBLIC
@@ -64,7 +65,12 @@ if(HUX_ENABLE_CUDA)
   if(NOT CUDAToolkit_FOUND)
     message(FATAL_ERROR "HUX_ENABLE_CUDA=ON but the CUDA toolkit was not found.")
   endif()
-  message(STATUS "HUX: CUDA device backend enabled")
+  # Compiled as plain C++ against the runtime API; no nvcc needed, so the
+  # backend builds wherever the toolkit headers are present.
+  add_library(hux_device_cuda src/device/cuda_backend.cpp)
+  target_link_libraries(hux_device_cuda PUBLIC hux_core CUDA::cudart)
+  target_compile_options(hux_device_cuda PRIVATE -Wall -Wextra)
+  message(STATUS "HUX: CUDA device backend enabled (${CUDAToolkit_VERSION})")
 endif()
 
 if(HUX_ENABLE_NEUWARE)

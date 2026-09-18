@@ -27,8 +27,10 @@ struct Registrar {
 
 extern int g_failures;
 extern std::string g_current;
+extern bool g_skipped;
 
 void report_failure(char const* file, int line, std::string const& what);
+void report_skip(std::string const& why);
 
 }  // namespace huxtest
 
@@ -36,6 +38,15 @@ void report_failure(char const* file, int line, std::string const& what);
   static void name();                                                   \
   static ::huxtest::Registrar reg_##name(#name, name);                  \
   static void name()
+
+/* Marks the case as skipped and returns. A case that silently returns when its
+ * hardware is absent would be reported as passing, which is how a whole suite
+ * comes to mean nothing on a machine without the device. */
+#define SKIP(why)                                                       \
+  do {                                                                  \
+    ::huxtest::report_skip(why);                                        \
+    return;                                                             \
+  } while (0)
 
 #define CHECK(cond)                                                     \
   do {                                                                  \
