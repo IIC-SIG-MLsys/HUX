@@ -97,6 +97,10 @@ class RdmaProvider : public TransportProvider {
   SubmitResult submit(ProviderConnection* conn,
                       std::vector<SubOp> const& ops) override;
   Status poll(uint32_t max_events, std::vector<CompletionEvent>* out) override;
+  Status send_control(ProviderConnection* conn, uint16_t type,
+                      std::vector<uint8_t> const& payload) override;
+  Status poll_control(uint32_t max_items,
+                      std::vector<ControlMessage>* out) override;
   Status poll_peer_arrivals(uint32_t max_items,
                             std::vector<PeerArrival>* out) override;
   Status flush(ProviderConnection* conn) override;
@@ -156,6 +160,7 @@ class RdmaProvider : public TransportProvider {
    * connection's destructor. */
   std::mutex conn_mu_;
   std::unordered_map<uint32_t, RdmaConnection*> conn_by_qp_;
+  std::vector<std::weak_ptr<RdmaConnection>> ctrl_conns_;
   void register_conn(uint32_t qp_num, RdmaConnection* c);
   void forget_conn(uint32_t qp_num);
 };
@@ -192,6 +197,14 @@ class RdmaConnection : public ProviderConnection {
   std::atomic<bool> failed_{false};
   ibv_mr* recv_mr_ = nullptr;
   std::vector<uint8_t> recv_buf_;
+
+ public:
+  /* The bootstrap socket is kept as the control channel rather than closed
+   * after the handshake. It is independent of the RDMA path, so control
+   * traffic keeps moving when the data path is congested or broken. */
+  int ctrl_fd = -1;
+  std::mutex send_mu_;      /* serializes header and payload together */
+  std::vector<uint8_t> rx;  /* partial message carried between polls */
 };
 
 }  // namespace hux

@@ -95,6 +95,29 @@ class MockProvider : public TransportProvider {
   SubmitResult submit(ProviderConnection*,
                       std::vector<SubOp> const& ops) override;
   Status poll(uint32_t max_events, std::vector<CompletionEvent>* out) override;
+  Status send_control(ProviderConnection* conn, uint16_t type,
+                      std::vector<uint8_t> const& payload) override {
+    std::lock_guard<std::mutex> g(mu_);
+    /* Loops straight back: one engine plays both ends in these tests, which
+     * is enough to exercise framing and dispatch. The connection is carried
+     * through, because a reply has to go back the way it came -- dropping it
+     * here would make replies untestable without hardware. */
+    control_.push_back(ControlMessage{0, type, payload, conn});
+    return Status::kOk;
+  }
+
+  Status poll_control(uint32_t max_items,
+                      std::vector<ControlMessage>* out) override {
+    if (out == nullptr) return Status::kInvalidArgument;
+    out->clear();
+    std::lock_guard<std::mutex> g(mu_);
+    while (!control_.empty() && out->size() < max_items) {
+      out->push_back(std::move(control_.front()));
+      control_.pop_front();
+    }
+    return Status::kOk;
+  }
+
   Status poll_peer_arrivals(uint32_t max_items,
                             std::vector<PeerArrival>* out) override {
     if (out == nullptr) return Status::kInvalidArgument;
@@ -130,6 +153,7 @@ class MockProvider : public TransportProvider {
   std::map<uint64_t, Reg> regions_;
   std::deque<CompletionEvent> pending_;
   std::deque<PeerArrival> arrivals_;
+  std::deque<ControlMessage> control_;
   uint64_t next_key_ = 1;
   uint64_t submitted_ = 0;
   ProviderStats stats_;

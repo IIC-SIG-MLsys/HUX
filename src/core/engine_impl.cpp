@@ -3,6 +3,7 @@
 
 #include <chrono>
 
+#include "control/control_message.h"
 #include "core/ready_event_impl.h"
 #include "hux/device.h"
 
@@ -360,6 +361,13 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
   req->hold_connection(p->conn_ptr());
   req->set_device_backend(device_.get());
   req->set_target(target_addr, target_bytes);
+  if (kind == SubOp::Kind::kWrite && !remote.empty()) {
+    auto rr = find_remote(remote[0].region);
+    if (rr != nullptr) {
+      req->set_remote_target(remote[0].region, rr->generation(),
+                             Span{remote[0].span.offset, target_bytes});
+    }
+  }
 
   {
     std::lock_guard<std::mutex> g(mu_);
@@ -421,16 +429,60 @@ Status EngineImpl::writev(Peer* peer, std::vector<RegionView> const& local,
 }
 
 Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
-                          RequestPtr* out) {  // NOLINT
+                          RequestPtr* out) {
   if (peer == nullptr || out == nullptr) return Status::kInvalidArgument;
   if (payload.size() > cfg_.notify_max_payload) return Status::kInvalidArgument;
-  return Status::kUnsupported;  /* NTF-01, milestone M4. */
+  if (closed_.load(std::memory_order_acquire)) return Status::kInvalidArgument;
+
+  auto* p = static_cast<PeerImpl*>(peer);
+  if (!p->connected()) return Status::kPeerDisconnected;
+
+  uint64_t id = next_notify_.fetch_add(1, std::memory_order_relaxed);
+  RequestId req_id = next_request_.fetch_add(1, std::memory_order_relaxed);
+  /* A notification is its own kind of request: no sub-operations, and it
+   * completes on the peer's acknowledgement rather than on any CQE. */
+  auto req = std::make_shared<RequestImpl>(req_id, SubOp::Kind::kWrite, 0,
+                                           nullptr);
+  req->set_state(RequestState::kWaitNotifyAck);
+
+  std::vector<uint8_t> body(kNotificationHeaderBytes + payload.size());
+  std::vector<uint8_t> idbuf;
+  encode_u64(id, &idbuf);
+  std::copy(idbuf.begin(), idbuf.end(), body.begin());
+  std::copy(payload.begin(), payload.end(),
+            body.begin() + kNotificationHeaderBytes);
+
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    notify_pending_[id] = req;
+  }
+
+  Status s = provider_->send_control(
+      p->conn(), static_cast<uint16_t>(ControlType::kNotification), body);
+  if (s != Status::kOk) {
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      notify_pending_.erase(id);
+    }
+    ErrorInfo e;
+    e.status = s;
+    e.provider = provider_->caps().name;
+    e.peer_id = p->id();
+    e.detail = "control send failed";
+    req->fail(e);
+  }
+  *out = req;
+  return s;
 }
 
 Status EngineImpl::poll_notifications(uint32_t max_items,
                                       std::vector<Notification>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
+  /* Drives progress in explicit mode for the same reason poll_completions
+   * does: a caller polling only for notifications would otherwise never
+   * receive one. */
+  if (cfg_.progress == ProgressMode::kExplicit) progress();
   std::lock_guard<std::mutex> g(mu_);
   while (!notifications_.empty() && out->size() < max_items) {
     out->push_back(std::move(notifications_.front()));
@@ -489,6 +541,79 @@ Status EngineImpl::progress() {
   }
 
   {
+    std::vector<ControlMessage> msgs;
+    if (provider_->poll_control(cfg_.cq_batch, &msgs) == Status::kOk) {
+      for (auto const& m : msgs) {
+        if (static_cast<ControlType>(m.type) == ControlType::kReadyHandoff) {
+          ReadyHandoffBody b;
+          if (decode_ready_handoff(m.payload, &b) != Status::kOk) continue;
+          void* addr = nullptr;
+          auto lr = find_region(b.region);
+          /* The peer names a region by the id it imported; only a region this
+           * engine actually holds can be handed to a consumer. */
+          if (lr != nullptr && Span{b.offset, b.length}.within(lr->length())) {
+            addr = static_cast<char*>(lr->base()) + b.offset;
+          }
+          std::lock_guard<std::mutex> g(mu_);
+          ready_events_.push_back(std::make_shared<ReadyEventImpl>(
+              b.request, m.peer, device_.get(), addr, b.length, b.region,
+              b.generation, Span{b.offset, b.length}));
+        } else if (static_cast<ControlType>(m.type) ==
+                   ControlType::kNotification) {
+          if (m.payload.size() < kNotificationHeaderBytes) continue;
+          std::vector<uint8_t> idbuf(m.payload.begin(),
+                                     m.payload.begin() + kNotificationHeaderBytes);
+          uint64_t id = 0;
+          if (decode_u64(idbuf, &id) != Status::kOk) continue;
+
+          bool queued = false;
+          {
+            std::lock_guard<std::mutex> g(mu_);
+            if (notifications_.size() < cfg_.notify_queue_depth) {
+              Notification n;
+              n.peer = m.peer;
+              n.id = id;
+              n.payload.assign(m.payload.begin() + kNotificationHeaderBytes,
+                               m.payload.end());
+              notifications_.push_back(std::move(n));
+              queued = true;
+            }
+          }
+          /* Acknowledged only once it is actually in the queue. Confirming a
+           * message that was dropped would tell the sender something false,
+           * and back-pressure depends on the sender learning the truth. */
+          if (queued && m.conn != nullptr) {
+            std::vector<uint8_t> ack;
+            encode_u64(id, &ack);
+            provider_->send_control(
+                m.conn, static_cast<uint16_t>(ControlType::kNotificationAck),
+                ack);
+          }
+        } else if (static_cast<ControlType>(m.type) ==
+                   ControlType::kNotificationAck) {
+          uint64_t id = 0;
+          if (decode_u64(m.payload, &id) != Status::kOk) continue;
+          RequestImplPtr req;
+          {
+            std::lock_guard<std::mutex> g(mu_);
+            auto it = notify_pending_.find(id);
+            if (it != notify_pending_.end()) {
+              req = it->second;
+              notify_pending_.erase(it);
+            }
+          }
+          if (req != nullptr) {
+            req->mark_stage(Stage::kTransferComplete);
+            req->finish_success();
+            std::lock_guard<std::mutex> g(mu_);
+            completed_.push_back(req);
+          }
+        }
+      }
+    }
+  }
+
+  {
     std::vector<PeerArrival> arrivals;
     if (provider_->poll_peer_arrivals(cfg_.cq_batch, &arrivals) == Status::kOk &&
         !arrivals.empty()) {
@@ -533,6 +658,25 @@ Status EngineImpl::progress() {
         /* A direct write to device memory orders nothing against a consuming
          * kernel on its own. */
         req->mark_stage(Stage::kTargetReady);
+      }
+      if (req->kind() == SubOp::Kind::kWrite && req->remote_region() != 0) {
+        /* The peer knows bytes arrived from the immediate value, but not
+         * which ones. This says so, and travels on the control channel so a
+         * congested data path cannot delay it. */
+        ReadyHandoffBody b;
+        b.request = req->id();
+        b.region = req->remote_region();
+        b.generation = req->remote_generation();
+        b.offset = req->remote_span().offset;
+        b.length = req->remote_span().length;
+        std::vector<uint8_t> payload;
+        encode_ready_handoff(b, &payload);
+        ProviderConnectionPtr conn = req->connection();
+        if (conn != nullptr) {
+          provider_->send_control(
+              conn.get(), static_cast<uint16_t>(ControlType::kReadyHandoff),
+              payload);
+        }
       }
       req->finish_success();
       std::lock_guard<std::mutex> g(stats_mu_);

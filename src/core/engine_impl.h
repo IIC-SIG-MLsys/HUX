@@ -145,6 +145,10 @@ class EngineImpl : public Engine {
   std::deque<PendingSubmit> pending_;
   std::deque<Notification> notifications_;
   std::deque<ReadyEventPtr> ready_events_;
+  /* Notification requests waiting for the peer to confirm receipt, keyed by
+   * the id carried out and back. */
+  std::unordered_map<uint64_t, RequestImplPtr> notify_pending_;
+  std::atomic<uint64_t> next_notify_{1};
 
   std::atomic<uint64_t> next_region_{1};
   std::atomic<uint64_t> next_peer_{1};

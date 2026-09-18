@@ -21,6 +21,21 @@
 
 namespace hux {
 
+class ProviderConnection;
+
+/* A control message from a peer. Kept apart from data completions: control
+ * traffic has its own resources so a stalled transfer cannot starve the
+ * message that would explain it. */
+struct ControlMessage {
+  PeerId peer = 0;
+  uint16_t type = 0;
+  std::vector<uint8_t> payload;
+  /* The connection it arrived on. A reply belongs on the same one, and a
+   * passively accepted connection has no Peer object to look up -- the engine
+   * would otherwise have nowhere to send an acknowledgement. */
+  ProviderConnection* conn = nullptr;
+};
+
 /* Something the peer wrote into this engine's memory, surfaced by the
  * provider once its arrival was signalled. */
 struct PeerArrival {
@@ -135,6 +150,16 @@ class TransportProvider {
    * matching entry drops the completions of other requests in the same batch. */
   virtual Status poll(uint32_t max_events,
                       std::vector<CompletionEvent>* out) = 0;
+
+  /* Sends on the control channel. Serialized per connection: a header and its
+   * payload interleaved with another message would desynchronize the peer's
+   * reader for good. */
+  virtual Status send_control(ProviderConnection* conn, uint16_t type,
+                              std::vector<uint8_t> const& payload) = 0;
+
+  /* Control messages received since the last call. */
+  virtual Status poll_control(uint32_t max_items,
+                              std::vector<ControlMessage>* out) = 0;
 
   /* Arrivals signalled by peers since the last call. Empty for providers that
    * cannot signal, which report it through caps. */

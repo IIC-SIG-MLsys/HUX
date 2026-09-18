@@ -1,10 +1,13 @@
 /* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "transport/rdma/rdma_provider.h"
 
+#include "control/control_message.h"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -127,6 +130,7 @@ RdmaConnection::RdmaConnection(RdmaProvider* owner, ibv_qp* qp,
     : owner_(owner), qp_(qp), remote_(remote) {}
 
 RdmaConnection::~RdmaConnection() {
+  if (ctrl_fd >= 0) ::close(ctrl_fd);
   if (qp_ != nullptr) {
     owner_->forget_conn(qp_->qp_num);
     ibv_destroy_qp(qp_);
@@ -471,7 +475,18 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
   }
 
   auto conn = std::make_shared<RdmaConnection>(this, qp, peer);
+  /* Hand the socket to the connection instead of closing it; it becomes the
+   * control channel. Non-blocking so polling never stalls progress. */
+  int flags = ::fcntl(sock, F_GETFL, 0);
+  ::fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+  int nodelay = 1;
+  ::setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+  conn->ctrl_fd = sock;
   register_conn(qp->qp_num, conn.get());
+  {
+    std::lock_guard<std::mutex> g(conn_mu_);
+    ctrl_conns_.push_back(conn);
+  }
   /* Armed before the connection is handed out, so a peer writing immediately
    * afterwards still finds a receive waiting. */
   Status rs = conn->arm_receives(pd_, cfg_.rq_depth);
@@ -502,7 +517,9 @@ Status RdmaProvider::connect(std::vector<uint8_t> const& peer_metadata,
     return Status::kPeerDisconnected;
   }
   Status s = build_connection(sock, out);
-  ::close(sock);
+  /* Not closed: build_connection keeps it as the control channel. On failure
+   * it never took ownership, so it is closed here. */
+  if (s != Status::kOk) ::close(sock);
   return s;
 }
 
@@ -520,7 +537,7 @@ Status RdmaProvider::accept(int64_t timeout_ms, ProviderConnectionPtr* out) {
       int sock = ::accept(listen_fd_, nullptr, nullptr);
       if (sock < 0) continue;
       Status s = build_connection(sock, out);
-      ::close(sock);
+      if (s != Status::kOk) ::close(sock);
       return s;
     }
     if (timeout_ms >= 0 && std::chrono::steady_clock::now() >= deadline)
@@ -695,6 +712,85 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
       else ++stats_.subops_failed;
     }
     out->push_back(ev);
+  }
+  return Status::kOk;
+}
+
+Status RdmaProvider::send_control(ProviderConnection* conn, uint16_t type,
+                                  std::vector<uint8_t> const& payload) {
+  if (conn == nullptr) return Status::kInvalidArgument;
+  if (payload.size() > kControlMaxPayload) return Status::kInvalidArgument;
+  auto* c = static_cast<RdmaConnection*>(conn);
+  if (c->ctrl_fd < 0) return Status::kPeerDisconnected;
+
+  ControlHeader h;
+  h.type = static_cast<ControlType>(type);
+  h.payload_len = static_cast<uint32_t>(payload.size());
+  uint8_t hdr[kControlHeaderBytes];
+  encode_control_header(h, hdr);
+
+  /* Header and payload go out under one lock. Interleaving them with another
+   * message would leave the peer's reader permanently out of step, and it
+   * would not find out until the next malformed length. */
+  std::lock_guard<std::mutex> g(c->send_mu_);
+  if (!send_all(c->ctrl_fd, hdr, kControlHeaderBytes))
+    return Status::kPeerDisconnected;
+  if (!payload.empty() &&
+      !send_all(c->ctrl_fd, payload.data(), payload.size()))
+    return Status::kPeerDisconnected;
+  return Status::kOk;
+}
+
+Status RdmaProvider::poll_control(uint32_t max_items,
+                                  std::vector<ControlMessage>* out) {
+  if (out == nullptr) return Status::kInvalidArgument;
+  out->clear();
+
+  std::vector<std::shared_ptr<RdmaConnection>> conns;
+  {
+    std::lock_guard<std::mutex> g(conn_mu_);
+    for (auto it = ctrl_conns_.begin(); it != ctrl_conns_.end();) {
+      auto c = it->lock();
+      if (c == nullptr) {
+        it = ctrl_conns_.erase(it);
+      } else {
+        conns.push_back(std::move(c));
+        ++it;
+      }
+    }
+  }
+
+  for (auto& c : conns) {
+    if (c->ctrl_fd < 0) continue;
+    /* Reads what is available and keeps any partial message for next time: a
+     * header split across two reads must not be parsed as if it were whole. */
+    uint8_t buf[4096];
+    while (true) {
+      ssize_t n = ::recv(c->ctrl_fd, buf, sizeof(buf), 0);
+      if (n <= 0) break;
+      c->rx.insert(c->rx.end(), buf, buf + n);
+      if (n < static_cast<ssize_t>(sizeof(buf))) break;
+    }
+
+    while (c->rx.size() >= kControlHeaderBytes && out->size() < max_items) {
+      ControlHeader h;
+      if (decode_control_header(c->rx.data(), &h) != Status::kOk) {
+        /* A malformed header means the stream cannot be resynchronized;
+         * dropping the rest is the only honest option. */
+        c->rx.clear();
+        break;
+      }
+      size_t total = kControlHeaderBytes + h.payload_len;
+      if (c->rx.size() < total) break;  /* wait for the remainder */
+
+      ControlMessage m;
+      m.conn = c.get();
+      m.type = static_cast<uint16_t>(h.type);
+      m.payload.assign(c->rx.begin() + kControlHeaderBytes,
+                       c->rx.begin() + total);
+      out->push_back(std::move(m));
+      c->rx.erase(c->rx.begin(), c->rx.begin() + total);
+    }
   }
   return Status::kOk;
 }

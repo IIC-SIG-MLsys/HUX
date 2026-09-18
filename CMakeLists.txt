@@ -25,6 +25,7 @@ add_library(hux_core
   src/core/region_impl.cpp
   src/core/request_impl.cpp
   src/core/engine_impl.cpp
+  src/control/control_message.cpp
   src/device/host_backend.cpp
   src/transport/mock/mock_provider.cpp
 )

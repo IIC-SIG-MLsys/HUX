@@ -57,13 +57,14 @@ directions with no buffer owned by the library anywhere on the path.
 
 In place: the public API, the completion contract, the provider contract, a
 single-QP RDMA provider, device dependencies, the write-side ready handoff,
-copy accounting, a mock backend, device backends for all five targets above,
-and a test suite that runs without hardware. Not yet: multiple queue pairs,
-congestion control, and `notify`.
+an engine-level control channel, acknowledged notifications, copy accounting,
+a mock backend, device backends for all five targets above, and a test suite
+that runs without hardware. Not yet: multiple queue pairs and congestion
+control.
 
-A ready handoff names the request it belongs to but not yet the region and
-span; the immediate value that signals arrival is 32 bits, enough to identify
-a handoff but not to describe one. Those arrive with the control message.
+Control traffic runs on its own channel rather than sharing the data path's
+budget, so a stalled transfer cannot starve the message that would explain
+it.
 
 The RDMA provider will be written rather than delegated to UCCL; the measured
 reasoning is in [docs/decisions/0001-rdma-provider.md](docs/decisions/0001-rdma-provider.md).

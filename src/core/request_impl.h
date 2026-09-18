@@ -60,9 +60,24 @@ class RequestImpl : public Request {
 
   void hold_region(MemoryRegionPtr r) { held_regions_.push_back(std::move(r)); }
   void hold_connection(ProviderConnectionPtr c) { held_conn_ = std::move(c); }
+  /* The connection this request went out on: a handoff belongs on the same
+   * one, not on whichever peer happens to be registered. */
+  ProviderConnectionPtr connection() const { return held_conn_; }
 
   void set_device_backend(DeviceBackend* d) { device_ = d; }
   void set_target(void* addr, uint64_t bytes);
+
+  /* Where a write landed on the peer. Sent once the transfer completes, so
+   * the target owner can build a dependency on exactly those bytes -- the
+   * 32-bit immediate that signals arrival cannot describe them. */
+  void set_remote_target(RegionId region, Generation gen, Span span) {
+    remote_region_ = region;
+    remote_gen_ = gen;
+    remote_span_ = span;
+  }
+  RegionId remote_region() const { return remote_region_; }
+  Generation remote_generation() const { return remote_gen_; }
+  Span remote_span() const { return remote_span_; }
 
  private:
   bool terminal_locked() const;
@@ -88,6 +103,9 @@ class RequestImpl : public Request {
   DeviceBackend* device_ = nullptr;
   void* target_addr_ = nullptr;
   uint64_t target_bytes_ = 0;
+  RegionId remote_region_ = 0;
+  Generation remote_gen_ = 0;
+  Span remote_span_;
 };
 
 using RequestImplPtr = std::shared_ptr<RequestImpl>;

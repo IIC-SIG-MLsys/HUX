@@ -139,26 +139,32 @@ int run_server(int gpu) {
     return 1;
   }
 
-  Buffer buf = make_buffer(gpu);
-  buf.fill(0x11);  /* the client will read this, and later overwrite it */
-
-  uint64_t lkey = 0, rkey = 0;
-  if (prov->register_region(buf.ptr, kBytes, DeviceId{},
-                            AccessFlags::kRemoteRead | AccessFlags::kRemoteWrite,
-                            &lkey, &rkey) != Status::kOk) {
-    std::printf("register failed\n");
+  /* An engine over the same provider, so the arrival of a peer's write can be
+   * collected as a ReadyEvent -- the handoff a target owner needs before
+   * scheduling anything that consumes the data. */
+  EngineConfig ecfg;
+  ecfg.progress = ProgressMode::kExplicit;
+  std::unique_ptr<Engine> engine;
+  if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) {
+    std::printf("[server] engine create failed\n");
     return 1;
   }
 
-  RegionDescriptor d;
-  d.region = 1;
-  d.generation = 1;
-  d.base = reinterpret_cast<uint64_t>(buf.ptr);
-  d.length = kBytes;
-  d.remote_key = rkey;
-  d.access = AccessFlags::kRemoteRead | AccessFlags::kRemoteWrite;
+  Buffer buf = make_buffer(gpu);
+  buf.fill(0x11);  /* the client will read this, and later overwrite it */
+
+  /* Registered through the engine so both ends agree on the region id: a
+   * handoff names the region the peer imported, and only a region this engine
+   * holds can be handed to a consumer. */
+  MemoryRegionPtr region;
+  if (engine->register_memory(buf.ptr, kBytes,
+                              AccessFlags::kRemoteRead | AccessFlags::kRemoteWrite,
+                              &region) != Status::kOk) {
+    std::printf("register failed\n");
+    return 1;
+  }
   std::vector<uint8_t> desc;
-  encode_descriptor(d, &desc);
+  region->export_descriptor(&desc);
 
   std::vector<uint8_t> meta;
   prov->local_metadata(&meta);
@@ -179,17 +185,6 @@ int run_server(int gpu) {
   send_blob(fd, meta.data(), static_cast<uint32_t>(meta.size()));
   send_blob(fd, desc.data(), static_cast<uint32_t>(desc.size()));
 
-  /* An engine over the same provider, so the arrival of a peer's write can be
-   * collected as a ReadyEvent -- the handoff a target owner needs before
-   * scheduling anything that consumes the data. */
-  EngineConfig ecfg;
-  ecfg.progress = ProgressMode::kExplicit;
-  std::unique_ptr<Engine> engine;
-  if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) {
-    std::printf("[server] engine create failed\n");
-    return 1;
-  }
-
   ProviderConnectionPtr conn;
   if (prov->accept(20000, &conn) != Status::kOk) {
     std::printf("[server] rdma accept failed\n");
@@ -206,10 +201,24 @@ int run_server(int gpu) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   std::printf("[server] ready handoffs received: %zu\n", ready.size());
-  if (!ready.empty()) {
-    std::printf("[server]   first names request %llu from peer %llu\n",
-                (unsigned long long)ready[0]->request(),
-                (unsigned long long)ready[0]->peer());
+  for (auto const& r : ready) {
+    std::printf("[server]   request %llu region %llu gen %u span [%llu,%llu)\n",
+                (unsigned long long)r->request(),
+                (unsigned long long)r->region(), r->generation(),
+                (unsigned long long)r->span().offset,
+                (unsigned long long)(r->span().offset + r->span().length));
+  }
+
+  std::vector<Notification> notes;
+  for (int i = 0; i < 2000 && notes.empty(); ++i) {
+    engine->poll_notifications(8, &notes);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::printf("[server] notifications received: %zu\n", notes.size());
+  if (!notes.empty()) {
+    std::string text(notes[0].payload.begin(), notes[0].payload.end());
+    std::printf("[server]   id %llu payload \"%s\"\n",
+                (unsigned long long)notes[0].id, text.c_str());
   }
 
   std::printf("[server] verifying what the client wrote: %s\n",
@@ -399,6 +408,28 @@ int run_client(std::string const& ip, int gpu) {
                 (unsigned long long)st.requests_failed);
   }
 
+  std::printf("\n=== notification, acknowledged by the peer ===\n");
+  {
+    std::string text = "hello from the initiator";
+    std::vector<uint8_t> payload(text.begin(), text.end());
+    RequestPtr note;
+    Status ns = engine->notify(peer.get(), payload, &note);
+    /* Released before waiting: the acknowledgement can only come from a peer
+     * that is running progress, and this one starts once it hears from us. */
+    send_blob(fd, "x", 1);
+    if (ns == Status::kOk) {
+      Status fs = drive(note);
+      std::printf("   send=%s  settle=%s  state=%s\n", to_string(ns),
+                  to_string(fs), to_string(note->state()));
+      std::printf("   -> %s\n",
+                  note->state() == RequestState::kSucceeded
+                      ? "the peer confirmed it reached its queue"
+                      : "not confirmed");
+    } else {
+      std::printf("   notify refused: %s\n", to_string(ns));
+    }
+  }
+
   /* Last, because it destroys the connection: an RC queue pair that takes a
    * fatal completion moves to ERROR and flushes everything posted after it.
    *
@@ -458,7 +489,6 @@ int run_client(std::string const& ip, int gpu) {
   std::printf("   test twice: %d %d   wait again: %s\n", d1, d2,
               to_string(wr->wait(100)));
 
-  send_blob(fd, "x", 1);
   std::vector<uint8_t> fin;
   recv_blob(fd, &fin);
   ::close(fd);
