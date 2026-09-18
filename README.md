@@ -105,7 +105,7 @@ Backends are opt-in and off by default:
 
 ```
 -DHUX_ENABLE_RDMA=ON      Native RDMA provider (libibverbs)
--DHUX_ENABLE_UCX=ON       UCX provider
+-DHUX_ENABLE_UCX=ON       UCX provider (see docs/ucx.md)
 -DHUX_ENABLE_CUDA=ON      NVIDIA
 -DHUX_ENABLE_ROCM=ON      AMD / Hygon
 -DHUX_ENABLE_NEUWARE=ON   Cambricon

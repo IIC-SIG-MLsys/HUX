@@ -68,6 +68,10 @@ if(HUX_ENABLE_UCX)
       "HUX_ENABLE_UCX=ON but UCX was not found. "
       "Install libucx-dev, or configure with -DHUX_ENABLE_UCX=OFF.")
   endif()
+  add_library(hux_transport_ucx src/transport/ucx/ucx_provider.cpp)
+  target_include_directories(hux_transport_ucx PUBLIC ${UCX_INCLUDE_DIR})
+  target_link_libraries(hux_transport_ucx PUBLIC hux_core ${UCX_LIBRARY})
+  target_compile_options(hux_transport_ucx PRIVATE -Wall -Wextra)
   message(STATUS "HUX: UCX provider enabled (${UCX_LIBRARY})")
 endif()
 
