@@ -18,6 +18,7 @@ option(HUX_ENABLE_ROCM    "AMD / Hygon device backend"        OFF)
 option(HUX_ENABLE_NEUWARE "Cambricon device backend"          OFF)
 option(HUX_ENABLE_MUSA    "Moore Threads device backend"      OFF)
 option(HUX_BUILD_TESTS    "Build tests"                       ON)
+option(HUX_BUILD_PYTHON  "Python bindings (needs nanobind)"  OFF)
 
 # ---- core：纯 C++，无外部依赖 ----
 add_library(hux_core
@@ -150,6 +151,43 @@ if(HUX_ENABLE_MUSA)
   target_link_libraries(hux_device_musa PUBLIC hux_core musart musa)
   target_compile_options(hux_device_musa PRIVATE -Wall -Wextra)
   message(STATUS "HUX: MUSA device backend enabled (${MUSA_HOME}, libs ${MUSA_LIB_DIR})")
+endif()
+
+if(HUX_BUILD_PYTHON)
+  find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+  # nanobind ships its CMake config inside the installed package.
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
+    OUTPUT_VARIABLE NB_DIR OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE NB_RESULT)
+  if(NOT NB_RESULT EQUAL 0)
+    message(FATAL_ERROR
+      "HUX_BUILD_PYTHON=ON but nanobind was not found. "
+      "Install it with: pip install nanobind")
+  endif()
+  list(APPEND CMAKE_PREFIX_PATH "${NB_DIR}")
+  find_package(nanobind CONFIG REQUIRED)
+
+  set(HUX_PY_SOURCES python/hux_py.cpp)
+  nanobind_add_module(hux_python NB_STATIC ${HUX_PY_SOURCES})
+  set_target_properties(hux_python PROPERTIES OUTPUT_NAME hux)
+  target_link_libraries(hux_python PRIVATE hux_core)
+  if(TARGET hux_transport_rdma)
+    # The RDMA provider is only exposed when it was built; otherwise the
+    # module still works over the mock backend.
+    target_link_libraries(hux_python PRIVATE hux_transport_rdma)
+    target_compile_definitions(hux_python PRIVATE HUX_PY_RDMA)
+  endif()
+  if(HUX_BUILD_TESTS)
+    enable_testing()
+    add_test(NAME python_bindings
+             COMMAND "${Python_EXECUTABLE}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_bindings.py")
+    # The module lands in the build directory, not on the default path.
+    set_tests_properties(python_bindings PROPERTIES
+                         ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}")
+  endif()
+  message(STATUS "HUX: Python bindings enabled (${NB_DIR})")
 endif()
 
 if(HUX_BUILD_TESTS)

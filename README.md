@@ -82,6 +82,15 @@ cmake --build build -j
 cd build && ctest --output-on-failure
 ```
 
+Python bindings are opt-in as well, and need nanobind:
+
+```bash
+pip install nanobind
+cmake -S . -B build -DHUX_BUILD_PYTHON=ON
+cmake --build build -j
+PYTHONPATH=build python -c "import hux; print(hux.make_mock_engine().describe())"
+```
+
 Backends are opt-in and off by default:
 
 ```
@@ -138,6 +147,13 @@ tests:
   stalls with nothing to wait for.
 * **Out of budget is not a failure.** The remainder is offered again later;
   dropping it would lose data the caller believes is on its way.
+* **A registration holds the buffer it covers.** `PyObject_GetBuffer` keeps a
+  reference to the exporting object, so a caller may register a tensor and
+  drop it. Nothing else would keep the memory alive, and the failure would be
+  a crash with no traceback.
+* **Every blocking call releases the GIL.** One that does not freezes every
+  other thread in the interpreter, including whichever one would have polled
+  for the completion being waited on.
 * **A configuration report has to cover both halves.** Queue pairs,
   signalling and the congestion controller belong to the provider; a report
   built from the engine's settings alone describes a configuration nobody is

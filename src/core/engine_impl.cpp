@@ -171,12 +171,19 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
     owned->remote_key = rkey;
 
     /* Released through the provider once nothing references it any more --
-     * another handle, or the cache. */
-    TransportProvider* prov = provider_.get();
+     * another handle, or the cache.
+     *
+     * The provider is captured by shared_ptr, not by raw pointer. A region
+     * can outlive the engine that created it: a caller holding a handle after
+     * dropping the engine is doing nothing wrong, and a raw pointer would
+     * leave this deleter calling into freed memory at some later teardown,
+     * with nothing in the stack to say why. */
+    TransportProviderPtr prov = provider_;
     reg = RegistrationPtr(owned.get(),
                           [prov, lkey, owned](Registration*) mutable {
                             prov->deregister_region(lkey);
                             owned.reset();
+                            prov.reset();
                           });
     if (cfg_.registration_cache_entries > 0) cache_registration(reg);
   }
