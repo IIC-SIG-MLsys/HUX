@@ -305,6 +305,52 @@ int run_client(std::string const& ip, int gpu) {
   s = drive(wr);
   std::printf("   status %s\n", to_string(s));
 
+  /* The same situation that leaves UCCL's poll_async waiting forever: a read
+   * against an address the peer never exported. The RDMA layer raises a
+   * remote access error; what matters is whether the caller learns of it and
+   * whether the request reaches a terminal state so its memory can be freed. */
+  std::printf("\n=== failure is reported, not hung ===\n");
+  {
+    RegionDescriptor bogus;
+    bogus.region = 99;
+    bogus.generation = 1;
+    bogus.base = 0xdead0000ull;   /* never registered by the peer */
+    bogus.length = kBytes;
+    bogus.remote_key = 0x12345678u;
+    bogus.access = AccessFlags::kRemoteRead;
+    std::vector<uint8_t> bd;
+    encode_descriptor(bogus, &bd);
+
+    RemoteRegionPtr bad_remote;
+    if (peer->import_region(bd, &bad_remote) == Status::kOk) {
+      RegionView brv;
+      bad_remote->view(0, kBytes, &brv);
+      RequestPtr bad;
+      Status bs = engine->read(peer.get(), lv, brv, {}, &bad);
+      if (bs == Status::kOk) {
+        auto t0 = std::chrono::steady_clock::now();
+        Status ds = drive(bad);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0).count();
+        bool terminal = is_terminal(bad->state());
+        std::printf("   resolved in %lld ms: status=%s state=%s terminal=%d\n",
+                    (long long)ms, to_string(ds), to_string(bad->state()),
+                    terminal);
+        std::printf("   error: %s  may_have_modified_target=%d\n",
+                    to_string(bad->error().status),
+                    bad->error().may_have_modified_target);
+        std::printf("   reached failed_safe=%d target_ready=%d\n",
+                    bad->reached(Stage::kFailedSafe),
+                    bad->reached(Stage::kTargetReady));
+        std::printf("   -> %s\n",
+                    terminal ? "terminal, so its resources can be released"
+                             : "NOT terminal: resources cannot be freed");
+      } else {
+        std::printf("   submit refused up front: %s\n", to_string(bs));
+      }
+    }
+  }
+
   std::printf("\n=== repeated queries agree ===\n");
   bool d1 = false, d2 = false;
   wr->test(&d1);
