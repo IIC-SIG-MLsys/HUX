@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "transport/provider.h"
@@ -56,6 +57,13 @@ class MockProvider : public TransportProvider {
   ProviderStats stats() const override {
     std::lock_guard<std::mutex> g(mu_);
     return stats_;
+  }
+
+  std::string describe() const override {
+    return std::string("{\"provider\":\"mock\",\"qp_count\":") +
+           std::to_string(cfg_.qp_count) +
+           ",\"budget_bytes\":" + std::to_string(cfg_.budget_bytes) +
+           ",\"move_data\":" + (cfg_.move_data ? "true" : "false") + "}";
   }
 
   ProviderCaps caps() const override {

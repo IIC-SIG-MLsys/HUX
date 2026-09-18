@@ -138,6 +138,10 @@ tests:
   stalls with nothing to wait for.
 * **Out of budget is not a failure.** The remainder is offered again later;
   dropping it would lose data the caller believes is on its way.
+* **A configuration report has to cover both halves.** Queue pairs,
+  signalling and the congestion controller belong to the provider; a report
+  built from the engine's settings alone describes a configuration nobody is
+  running.
 * **The delay a controller reacts to is not a network round trip.** It is
   measured from the post to its completion, so it includes serialization,
   queueing at the NIC and host, and polling delay. The algorithm works on it;

@@ -98,6 +98,7 @@ class EngineImpl : public Engine {
   Status progress() override;
   Status record_event(DeviceStream* stream, DeviceEventPtr* out) override;
   EngineStats stats() const override;
+  std::string describe() const override;
   Status close(int64_t timeout_ms) override;
 
   /* For PeerImpl. */

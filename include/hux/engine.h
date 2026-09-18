@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "hux/config.h"
@@ -45,7 +46,34 @@ struct EngineStats {
   uint64_t subops_failed = 0;
   uint64_t payload_bytes = 0;
   uint64_t payload_bytes_copied = 0;
+
+  /* Registration reuse. A hit rate near zero means ranges are being
+   * registered repeatedly, which is expensive and usually a sign the caller
+   * is registering per transfer rather than per pool. */
+  uint64_t registrations_created = 0;
+  uint64_t registrations_reused = 0;
+  uint64_t registration_cache_size = 0;
+
+  /* Control plane, kept apart from data: it has its own resources, and
+   * counting them together would hide a stalled control channel behind
+   * healthy data traffic. */
+  uint64_t notifications_sent = 0;
+  uint64_t notifications_received = 0;
+  uint64_t notifications_dropped = 0; /* queue full, so not acknowledged */
+  uint64_t ready_handoffs_sent = 0;
+  uint64_t ready_handoffs_received = 0;
+
+  /* Peak in-flight requests, which is what sizing max_inflight_requests
+   * needs; the current value says nothing about what the run demanded. */
+  uint64_t peak_inflight_requests = 0;
 };
+
+/* The engine's own settings, as machine-readable text.
+ *
+ * Only half the picture: queue pairs, signalling and the congestion
+ * controller belong to the provider. Engine::describe() reports both, and is
+ * what a run should record. */
+std::string describe_config(EngineConfig const& cfg);
 
 /* The engine owns no communication buffer. The application owns its memory and
  * the engine registers and transfers in place -- this is the main departure
@@ -109,6 +137,11 @@ class Engine {
   virtual Status progress() = 0;
   virtual Status record_event(DeviceStream* stream, DeviceEventPtr* out) = 0;
   virtual EngineStats stats() const = 0;
+
+  /* Everything in effect for this run: the engine's settings and the
+   * provider's together. A report from either side alone describes a
+   * configuration nobody is running. */
+  virtual std::string describe() const = 0;
 
   /* Stops accepting work and drains. On timeout it keeps the resources and
    * reports the incomplete state; it never destroys objects still under DMA. */

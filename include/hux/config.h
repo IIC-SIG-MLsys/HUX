@@ -30,6 +30,10 @@ struct EngineConfig {
   DeviceId device;
   ProgressMode progress = ProgressMode::kThread;
 
+  /* Requested, not authoritative. Queue pairs are created by the provider and
+   * its own setting decides; this one is what the caller asked for. The
+   * report from Engine::describe() shows both, so the difference is visible
+   * rather than something to be inferred. */
   uint32_t qp_per_peer = 1;
   uint64_t chunk_bytes = 1u << 20;
   uint32_t wr_batch = 16;
@@ -51,6 +55,8 @@ struct EngineConfig {
    * for. Zero disables reuse entirely. */
   uint32_t registration_cache_entries = 64;
 
+  /* Also requested rather than authoritative: the controller is installed on
+   * the provider, and a controller supplied there takes precedence. */
   CongestionControl cc = CongestionControl::kOff;
   uint64_t cc_window_bytes = 1u << 22;
 

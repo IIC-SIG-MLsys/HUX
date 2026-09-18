@@ -134,6 +134,13 @@ class TransportProvider {
   virtual ProviderCaps caps() const = 0;
   virtual ProviderStats stats() const = 0;
 
+  /* The settings this provider is actually running with, as machine-readable
+   * text. Several of them -- queue pairs, signalling, the congestion
+   * controller -- live here rather than in EngineConfig, so a report built
+   * only from the engine's side would describe a configuration that is not
+   * the one in use. */
+  virtual std::string describe() const { return "{}"; }
+
   virtual Status register_region(void* addr, uint64_t length, DeviceId device,
                                  AccessFlags access, uint64_t* local_key,
                                  uint64_t* remote_key) = 0;

@@ -1,7 +1,9 @@
 /* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
+#include <sstream>
 #include <string>
 
 #include "hux/config.h"
+#include "hux/engine.h"
 #include "hux/notification.h"
 #include "hux/peer.h"
 #include "hux/request.h"
@@ -118,6 +120,63 @@ char const* to_string(PathKind p) {
       return "ucx";
   }
   return "unknown";
+}
+
+namespace {
+
+char const* progress_name(ProgressMode m) {
+  return m == ProgressMode::kThread ? "thread" : "explicit";
+}
+
+char const* cc_name(CongestionControl c) {
+  switch (c) {
+    case CongestionControl::kOff:
+      return "off";
+    case CongestionControl::kFixedWindow:
+      return "fixed_window";
+    case CongestionControl::kAdaptive:
+      return "adaptive";
+  }
+  return "unknown";
+}
+
+char const* device_name(DeviceKind k) {
+  switch (k) {
+    case DeviceKind::kHost:
+      return "host";
+    case DeviceKind::kCuda:
+      return "cuda";
+    case DeviceKind::kRocm:
+      return "rocm";
+    case DeviceKind::kCambricon:
+      return "cambricon";
+    case DeviceKind::kMoore:
+      return "moore";
+  }
+  return "unknown";
+}
+
+}  // namespace
+
+std::string describe_config(EngineConfig const& cfg) {
+  std::ostringstream o;
+  o << "{"
+    << "\"device\":\"" << device_name(cfg.device.kind) << ':'
+    << cfg.device.index << "\","
+    << "\"progress\":\"" << progress_name(cfg.progress) << "\","
+    << "\"qp_per_peer\":" << cfg.qp_per_peer << ','
+    << "\"chunk_bytes\":" << cfg.chunk_bytes << ','
+    << "\"wr_batch\":" << cfg.wr_batch << ',' << "\"cq_batch\":" << cfg.cq_batch
+    << ',' << "\"max_inflight_requests\":" << cfg.max_inflight_requests << ','
+    << "\"scheduler_quantum_bytes\":" << cfg.scheduler_quantum_bytes << ','
+    << "\"registration_cache_entries\":" << cfg.registration_cache_entries
+    << ',' << "\"cc\":\"" << cc_name(cfg.cc) << "\","
+    << "\"cc_window_bytes\":" << cfg.cc_window_bytes << ','
+    << "\"notify_queue_depth\":" << cfg.notify_queue_depth << ','
+    << "\"notify_max_payload\":" << cfg.notify_max_payload << ','
+    << "\"preferred_provider\":\"" << cfg.preferred_provider << "\""
+    << "}";
+  return o.str();
 }
 
 /* Conflicting parameters are rejected with a reason. Silently rewriting them

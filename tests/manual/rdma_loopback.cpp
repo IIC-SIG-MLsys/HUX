@@ -399,6 +399,9 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
   }
 #endif
 
+  std::printf("\n=== configuration in effect ===\n");
+  std::printf("   %s\n", engine->describe().c_str());
+
   std::printf("\n=== payload copies on the whole path ===\n");
   {
     EngineStats st = engine->stats();
@@ -424,6 +427,20 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
         cc->name(), (unsigned long long)cc->window_bytes(CcDirection::kWrite),
         cc->rate_bytes_per_sec(CcDirection::kWrite) / 1e6,
         (unsigned long long)st.submit_deferred);
+    std::printf("   registrations: created=%llu reused=%llu cached=%llu\n",
+                (unsigned long long)st.registrations_created,
+                (unsigned long long)st.registrations_reused,
+                (unsigned long long)st.registration_cache_size);
+    std::printf(
+        "   control: notify sent=%llu recv=%llu dropped=%llu,"
+        " handoff sent=%llu recv=%llu\n",
+        (unsigned long long)st.notifications_sent,
+        (unsigned long long)st.notifications_received,
+        (unsigned long long)st.notifications_dropped,
+        (unsigned long long)st.ready_handoffs_sent,
+        (unsigned long long)st.ready_handoffs_received);
+    std::printf("   peak in-flight requests: %llu\n",
+                (unsigned long long)st.peak_inflight_requests);
     std::printf("   requests: accepted=%llu succeeded=%llu failed=%llu\n",
                 (unsigned long long)st.requests_accepted,
                 (unsigned long long)st.requests_succeeded,

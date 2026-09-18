@@ -149,6 +149,13 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
    * handle stays its own: it describes what the caller asked for, holds an
    * independent reference, and is deregistered on its own. */
   RegistrationPtr reg = find_registration(addr, length, dev, access);
+  {
+    std::lock_guard<std::mutex> g(stats_mu_);
+    if (reg != nullptr)
+      ++stats_.registrations_reused;
+    else
+      ++stats_.registrations_created;
+  }
   if (reg == nullptr) {
     uint64_t lkey = 0, rkey = 0;
     Status s =
@@ -519,8 +526,17 @@ Status EngineImpl::submit_vector(Peer* peer,
     inflight_[req_id] = req;
   }
   {
+    size_t depth = 0;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      depth = inflight_.size();
+    }
     std::lock_guard<std::mutex> g(stats_mu_);
     ++stats_.requests_accepted;
+    /* Peak rather than current: sizing max_inflight_requests needs what the
+     * run demanded, and the value at the end says nothing about that. */
+    if (depth > stats_.peak_inflight_requests)
+      stats_.peak_inflight_requests = depth;
   }
 
   PendingSubmit ps;
@@ -608,6 +624,10 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
 
   Status s = provider_->send_control(
       p->conn(), static_cast<uint16_t>(ControlType::kNotification), body);
+  if (s == Status::kOk) {
+    std::lock_guard<std::mutex> g(stats_mu_);
+    ++stats_.notifications_sent;
+  }
   if (s != Status::kOk) {
     {
       std::lock_guard<std::mutex> g(mu_);
@@ -688,6 +708,10 @@ Status EngineImpl::progress() {
           if (lr != nullptr && Span{b.offset, b.length}.within(lr->length())) {
             addr = static_cast<char*>(lr->base()) + b.offset;
           }
+          {
+            std::lock_guard<std::mutex> g(stats_mu_);
+            ++stats_.ready_handoffs_received;
+          }
           std::lock_guard<std::mutex> g(mu_);
           ready_events_.push_back(std::make_shared<ReadyEventImpl>(
               b.request, m.peer, device_.get(), addr, b.length, b.region,
@@ -712,6 +736,13 @@ Status EngineImpl::progress() {
               notifications_.push_back(std::move(n));
               queued = true;
             }
+          }
+          {
+            std::lock_guard<std::mutex> g(stats_mu_);
+            if (queued)
+              ++stats_.notifications_received;
+            else
+              ++stats_.notifications_dropped;
           }
           /* Acknowledged only once it is actually in the queue. Confirming a
            * message that was dropped would tell the sender something false,
@@ -826,6 +857,8 @@ Status EngineImpl::progress() {
           provider_->send_control(
               conn.get(), static_cast<uint16_t>(ControlType::kReadyHandoff),
               payload);
+          std::lock_guard<std::mutex> g(stats_mu_);
+          ++stats_.ready_handoffs_sent;
         }
       }
       req->finish_success();
@@ -848,6 +881,15 @@ void EngineImpl::progress_loop() {
   }
 }
 
+std::string EngineImpl::describe() const {
+  std::string engine = describe_config(cfg_);
+  std::string provider = provider_->describe();
+  /* Both halves, side by side, so nothing has to be inferred about which
+   * settings were actually in force. */
+  return std::string("{\"engine\":") + engine + ",\"provider\":" + provider +
+         "}";
+}
+
 EngineStats EngineImpl::stats() const {
   EngineStats s;
   {
@@ -857,6 +899,7 @@ EngineStats EngineImpl::stats() const {
   {
     std::lock_guard<std::mutex> g(mu_);
     s.requests_waiting_on_dependency = pending_.size();
+    s.registration_cache_size = reg_cache_.size();
   }
   /* Sub-operation and byte counts come from the provider, which is the only
    * layer that knows whether a copy happened. */

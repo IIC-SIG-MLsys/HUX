@@ -111,6 +111,7 @@ class RdmaProvider : public TransportProvider {
 
   ProviderCaps caps() const override;
   ProviderStats stats() const override;
+  std::string describe() const override;
 
   Status register_region(void* addr, uint64_t length, DeviceId device,
                          AccessFlags access, uint64_t* local_key,

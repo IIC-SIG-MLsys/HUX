@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -340,6 +341,29 @@ ProviderCaps RdmaProvider::caps() const {
   c.max_segment_bytes = 0;
   c.max_sge = cfg_.max_sge;
   return c;
+}
+
+std::string RdmaProvider::describe() const {
+  std::ostringstream o;
+  o << "{"
+    << "\"provider\":\"rdma\","
+    << "\"device\":\""
+    << (ctx_ != nullptr ? ibv_get_device_name(ctx_->device) : "none") << "\","
+    << "\"ib_port\":" << static_cast<int>(cfg_.ib_port) << ','
+    << "\"gid_index\":" << gid_index_ << ',' << "\"link_layer\":\""
+    << (port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET ? "ethernet"
+                                                         : "infiniband")
+    << "\","
+    << "\"active_mtu\":" << static_cast<int>(port_attr_.active_mtu) << ','
+    << "\"qp_per_conn\":" << cfg_.qp_per_conn << ','
+    << "\"sq_depth\":" << cfg_.sq_depth << ','
+    << "\"rq_depth\":" << cfg_.rq_depth << ','
+    << "\"cq_depth\":" << cfg_.cq_depth << ','
+    << "\"signal_period\":" << cfg_.signal_period << ',' << "\"cc\":\""
+    << (cc_ != nullptr ? cc_->name() : "none") << "\","
+    << "\"cc_window_bytes\":"
+    << (cc_ != nullptr ? cc_->window_bytes(CcDirection::kWrite) : 0) << "}";
+  return o.str();
 }
 
 ProviderStats RdmaProvider::stats() const {
