@@ -65,9 +65,7 @@ struct ProviderCaps {
   bool supports_vector = false;      /* Otherwise core splits into scalars. */
   bool supports_multi_qp = false;
   bool needs_explicit_flush = false; /* UCX: local put != remote visibility. */
-  /* Whether a write can tell the peer it landed. Without it the peer cannot
-   * hand the data to a consumer, and a write cannot honestly reach
-   * target_ready. */
+  /* Reserved alongside SubOp::signal_peer; see the note there. */
   bool supports_peer_signal = false;
   uint64_t max_segment_bytes = 0;    /* 0 if unbounded. */
   uint32_t max_sge = 1;
@@ -77,12 +75,15 @@ struct ProviderCaps {
  * done; the provider only turns this into WRs and posts them. */
 struct SubOp {
   enum class Kind : uint8_t { kRead, kWrite };
-  /* Set on the last sub-operation of a write so the peer learns the data
-   * arrived. A one-sided write is invisible to the receiving CPU otherwise,
-   * which is why a write cannot reach target_ready on the sender's word
-   * alone. */
+  /* Reserved. Attaching an arrival signal to the last data sub-operation
+   * looks appealing and is wrong once there is more than one queue pair:
+   * ordering holds within a queue pair, not across them, so that signal can
+   * complete while chunks on other queue pairs are still in flight, and the
+   * peer would be told the data had landed before it had. Arrival is
+   * announced by the engine over the control channel, after every
+   * sub-operation has completed. */
   bool signal_peer = false;
-  uint32_t peer_token = 0;  /* carried to the peer with that signal */
+  uint32_t peer_token = 0;
   Kind kind = Kind::kRead;
   RequestId request = 0;
   uint64_t sub_id = 0;      /* Unique within the request; used to aggregate. */

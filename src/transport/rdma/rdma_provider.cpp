@@ -8,6 +8,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <fcntl.h>
+#include <utility>
 #include <unistd.h>
 
 #include <algorithm>
@@ -125,15 +126,17 @@ Status check_wire_version(uint16_t peer_major, uint16_t peer_minor) {
 
 // ---------------- RdmaConnection ----------------
 
-RdmaConnection::RdmaConnection(RdmaProvider* owner, ibv_qp* qp,
-                               RdmaEndpointInfo remote)
-    : owner_(owner), qp_(qp), remote_(remote) {}
+RdmaConnection::RdmaConnection(RdmaProvider* owner, std::vector<QueuePair> qps,
+                               std::vector<RdmaEndpointInfo> remote)
+    : owner_(owner), qps_(std::move(qps)), remote_(std::move(remote)) {}
 
 RdmaConnection::~RdmaConnection() {
   if (ctrl_fd >= 0) ::close(ctrl_fd);
-  if (qp_ != nullptr) {
-    owner_->forget_conn(qp_->qp_num);
-    ibv_destroy_qp(qp_);
+  for (auto& q : qps_) {
+    if (q.qp != nullptr) {
+      owner_->forget_conn(q.qp->qp_num);
+      ibv_destroy_qp(q.qp);
+    }
   }
   if (recv_mr_ != nullptr) ibv_dereg_mr(recv_mr_);
 }
@@ -157,7 +160,9 @@ Status RdmaConnection::arm_receives(ibv_pd* pd, uint32_t count) {
 }
 
 Status RdmaConnection::repost_receive() {
-  if (recv_mr_ == nullptr) return Status::kUnsupported;
+  /* Receives live on the first queue pair only: they exist to catch arrival
+   * signals, and a peer sends one per logical request, not per queue pair. */
+  if (recv_mr_ == nullptr || qps_.empty()) return Status::kUnsupported;
   ibv_sge sge{};
   sge.addr = reinterpret_cast<uint64_t>(recv_buf_.data());
   sge.length = 16;
@@ -168,31 +173,40 @@ Status RdmaConnection::repost_receive() {
   wr.sg_list = &sge;
   wr.num_sge = 1;
   ibv_recv_wr* bad = nullptr;
-  return ibv_post_recv(qp_, &wr, &bad) == 0 ? Status::kOk
+  return ibv_post_recv(qps_[0].qp, &wr, &bad) == 0 ? Status::kOk
                                             : Status::kTransportError;
 }
 
 uint32_t RdmaConnection::submit_capacity() const {
-  uint32_t depth = owner_->config().sq_depth;
-  uint32_t used = outstanding_.load(std::memory_order_acquire);
-  return used >= depth ? 0 : depth - used;
-}
-
-void RdmaConnection::note_posted(uint32_t n) {
-  outstanding_.fetch_add(n, std::memory_order_acq_rel);
-}
-
-void RdmaConnection::note_completed(uint32_t n) {
-  /* Never let the counter wrap: a completion for a work request this
-   * connection did not post would otherwise inflate its capacity forever. */
-  uint32_t cur = outstanding_.load(std::memory_order_acquire);
-  while (true) {
-    uint32_t dec = n < cur ? n : cur;
-    if (dec == 0) return;
-    if (outstanding_.compare_exchange_weak(cur, cur - dec,
-                                           std::memory_order_acq_rel))
-      return;
+  uint32_t const depth = owner_->config().sq_depth;
+  uint64_t room = 0;
+  std::lock_guard<std::mutex> g(qp_mu_);
+  for (auto const& q : qps_) {
+    uint64_t used = q.posted - q.reclaimed;
+    if (used < depth) room += depth - used;
   }
+  return static_cast<uint32_t>(room);
+}
+
+QueuePair* RdmaConnection::pick_queue_pair_locked() {
+  uint32_t const depth = owner_->config().sq_depth;
+  QueuePair* best = nullptr;
+  uint64_t best_room = 0;
+  size_t const n = qps_.size();
+  for (size_t i = 0; i < n; ++i) {
+    /* Starts from a rotating offset so equal queues are still spread, then
+     * prefers depth: a plain rotation keeps handing work to a queue that is
+     * already full while others sit idle. */
+    QueuePair& q = qps_[(next_qp_ + i) % n];
+    uint64_t used = q.posted - q.reclaimed;
+    uint64_t room = used >= depth ? 0 : depth - used;
+    if (room > best_room) {
+      best_room = room;
+      best = &q;
+    }
+  }
+  next_qp_ = (next_qp_ + 1) % static_cast<uint32_t>(n);
+  return best;
 }
 
 // ---------------- RdmaProvider ----------------
@@ -317,7 +331,10 @@ ProviderCaps RdmaProvider::caps() const {
   c.supports_vector = false;  /* Core splits into scalar sub-operations. */
   c.supports_multi_qp = false;
   c.needs_explicit_flush = false;
-  c.supports_peer_signal = true;
+  /* False deliberately: an immediate value rides one queue pair, and one
+   * queue pair completing says nothing about the others. Arrival is announced
+   * over the control channel once every sub-operation is done. */
+  c.supports_peer_signal = false;
   c.max_segment_bytes = 0;
   c.max_sge = cfg_.max_sge;
   return c;
@@ -377,104 +394,157 @@ Status RdmaProvider::local_metadata(std::vector<uint8_t>* out) const {
  * checked: a QP left in the wrong state fails later at post time, where the
  * cause is far less obvious. */
 Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
-  ibv_qp_init_attr init{};
-  init.send_cq = cq_;
-  init.recv_cq = cq_;
-  init.qp_type = IBV_QPT_RC;
-  init.cap.max_send_wr = cfg_.sq_depth;
-  init.cap.max_recv_wr = cfg_.rq_depth;
-  init.cap.max_send_sge = cfg_.max_sge;
-  init.cap.max_recv_sge = 1;
+  uint32_t const n = cfg_.qp_per_conn == 0 ? 1 : cfg_.qp_per_conn;
 
-  ibv_qp* qp = ibv_create_qp(pd_, &init);
-  if (qp == nullptr) return Status::kDeviceError;
+  std::vector<QueuePair> qps(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    ibv_qp_init_attr init{};
+    init.send_cq = cq_;
+    init.recv_cq = cq_;
+    init.qp_type = IBV_QPT_RC;
+    init.cap.max_send_wr = cfg_.sq_depth;
+    /* Only the first queue pair receives; the others never post one. */
+    init.cap.max_recv_wr = i == 0 ? cfg_.rq_depth : 1;
+    init.cap.max_send_sge = cfg_.max_sge;
+    init.cap.max_recv_sge = 1;
+    qps[i].qp = ibv_create_qp(pd_, &init);
+    if (qps[i].qp == nullptr) {
+      for (auto& q : qps)
+        if (q.qp != nullptr) ibv_destroy_qp(q.qp);
+      return Status::kDeviceError;
+    }
+  }
 
-  RdmaEndpointInfo mine;
-  mine.qp_num = qp->qp_num;
-  mine.lid = port_attr_.lid;
-  std::memcpy(mine.gid, &local_gid_, 16);
-  mine.psn = 0;
-  mine.mtu = static_cast<uint32_t>(port_attr_.active_mtu);
+  auto destroy_all = [&] {
+    for (auto& q : qps)
+      if (q.qp != nullptr) ibv_destroy_qp(q.qp);
+  };
 
-  /* Exchange before any transition, so both ends know the peer's QP number
-   * and MTU. */
-  uint8_t tx[kEpInfoBytes], rx[kEpInfoBytes];
-  encode_ep(mine, tx);
-  if (!send_all(sock, tx, kEpInfoBytes) || !recv_all(sock, rx, kEpInfoBytes)) {
-    ibv_destroy_qp(qp);
+  /* The count goes first so the peer knows how much follows. Both ends must
+   * agree on it: pairing N against M would leave queue pairs connected to
+   * nothing. */
+  std::vector<uint8_t> tx(4 + n * kEpInfoBytes);
+  tx[0] = static_cast<uint8_t>(n & 0xff);
+  tx[1] = static_cast<uint8_t>((n >> 8) & 0xff);
+  tx[2] = static_cast<uint8_t>((n >> 16) & 0xff);
+  tx[3] = static_cast<uint8_t>((n >> 24) & 0xff);
+  for (uint32_t i = 0; i < n; ++i) {
+    RdmaEndpointInfo mine;
+    mine.qp_num = qps[i].qp->qp_num;
+    mine.lid = port_attr_.lid;
+    std::memcpy(mine.gid, &local_gid_, 16);
+    mine.psn = 0;
+    mine.mtu = static_cast<uint32_t>(port_attr_.active_mtu);
+    encode_ep(mine, tx.data() + 4 + i * kEpInfoBytes);
+  }
+
+  if (!send_all(sock, tx.data(), tx.size())) {
+    destroy_all();
     return Status::kPeerDisconnected;
   }
-  RdmaEndpointInfo peer;
-  decode_ep(rx, &peer);
 
-  Status vs = check_wire_version(peer.major, peer.minor);
+  uint8_t count_buf[4];
+  if (!recv_all(sock, count_buf, 4)) {
+    destroy_all();
+    return Status::kPeerDisconnected;
+  }
+  uint32_t peer_n = static_cast<uint32_t>(count_buf[0]) |
+                    (static_cast<uint32_t>(count_buf[1]) << 8) |
+                    (static_cast<uint32_t>(count_buf[2]) << 16) |
+                    (static_cast<uint32_t>(count_buf[3]) << 24);
+  if (peer_n != n) {
+    /* Refused rather than trimmed to the smaller side: a caller that asked
+     * for a given width should hear that it did not get it. */
+    destroy_all();
+    return Status::kInvalidArgument;
+  }
+
+  std::vector<uint8_t> rx(n * kEpInfoBytes);
+  if (!recv_all(sock, rx.data(), rx.size())) {
+    destroy_all();
+    return Status::kPeerDisconnected;
+  }
+
+  std::vector<RdmaEndpointInfo> peers(n);
+  for (uint32_t i = 0; i < n; ++i) decode_ep(rx.data() + i * kEpInfoBytes, &peers[i]);
+
+  Status vs = check_wire_version(peers[0].major, peers[0].minor);
   if (vs != Status::kOk) {
     /* Refused before any queue pair transition, so neither end is left with a
      * half-built connection. */
-    ibv_destroy_qp(qp);
+    destroy_all();
     return vs;
   }
 
-  ibv_qp_attr attr{};
-  attr.qp_state = IBV_QPS_INIT;
-  attr.pkey_index = 0;
-  attr.port_num = cfg_.ib_port;
-  attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
-                         IBV_ACCESS_REMOTE_WRITE;
-  if (ibv_modify_qp(qp, &attr,
-                    IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
-                        IBV_QP_ACCESS_FLAGS) != 0) {
-    ibv_destroy_qp(qp);
-    return Status::kDeviceError;
+  /* Each queue pair is taken through RESET -> INIT -> RTR -> RTS against its
+   * own peer. One left in the wrong state fails later at post time, where the
+   * cause is much harder to see. */
+  for (uint32_t i = 0; i < n; ++i) {
+    ibv_qp* qp = qps[i].qp;
+    RdmaEndpointInfo const& peer = peers[i];
+    uint32_t const my_mtu = static_cast<uint32_t>(port_attr_.active_mtu);
+
+    ibv_qp_attr attr{};
+    attr.qp_state = IBV_QPS_INIT;
+    attr.pkey_index = 0;
+    attr.port_num = cfg_.ib_port;
+    attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
+                           IBV_ACCESS_REMOTE_WRITE;
+    if (ibv_modify_qp(qp, &attr,
+                      IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
+                          IBV_QP_ACCESS_FLAGS) != 0) {
+      destroy_all();
+      return Status::kDeviceError;
+    }
+
+    std::memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTR;
+    /* The smaller of the two MTUs. Path MTU is not negotiated in hardware,
+     * and a mismatch surfaces much later as a length error on the first
+     * transfer that exceeds the smaller side. */
+    attr.path_mtu = static_cast<ibv_mtu>(std::min<uint32_t>(my_mtu, peer.mtu));
+    attr.dest_qp_num = peer.qp_num;
+    attr.rq_psn = 0;
+    attr.max_dest_rd_atomic = 16;
+    attr.min_rnr_timer = 12;
+    attr.ah_attr.port_num = cfg_.ib_port;
+    attr.ah_attr.sl = 0;
+    attr.ah_attr.src_path_bits = 0;
+    if (port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET) {
+      attr.ah_attr.is_global = 1;
+      std::memcpy(&attr.ah_attr.grh.dgid, peer.gid, 16);
+      attr.ah_attr.grh.sgid_index = static_cast<uint8_t>(gid_index_);
+      attr.ah_attr.grh.hop_limit = 255;
+    } else {
+      attr.ah_attr.is_global = 0;
+      attr.ah_attr.dlid = peer.lid;
+    }
+    if (ibv_modify_qp(qp, &attr,
+                      IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
+                          IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
+                          IBV_QP_MAX_DEST_RD_ATOMIC |
+                          IBV_QP_MIN_RNR_TIMER) != 0) {
+      destroy_all();
+      return Status::kDeviceError;
+    }
+
+    std::memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTS;
+    attr.timeout = 14;
+    attr.retry_cnt = 7;
+    attr.rnr_retry = 7;
+    attr.sq_psn = 0;
+    attr.max_rd_atomic = 16;
+    if (ibv_modify_qp(qp, &attr,
+                      IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+                          IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
+                          IBV_QP_MAX_QP_RD_ATOMIC) != 0) {
+      destroy_all();
+      return Status::kDeviceError;
+    }
   }
 
-  std::memset(&attr, 0, sizeof(attr));
-  attr.qp_state = IBV_QPS_RTR;
-  /* Take the smaller of the two MTUs. Path MTU is not negotiated by the
-   * hardware, and a mismatch shows up much later as a length error on the
-   * first transfer that exceeds the smaller side. */
-  attr.path_mtu = static_cast<ibv_mtu>(
-      std::min<uint32_t>(mine.mtu, peer.mtu));
-  attr.dest_qp_num = peer.qp_num;
-  attr.rq_psn = mine.psn;
-  attr.max_dest_rd_atomic = 16;
-  attr.min_rnr_timer = 12;
-  attr.ah_attr.port_num = cfg_.ib_port;
-  attr.ah_attr.sl = 0;
-  attr.ah_attr.src_path_bits = 0;
-  if (port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET) {
-    attr.ah_attr.is_global = 1;
-    std::memcpy(&attr.ah_attr.grh.dgid, peer.gid, 16);
-    attr.ah_attr.grh.sgid_index = static_cast<uint8_t>(gid_index_);
-    attr.ah_attr.grh.hop_limit = 255;
-  } else {
-    attr.ah_attr.is_global = 0;
-    attr.ah_attr.dlid = peer.lid;
-  }
-  if (ibv_modify_qp(qp, &attr,
-                    IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |
-                        IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
-                        IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER) != 0) {
-    ibv_destroy_qp(qp);
-    return Status::kDeviceError;
-  }
-
-  std::memset(&attr, 0, sizeof(attr));
-  attr.qp_state = IBV_QPS_RTS;
-  attr.timeout = 14;
-  attr.retry_cnt = 7;
-  attr.rnr_retry = 7;
-  attr.sq_psn = peer.psn;
-  attr.max_rd_atomic = 16;
-  if (ibv_modify_qp(qp, &attr,
-                    IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
-                        IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
-                        IBV_QP_MAX_QP_RD_ATOMIC) != 0) {
-    ibv_destroy_qp(qp);
-    return Status::kDeviceError;
-  }
-
-  auto conn = std::make_shared<RdmaConnection>(this, qp, peer);
+  auto conn = std::make_shared<RdmaConnection>(this, std::move(qps), std::move(peers));
   /* Hand the socket to the connection instead of closing it; it becomes the
    * control channel. Non-blocking so polling never stalls progress. */
   int flags = ::fcntl(sock, F_GETFL, 0);
@@ -482,7 +552,7 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
   int nodelay = 1;
   ::setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
   conn->ctrl_fd = sock;
-  register_conn(qp->qp_num, conn.get());
+  for (auto& q : conn->queue_pairs()) register_conn(q.qp->qp_num, conn.get());
   {
     std::lock_guard<std::mutex> g(conn_mu_);
     ctrl_conns_.push_back(conn);
@@ -549,6 +619,20 @@ Status RdmaProvider::accept(int64_t timeout_ms, ProviderConnectionPtr* out) {
  * far it got. A refusal partway through is not an error for the operations
  * already accepted: those are in flight and will produce completions, so the
  * caller must keep their resources and roll back only the remainder. */
+/* Work request ids encode which queue pair posted them and the sequence
+ * number within it, so a completion can be traced back without a lookup
+ * table. The top bit marks a receive. */
+namespace {
+constexpr uint64_t kQpShift = 48;
+inline uint64_t make_wr_id(uint32_t qp_index, uint64_t seq) {
+  return (static_cast<uint64_t>(qp_index) << kQpShift) | (seq & ((1ull << kQpShift) - 1));
+}
+inline uint32_t wr_qp_index(uint64_t id) {
+  return static_cast<uint32_t>((id >> kQpShift) & 0x7fff);
+}
+inline uint64_t wr_seq(uint64_t id) { return id & ((1ull << kQpShift) - 1); }
+}  // namespace
+
 SubmitResult RdmaProvider::submit(ProviderConnection* conn,
                                   std::vector<SubOp> const& ops) {
   SubmitResult r;
@@ -563,20 +647,74 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     r.status = Status::kPeerDisconnected;
     return r;
   }
-
-  uint32_t const room = c->submit_capacity();
-  if (room == 0) {
+  if (ops.empty()) return r;
+  if (c->submit_capacity() == 0) {
     r.status = Status::kWouldBlock;
     return r;
   }
 
+  std::lock_guard<std::mutex> qg(c->qp_mutex());
+  auto& qps = c->queue_pairs();
+  uint32_t const depth = cfg_.sq_depth;
+
+  /* Assignment happens first, posting second.
+   *
+   * Signalling has to be decided with the whole batch in view. Marking only
+   * the last operation of the batch leaves every other queue pair it touched
+   * without an anchor: those work requests produce no completion, are never
+   * reclaimed, and their requests never finish. Each queue pair used needs
+   * its own last operation signalled. */
+  struct Planned {
+    uint32_t qp_index = 0;
+    size_t op_index = 0;
+    bool signal = false;
+  };
+  std::vector<Planned> plan;
+  plan.reserve(ops.size());
+  std::vector<uint64_t> next_seq(qps.size());
+  std::vector<uint32_t> since(qps.size());
+  for (size_t i = 0; i < qps.size(); ++i) {
+    next_seq[i] = qps[i].posted;
+    since[i] = qps[i].since_signal;
+  }
+  /* Index into plan of the last operation on each queue pair, or npos. */
+  std::vector<size_t> last_on_qp(qps.size(), static_cast<size_t>(-1));
+
   for (size_t i = 0; i < ops.size(); ++i) {
-    if (i >= room) {
-      /* Out of queue space rather than broken: the caller retries the rest. */
+    QueuePair* q = c->pick_queue_pair_locked();
+    if (q == nullptr) {
       r.status = Status::kWouldBlock;
       break;
     }
-    SubOp const& op = ops[i];
+    uint32_t const qi = static_cast<uint32_t>(q - qps.data());
+    uint64_t const used = next_seq[qi] - qps[qi].reclaimed;
+    if (used >= depth) {
+      r.status = Status::kWouldBlock;
+      break;
+    }
+
+    Planned p;
+    p.qp_index = qi;
+    p.op_index = i;
+    /* Period elapsed, or the queue is three quarters full: both leave an
+     * anchor before the queue can fill with nothing to wait for. */
+    p.signal = (since[qi] + 1 >= cfg_.signal_period) ||
+               (used + 1 >= depth - depth / 4);
+    if (p.signal) since[qi] = 0; else ++since[qi];
+    ++next_seq[qi];
+    last_on_qp[qi] = plan.size();
+    plan.push_back(p);
+  }
+
+  /* Every queue pair this batch touched ends with a signalled operation. */
+  for (size_t qi = 0; qi < last_on_qp.size(); ++qi) {
+    if (last_on_qp[qi] != static_cast<size_t>(-1))
+      plan[last_on_qp[qi]].signal = true;
+  }
+
+  for (auto const& p : plan) {
+    SubOp const& op = ops[p.op_index];
+    QueuePair& q = qps[p.qp_index];
 
     ibv_mr* mr = nullptr;
     {
@@ -589,13 +727,7 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
       mr = it->second;
     }
 
-    uint64_t wr_id;
-    {
-      std::lock_guard<std::mutex> g(inflight_mu_);
-      wr_id = next_wr_id_++;
-      inflight_[wr_id] = {op.request, op.sub_id,
-                          op.kind == SubOp::Kind::kWrite, c};
-    }
+    uint64_t const seq = q.posted;
 
     ibv_sge sge{};
     sge.addr = reinterpret_cast<uint64_t>(op.local_addr);
@@ -603,38 +735,29 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     sge.lkey = mr->lkey;
 
     ibv_send_wr wr{};
-    wr.wr_id = wr_id;
+    wr.wr_id = make_wr_id(p.qp_index, seq);
     wr.sg_list = &sge;
     wr.num_sge = 1;
-    if (op.kind == SubOp::Kind::kWrite) {
-      /* The last sub-operation of a write carries an immediate value, which
-       * consumes a receive on the peer and so becomes visible to its CPU.
-       * Ordinary writes before it stay invisible, which is the point: one
-       * signal per logical request rather than per chunk. */
-      wr.opcode = op.signal_peer ? IBV_WR_RDMA_WRITE_WITH_IMM
-                                 : IBV_WR_RDMA_WRITE;
-      if (op.signal_peer) wr.imm_data = htonl(op.peer_token);
-    } else {
-      wr.opcode = IBV_WR_RDMA_READ;
-    }
-    /* Every work request is signalled for now. Selective signalling belongs
-     * with the multi-QP work, where the recovery anchors have to be reasoned
-     * about properly rather than bolted on. */
-    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.opcode = op.kind == SubOp::Kind::kWrite ? IBV_WR_RDMA_WRITE
+                                               : IBV_WR_RDMA_READ;
+    wr.send_flags = p.signal ? IBV_SEND_SIGNALED : 0;
     wr.wr.rdma.remote_addr = op.remote_addr;
     wr.wr.rdma.rkey = static_cast<uint32_t>(op.remote_key);
 
     ibv_send_wr* bad = nullptr;
-    int rc = ibv_post_send(c->qp(), &wr, &bad);
+    int rc = ibv_post_send(q.qp, &wr, &bad);
     if (rc != 0) {
-      {
-        std::lock_guard<std::mutex> g(inflight_mu_);
-        inflight_.erase(wr_id);
-      }
       r.status = rc == ENOMEM ? Status::kWouldBlock : Status::kTransportError;
       r.provider_errno = rc;
       break;
     }
+
+    q.unsignalled.push_back(
+        {seq, InflightKey{op.request, op.sub_id,
+                          op.kind == SubOp::Kind::kWrite}});
+    ++q.posted;
+    q.since_signal = p.signal ? 0 : q.since_signal + 1;
+
     ++r.accepted;
     {
       std::lock_guard<std::mutex> g(mu_);
@@ -644,8 +767,6 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
        * the caller's own memory, so the NIC reads and writes it directly. */
     }
   }
-
-  c->note_posted(r.accepted);
   return r;
 }
 
@@ -679,39 +800,53 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
       }
       continue;
     }
-    InflightOp op;
-    bool known = false;
-    {
-      std::lock_guard<std::mutex> g(inflight_mu_);
-      auto it = inflight_.find(wc[i].wr_id);
-      if (it != inflight_.end()) {
-        op = it->second;
-        known = true;
-        inflight_.erase(it);
-      }
-    }
-    if (!known) continue;  /* Already reported, or not ours. */
-    if (op.conn != nullptr) op.conn->note_completed(1);
 
-    CompletionEvent ev;
-    ev.request = op.request;
-    ev.sub_id = op.sub_id;
+    RdmaConnection* c = nullptr;
+    {
+      std::lock_guard<std::mutex> g(conn_mu_);
+      auto it = conn_by_qp_.find(wc[i].qp_num);
+      if (it != conn_by_qp_.end()) c = it->second;
+    }
+    if (c == nullptr) continue;
+
     bool modified = false;
-    ev.status = status_from_wc(wc[i].status, &modified);
+    Status st = status_from_wc(wc[i].status, &modified);
     /* Anything but a flush means this completion is what broke the queue
      * pair; a flush is the wreckage of an earlier one. Either way the
      * connection is unusable from here. */
-    if (wc[i].status != IBV_WC_SUCCESS && op.conn != nullptr)
-      op.conn->mark_failed();
-    ev.provider_errno = static_cast<int32_t>(wc[i].status);
-    /* Only a write can have changed the remote side. */
-    ev.may_have_modified_target = modified && op.is_write;
-    {
-      std::lock_guard<std::mutex> g(mu_);
-      if (ev.status == Status::kOk) ++stats_.subops_completed;
-      else ++stats_.subops_failed;
+    if (wc[i].status != IBV_WC_SUCCESS) c->mark_failed();
+
+    uint32_t const qp_index = wr_qp_index(wc[i].wr_id);
+    uint64_t const seq = wr_seq(wc[i].wr_id);
+
+    /* Within one queue pair, completions follow posting order, so a signalled
+     * completion retires every unsignalled work request before it. Reclaiming
+     * per queue pair is what keeps the accounting honest: a global counter
+     * would let one queue pair's progress mask another's stall. */
+    std::lock_guard<std::mutex> qg(c->qp_mutex());
+    auto& qps = c->queue_pairs();
+    if (qp_index >= qps.size()) continue;
+    QueuePair& q = qps[qp_index];
+
+    while (!q.unsignalled.empty() && q.unsignalled.front().first <= seq) {
+      InflightKey const key = q.unsignalled.front().second;
+      q.unsignalled.pop_front();
+
+      CompletionEvent ev;
+      ev.request = key.request;
+      ev.sub_id = key.sub_id;
+      ev.status = st;
+      ev.provider_errno = static_cast<int32_t>(wc[i].status);
+      /* Only a write can have changed the remote side. */
+      ev.may_have_modified_target = modified && key.is_write;
+      {
+        std::lock_guard<std::mutex> g(mu_);
+        if (ev.status == Status::kOk) ++stats_.subops_completed;
+        else ++stats_.subops_failed;
+      }
+      out->push_back(ev);
     }
-    out->push_back(ev);
+    q.reclaimed = seq + 1;
   }
   return Status::kOk;
 }
@@ -819,16 +954,26 @@ Status RdmaProvider::drain(ProviderConnection* conn, int64_t timeout_ms) {
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::milliseconds(timeout_ms < 0 ? 0 : timeout_ms);
   std::vector<CompletionEvent> evs;
-  while (c->submit_capacity() < cfg_.sq_depth) {
-    poll(cfg_.cq_depth, &evs);  /* retires the counts itself */
+  while (true) {
+    /* Drained when no queue pair still holds a posted work request. Comparing
+     * total capacity against one queue's depth, as a single-queue version
+     * could, would declare a wide connection drained while it was still
+     * busy. */
+    size_t outstanding = 0;
+    {
+      std::lock_guard<std::mutex> g(c->qp_mutex());
+      for (auto const& q : c->queue_pairs()) outstanding += q.unsignalled.size();
+    }
+    if (outstanding == 0) return Status::kOk;
+
+    poll(cfg_.cq_depth, &evs);
     if (timeout_ms >= 0 && std::chrono::steady_clock::now() >= deadline) {
-      /* Reporting a timeout rather than returning ok matters: the caller must
-       * not free memory that may still be under DMA. */
+      /* Reporting a timeout rather than ok matters: the caller must not free
+       * memory that may still be under DMA. */
       return Status::kTimeout;
     }
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
-  return Status::kOk;
 }
 
 Status RdmaProvider::disconnect(ProviderConnectionPtr conn) {

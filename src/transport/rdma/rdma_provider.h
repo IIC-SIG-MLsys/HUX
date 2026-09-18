@@ -34,6 +34,14 @@ namespace hux {
 struct RdmaConfig {
   std::string device_name;   /* Empty selects the first port that is up. */
   uint8_t ib_port = 1;
+  /* Queue pairs per connection. More of them raises the number of requests in
+   * flight, not the number of network paths -- the two are often confused.
+   * One stays supported as the baseline every measurement compares against. */
+  uint32_t qp_per_conn = 1;
+  /* Signal one work request in every N. Completions are the only way posted
+   * entries are reclaimed, so a period that leaves none signalled would fill
+   * the queue and stall it permanently. */
+  uint32_t signal_period = 16;
   int gid_index = -1;        /* Negative asks for automatic selection. */
   uint32_t cq_depth = 4096;
   uint32_t sq_depth = 1024;
@@ -51,8 +59,19 @@ struct RdmaConfig {
  * than tolerated: the two ends would otherwise agree to a layout only one of
  * them understands, and the damage surfaces as corrupt transfers rather than
  * a failed connect. */
-constexpr uint16_t kWireMajor = 1;
+/* Bumped to 2 when the handshake started carrying a queue pair count: the
+ * layout changed, so an older peer must be refused rather than left to
+ * misread it. */
+constexpr uint16_t kWireMajor = 2;
 constexpr uint16_t kWireMinor = 0;
+
+/* Identifies a request's sub-operation, so a completion can name what it
+ * belongs to. */
+struct InflightKey {
+  RequestId request = 0;
+  uint64_t sub_id = 0;
+  bool is_write = false;
+};
 
 /* Identifies one end of a queue pair. Exchanged over TCP during connect, in a
  * fixed little-endian layout rather than as a raw struct. */
@@ -165,17 +184,41 @@ class RdmaProvider : public TransportProvider {
   void forget_conn(uint32_t qp_num);
 };
 
+/* Per queue pair accounting. Each one tracks its own sequence numbers and its
+ * own signalling anchor: a global counter deciding which work request to
+ * signal, while the queue pairs rotate, can leave one of them with no anchor
+ * at all and no way to reclaim its queue. */
+struct QueuePair {
+  ibv_qp* qp = nullptr;
+  uint64_t posted = 0;      /* sequence number of the next work request */
+  uint64_t reclaimed = 0;   /* everything below this has completed */
+  uint32_t since_signal = 0;
+  /* Sub-operations posted without a signal, waiting for the next signalled
+   * completion to retire them. Within one queue pair completion order follows
+   * posting order, so a signalled completion retires everything before it. */
+  std::deque<std::pair<uint64_t, InflightKey>> unsignalled;
+};
+
 class RdmaConnection : public ProviderConnection {
  public:
-  RdmaConnection(RdmaProvider* owner, ibv_qp* qp, RdmaEndpointInfo remote);
+  RdmaConnection(RdmaProvider* owner, std::vector<QueuePair> qps,
+                 std::vector<RdmaEndpointInfo> remote);
   ~RdmaConnection();
 
-  uint32_t qp_count() const override { return 1; }
+  uint32_t qp_count() const override {
+    return static_cast<uint32_t>(qps_.size());
+  }
   uint32_t submit_capacity() const override;
 
-  ibv_qp* qp() const { return qp_; }
-  void note_posted(uint32_t n);
-  void note_completed(uint32_t n);
+  /* Picks the queue pair with the most room. Round robin is kept as the
+   * comparison point rather than the default, since a rotation that ignores
+   * depth piles onto one that is already full. */
+  /* Caller holds qp_mutex(). Kept explicit so submission and completion
+   * cannot interleave halfway through updating a queue pair's counters. */
+  QueuePair* pick_queue_pair_locked();
+  std::mutex& qp_mutex() { return qp_mu_; }
+  std::vector<QueuePair>& queue_pairs() { return qps_; }
+  ibv_qp* qp() const { return qps_.empty() ? nullptr : qps_[0].qp; }
 
   /* Receive work requests exist only to catch the immediate value a peer
    * sends with its final write; no payload lands in them. One has to be
@@ -191,9 +234,10 @@ class RdmaConnection : public ProviderConnection {
 
  private:
   RdmaProvider* owner_;
-  ibv_qp* qp_ = nullptr;
-  RdmaEndpointInfo remote_;
-  std::atomic<uint32_t> outstanding_{0};
+  std::vector<QueuePair> qps_;
+  std::vector<RdmaEndpointInfo> remote_;
+  mutable std::mutex qp_mu_;
+  uint32_t next_qp_ = 0;
   std::atomic<bool> failed_{false};
   ibv_mr* recv_mr_ = nullptr;
   std::vector<uint8_t> recv_buf_;

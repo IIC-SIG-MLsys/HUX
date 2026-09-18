@@ -346,15 +346,6 @@ Status EngineImpl::submit_vector(Peer* peer, std::vector<RegionView> const& loca
                           &target_addr, &target_bytes);
   if (s != Status::kOk) return s;
 
-  if (kind == SubOp::Kind::kWrite && !ops.empty() &&
-      provider_->caps().supports_peer_signal) {
-    /* One signal per logical request, on its final sub-operation: a write is
-     * invisible to the receiving CPU otherwise, and signalling every chunk
-     * would cost a receive each time. */
-    ops.back().signal_peer = true;
-    ops.back().peer_token = static_cast<uint32_t>(req_id);
-  }
-
   auto req = std::make_shared<RequestImpl>(
       req_id, kind, static_cast<uint32_t>(ops.size()), opts.context);
   for (auto& r : held) req->hold_region(std::move(r));

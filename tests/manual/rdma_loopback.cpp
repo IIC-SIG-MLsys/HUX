@@ -130,9 +130,10 @@ bool verify(Buffer const& b, uint8_t seed) {
   return true;
 }
 
-int run_server(int gpu) {
+int run_server(int gpu, uint32_t qps) {
   RdmaConfig cfg;
   cfg.advertise_ip = "0.0.0.0";
+  cfg.qp_per_conn = qps;
   std::shared_ptr<RdmaProvider> prov;
   if (RdmaProvider::create(cfg, &prov) != Status::kOk) {
     std::printf("provider create failed\n");
@@ -229,7 +230,7 @@ int run_server(int gpu) {
   return 0;
 }
 
-int run_client(std::string const& ip, int gpu) {
+int run_client(std::string const& ip, int gpu, uint32_t qps) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in a{};
   a.sin_family = AF_INET;
@@ -259,6 +260,7 @@ int run_client(std::string const& ip, int gpu) {
 
   RdmaConfig cfg;
   cfg.advertise_ip = ip;
+  cfg.qp_per_conn = qps;
   std::shared_ptr<RdmaProvider> prov;
   if (RdmaProvider::create(cfg, &prov) != Status::kOk) {
     std::printf("provider create failed\n");
@@ -295,7 +297,8 @@ int run_client(std::string const& ip, int gpu) {
     std::printf("import_region failed\n");
     return 1;
   }
-  std::printf("[client] connected (%s memory)\n", buf.on_gpu ? "device" : "host");
+  std::printf("[client] connected (%s memory, %u queue pairs)\n",
+              buf.on_gpu ? "device" : "host", peer->caps().qp_count);
 
   auto drive = [&](RequestPtr const& req) {
     std::vector<RequestPtr> done;
@@ -402,6 +405,13 @@ int run_client(std::string const& ip, int gpu) {
     std::printf("   -> %s\n", st.payload_bytes_copied == 0
                                   ? "zero-copy: the NIC used the caller's memory"
                                   : "NOT zero-copy");
+    std::printf("   sub-operations: posted=%llu completed=%llu failed=%llu%s\n",
+                (unsigned long long)st.subops_posted,
+                (unsigned long long)st.subops_completed,
+                (unsigned long long)st.subops_failed,
+                st.subops_posted == st.subops_completed + st.subops_failed
+                    ? "   (balanced)"
+                    : "   *** UNBALANCED ***");
     std::printf("   requests: accepted=%llu succeeded=%llu failed=%llu\n",
                 (unsigned long long)st.requests_accepted,
                 (unsigned long long)st.requests_succeeded,
@@ -506,10 +516,15 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc - 1; ++i)
     if (std::strcmp(argv[i], "--gpu") == 0) gpu = std::atoi(argv[i + 1]);
 
-  if (std::strcmp(argv[1], "server") == 0) return run_server(gpu);
+  uint32_t qps = 1;
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::strcmp(argv[i], "--qp") == 0)
+      qps = static_cast<uint32_t>(std::atoi(argv[i + 1]));
+
+  if (std::strcmp(argv[1], "server") == 0) return run_server(gpu, qps);
   if (argc < 3) {
     std::printf("client needs an ip\n");
     return 2;
   }
-  return run_client(argv[2], gpu);
+  return run_client(argv[2], gpu, qps);
 }
