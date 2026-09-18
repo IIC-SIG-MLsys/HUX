@@ -38,6 +38,7 @@ struct EngineStats {
   uint64_t requests_failed = 0;
   uint64_t requests_cancelled = 0;
   uint64_t requests_would_block = 0;
+  uint64_t submit_deferred = 0;
   uint64_t requests_waiting_on_dependency = 0;
   uint64_t subops_posted = 0;
   uint64_t subops_completed = 0;

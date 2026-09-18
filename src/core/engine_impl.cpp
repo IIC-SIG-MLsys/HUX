@@ -281,11 +281,30 @@ bool EngineImpl::dependencies_met(
   return true;
 }
 
-/* Hands the sub-operations to the provider and records how many it took. */
+/* Hands sub-operations to the provider and records how many it took.
+ *
+ * A provider that accepts only part of a batch is saying one of two things.
+ * Out of budget or queue space means the rest should be offered again later,
+ * and dropping it would lose data the caller believes is on its way. A real
+ * error means no more will be accepted, and the request has to stop waiting
+ * for completions that will never arrive. */
 void EngineImpl::post_ops(PendingSubmit* p) {
   p->req->set_state(RequestState::kInflight);
   SubmitResult sr = provider_->submit(p->conn.get(), p->ops);
-  p->req->set_accepted_subops(sr.accepted);
+  p->req->add_accepted_subops(sr.accepted);
+
+  if (sr.accepted < p->ops.size() && sr.status == Status::kWouldBlock) {
+    /* Deferred, not failed. The remainder is kept and offered again on a
+     * later pass; the caller sees a request still in flight. */
+    p->ops.erase(p->ops.begin(), p->ops.begin() + sr.accepted);
+    std::lock_guard<std::mutex> g(mu_);
+    pending_.push_back(std::move(*p));
+    {
+      std::lock_guard<std::mutex> sg(stats_mu_);
+      ++stats_.submit_deferred;
+    }
+    return;
+  }
 
   if (sr.accepted == 0 && sr.status != Status::kOk) {
     ErrorInfo e;
@@ -294,6 +313,7 @@ void EngineImpl::post_ops(PendingSubmit* p) {
     e.peer_id = p->peer;
     e.provider_errno = sr.provider_errno;
     e.detail = "submit rejected";
+    p->req->seal_accepted();
     {
       std::lock_guard<std::mutex> g(mu_);
       inflight_.erase(p->req->id());
@@ -310,6 +330,7 @@ void EngineImpl::post_ops(PendingSubmit* p) {
     e.provider_errno = sr.provider_errno;
     e.may_have_modified_target = true;
     e.detail = "partial submit";
+    p->req->seal_accepted();
     p->req->fail(e);
   }
 }
@@ -520,6 +541,8 @@ Status EngineImpl::progress() {
     {
       std::lock_guard<std::mutex> g(mu_);
       for (auto it = pending_.begin(); it != pending_.end();) {
+        /* Entries with no events are deferred submissions rather than
+         * dependency waits; both are released from here. */
         if (dependencies_met(it->after)) {
           ready.push_back(std::move(*it));
           it = pending_.erase(it);

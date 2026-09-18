@@ -58,9 +58,10 @@ directions with no buffer owned by the library anywhere on the path.
 In place: the public API, the completion contract, the provider contract, a
 single-QP RDMA provider, device dependencies, the write-side ready handoff,
 an engine-level control channel, acknowledged notifications, copy accounting,
-a mock backend, device backends for all five targets above, and a test suite
-that runs without hardware. Not yet: multiple queue pairs and congestion
-control.
+multiple queue pairs with per-queue accounting, byte-window congestion
+control, a mock backend, device backends for all five targets above, and a
+test suite that runs without hardware. Not yet: an adaptive controller, fair
+scheduling across peers, Python bindings, and paths other than RDMA.
 
 Control traffic runs on its own channel rather than sharing the data path's
 budget, so a stalled transfer cannot starve the message that would explain
@@ -113,6 +114,14 @@ tests:
   automatically.
 * **Export the rkey, not the lkey.** Substituting one for the other happens to
   work where they coincide and breaks silently elsewhere.
+* **One queue pair completing says nothing about the others.** Ordering holds
+  within a queue pair, not across them, so arrival is announced only after
+  every sub-operation has completed.
+* **Every queue pair used needs its own signalling anchor.** Completions are
+  the only way posted entries are reclaimed, and a queue left without one
+  stalls with nothing to wait for.
+* **Out of budget is not a failure.** The remainder is offered again later;
+  dropping it would lose data the caller believes is on its way.
 
 ## Layout
 

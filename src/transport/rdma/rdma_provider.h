@@ -27,6 +27,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "transport/cc/controller.h"
 #include "transport/provider.h"
 
 namespace hux {
@@ -42,6 +43,9 @@ struct RdmaConfig {
    * entries are reclaimed, so a period that leaves none signalled would fill
    * the queue and stall it permanently. */
   uint32_t signal_period = 16;
+  /* Off by default. Every other configuration is measured against it, so it
+   * has to stay available rather than being replaced by a window. */
+  CongestionControllerPtr cc;
   int gid_index = -1;        /* Negative asks for automatic selection. */
   uint32_t cq_depth = 4096;
   uint32_t sq_depth = 1024;
@@ -71,6 +75,11 @@ struct InflightKey {
   RequestId request = 0;
   uint64_t sub_id = 0;
   bool is_write = false;
+  uint64_t bytes = 0;
+  /* When the work request was posted. Latency is measured from here, so it
+   * covers serialization, queueing at the NIC and host, and polling delay --
+   * it is not a pure network round trip and is not reported as one. */
+  CcTime posted_at{};
 };
 
 /* Identifies one end of a queue pair. Exchanged over TCP during connect, in a
@@ -129,6 +138,7 @@ class RdmaProvider : public TransportProvider {
    * application that has no out-of-band channel of its own. */
   Status accept(int64_t timeout_ms, ProviderConnectionPtr* out);
 
+  CongestionController* cc() const { return cc_.get(); }
   ibv_pd* pd() const { return pd_; }
   ibv_cq* cq() const { return cq_; }
   RdmaConfig const& config() const { return cfg_; }
@@ -141,6 +151,7 @@ class RdmaProvider : public TransportProvider {
   Status build_connection(int sock, ProviderConnectionPtr* out);
 
   RdmaConfig cfg_;
+  CongestionControllerPtr cc_;
   ibv_context* ctx_ = nullptr;
   ibv_pd* pd_ = nullptr;
   ibv_cq* cq_ = nullptr;

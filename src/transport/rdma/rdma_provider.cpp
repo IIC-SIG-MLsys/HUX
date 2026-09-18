@@ -226,6 +226,7 @@ Status RdmaProvider::create(RdmaConfig const& cfg,
   if (out == nullptr) return Status::kInvalidArgument;
   auto p = std::shared_ptr<RdmaProvider>(new RdmaProvider());
   p->cfg_ = cfg;
+  p->cc_ = cfg.cc != nullptr ? cfg.cc : make_cc_off();
   Status s = p->open_device();
   if (s != Status::kOk) return s;
   s = p->start_listener();
@@ -693,6 +694,20 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
       break;
     }
 
+    /* Budget is claimed here, while planning, not at post time. Checking
+     * without claiming would let every operation in one batch see the same
+     * empty window and all be admitted -- the limit would exist and never
+     * bind. Anything planned but not posted is released below. */
+    CcDirection const dir = ops[i].kind == SubOp::Kind::kWrite
+                                ? CcDirection::kWrite
+                                : CcDirection::kRead;
+    CcTime const plan_time = CcClock::now();
+    if (cc_->allow(dir, ops[i].length, plan_time) != CcVerdict::kAllowed) {
+      r.status = Status::kWouldBlock;
+      break;
+    }
+    cc_->on_post(dir, ops[i].length, plan_time);
+
     Planned p;
     p.qp_index = qi;
     p.op_index = i;
@@ -712,6 +727,7 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
       plan[last_on_qp[qi]].signal = true;
   }
 
+  size_t posted_count = 0;
   for (auto const& p : plan) {
     SubOp const& op = ops[p.op_index];
     QueuePair& q = qps[p.qp_index];
@@ -751,10 +767,16 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
       r.provider_errno = rc;
       break;
     }
+    ++posted_count;
+
+    /* Already claimed during planning; only the timestamp is taken here, so
+     * latency is measured from the actual post. */
+    CcTime const posted_at = CcClock::now();
 
     q.unsignalled.push_back(
         {seq, InflightKey{op.request, op.sub_id,
-                          op.kind == SubOp::Kind::kWrite}});
+                          op.kind == SubOp::Kind::kWrite, op.length,
+                          posted_at}});
     ++q.posted;
     q.since_signal = p.signal ? 0 : q.since_signal + 1;
 
@@ -766,6 +788,16 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
       /* Nothing is added to payload_bytes_copied: the work request points at
        * the caller's own memory, so the NIC reads and writes it directly. */
     }
+  }
+
+  /* Whatever was planned but never posted keeps no budget: leaving it claimed
+   * would shrink the window a little on every partial submit until nothing
+   * could be sent at all. */
+  for (size_t i = posted_count; i < plan.size(); ++i) {
+    SubOp const& op = ops[plan[i].op_index];
+    cc_->on_error(op.kind == SubOp::Kind::kWrite ? CcDirection::kWrite
+                                                 : CcDirection::kRead,
+                  op.length, CcClock::now());
   }
   return r;
 }
@@ -828,9 +860,23 @@ Status RdmaProvider::poll(uint32_t max_events, std::vector<CompletionEvent>* out
     if (qp_index >= qps.size()) continue;
     QueuePair& q = qps[qp_index];
 
+    CcTime const completed_at = CcClock::now();
     while (!q.unsignalled.empty() && q.unsignalled.front().first <= seq) {
       InflightKey const key = q.unsignalled.front().second;
       q.unsignalled.pop_front();
+
+      CcDirection const dir =
+          key.is_write ? CcDirection::kWrite : CcDirection::kRead;
+      if (st == Status::kOk) {
+        cc_->on_feedback(dir, key.bytes,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             completed_at - key.posted_at),
+                         completed_at);
+      } else {
+        /* Released on failure too, and exactly once either way: a failure
+         * that leaked window would shrink the effective limit every time. */
+        cc_->on_error(dir, key.bytes, completed_at);
+      }
 
       CompletionEvent ev;
       ev.request = key.request;

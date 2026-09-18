@@ -43,9 +43,19 @@ void RequestImpl::mark_stage(Stage s) {
   stages_ |= stage_bit(s);
 }
 
-void RequestImpl::set_accepted_subops(uint32_t n) {
+void RequestImpl::add_accepted_subops(uint32_t n) {
   std::lock_guard<std::mutex> g(mu_);
-  accepted_subops_ = n;
+  accepted_subops_ += n;
+}
+
+void RequestImpl::seal_accepted() {
+  std::lock_guard<std::mutex> g(mu_);
+  sealed_ = true;
+}
+
+bool RequestImpl::sealed() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return sealed_;
 }
 
 uint32_t RequestImpl::accepted_subops() const {
@@ -69,9 +79,9 @@ bool RequestImpl::on_subop_complete(CompletionEvent const& ev) {
     error_.may_have_modified_target = ev.may_have_modified_target;
   }
   ++completed_subops_;
-  /* Complete only once every accepted sub-operation has reported. */
-  uint32_t const expected =
-      accepted_subops_ > 0 ? accepted_subops_ : total_subops_;
+  /* Measured against the request's full size while more may still be
+   * submitted, and against what was accepted once submission has stopped. */
+  uint32_t const expected = sealed_ ? accepted_subops_ : total_subops_;
   return completed_subops_ >= expected;
 }
 

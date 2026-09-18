@@ -49,9 +49,18 @@ class RequestImpl : public Request {
    * QP proves nothing about the others. */
   bool on_subop_complete(CompletionEvent const& ev);
 
-  /* How many the provider accepted; a partial submit rolls back only the rest. */
-  void set_accepted_subops(uint32_t n);
+  /* Accumulated across submissions: a request whose budget ran out is posted
+   * in several goes, and each one adds to the total. */
+  void add_accepted_subops(uint32_t n);
   uint32_t accepted_subops() const;
+
+  /* No further sub-operations will be submitted, because submission failed
+   * rather than merely being deferred. Until this is set, completion is
+   * measured against the request's full size; after it, against what was
+   * actually accepted -- otherwise a request abandoned halfway would wait for
+   * completions that are never coming. */
+  void seal_accepted();
+  bool sealed() const;
   uint32_t total_subops() const { return total_subops_; }
 
   void fail(ErrorInfo const& e);
@@ -93,6 +102,7 @@ class RequestImpl : public Request {
   RequestState state_ = RequestState::kQueued;
   uint32_t completed_subops_ = 0;
   uint32_t accepted_subops_ = 0;
+  bool sealed_ = false;
   bool cancel_requested_ = false;
   /* One bit per Stage, so reached() is stable across repeated queries. */
   uint32_t stages_ = 0;

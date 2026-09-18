@@ -25,6 +25,7 @@
 #include "core/factory.h"
 #include "core/region_impl.h"
 #include "hux/engine.h"
+#include "transport/cc/controller.h"
 #include "transport/rdma/rdma_provider.h"
 
 #ifdef HUX_LOOPBACK_CUDA
@@ -130,10 +131,11 @@ bool verify(Buffer const& b, uint8_t seed) {
   return true;
 }
 
-int run_server(int gpu, uint32_t qps) {
+int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc) {
   RdmaConfig cfg;
   cfg.advertise_ip = "0.0.0.0";
   cfg.qp_per_conn = qps;
+  cfg.cc = cc;
   std::shared_ptr<RdmaProvider> prov;
   if (RdmaProvider::create(cfg, &prov) != Status::kOk) {
     std::printf("provider create failed\n");
@@ -230,7 +232,8 @@ int run_server(int gpu, uint32_t qps) {
   return 0;
 }
 
-int run_client(std::string const& ip, int gpu, uint32_t qps) {
+int run_client(std::string const& ip, int gpu, uint32_t qps,
+               CongestionControllerPtr cc) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in a{};
   a.sin_family = AF_INET;
@@ -261,6 +264,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps) {
   RdmaConfig cfg;
   cfg.advertise_ip = ip;
   cfg.qp_per_conn = qps;
+  cfg.cc = cc;
   std::shared_ptr<RdmaProvider> prov;
   if (RdmaProvider::create(cfg, &prov) != Status::kOk) {
     std::printf("provider create failed\n");
@@ -412,6 +416,10 @@ int run_client(std::string const& ip, int gpu, uint32_t qps) {
                 st.subops_posted == st.subops_completed + st.subops_failed
                     ? "   (balanced)"
                     : "   *** UNBALANCED ***");
+    std::printf("   congestion control: %s window=%llu B, deferred=%llu\n",
+                cc->name(),
+                (unsigned long long)cc->window_bytes(CcDirection::kWrite),
+                (unsigned long long)st.submit_deferred);
     std::printf("   requests: accepted=%llu succeeded=%llu failed=%llu\n",
                 (unsigned long long)st.requests_accepted,
                 (unsigned long long)st.requests_succeeded,
@@ -521,10 +529,20 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[i], "--qp") == 0)
       qps = static_cast<uint32_t>(std::atoi(argv[i + 1]));
 
-  if (std::strcmp(argv[1], "server") == 0) return run_server(gpu, qps);
+  /* --cc off | fixed:<bytes>. Off is the comparison the others are measured
+   * against, so it stays the default. */
+  CongestionControllerPtr cc = make_cc_off();
+  for (int i = 1; i < argc - 1; ++i) {
+    if (std::strcmp(argv[i], "--cc") != 0) continue;
+    std::string spec = argv[i + 1];
+    if (spec.rfind("fixed:", 0) == 0)
+      cc = make_cc_fixed_window(std::strtoull(spec.c_str() + 6, nullptr, 10));
+  }
+
+  if (std::strcmp(argv[1], "server") == 0) return run_server(gpu, qps, cc);
   if (argc < 3) {
     std::printf("client needs an ip\n");
     return 2;
   }
-  return run_client(argv[2], gpu, qps);
+  return run_client(argv[2], gpu, qps, cc);
 }
