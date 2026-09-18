@@ -94,6 +94,35 @@ Status make_engine(EngineConfig const& cfg,
   return Status::kOk;
 }
 
+RegistrationPtr EngineImpl::find_registration(void* addr, uint64_t length,
+                                              DeviceId device,
+                                              AccessFlags access) {
+  std::lock_guard<std::mutex> g(mu_);
+  for (auto const& r : reg_cache_) {
+    if (registration_covers(*r, addr, length, device, access)) return r;
+  }
+  return nullptr;
+}
+
+void EngineImpl::cache_registration(RegistrationPtr reg) {
+  std::lock_guard<std::mutex> g(mu_);
+  reg_cache_.push_back(std::move(reg));
+  /* Over the bound, drop entries nothing else is holding. One still in use is
+   * skipped rather than evicted: releasing it would pull the registration out
+   * from under a handle that may still be transferring. */
+  while (reg_cache_.size() > cfg_.registration_cache_entries) {
+    bool evicted = false;
+    for (auto it = reg_cache_.begin(); it != reg_cache_.end(); ++it) {
+      if (it->use_count() == 1) {
+        reg_cache_.erase(it);
+        evicted = true;
+        break;
+      }
+    }
+    if (!evicted) break; /* everything is in use; the bound gives way */
+  }
+}
+
 Status EngineImpl::register_memory(void* addr, uint64_t length,
                                    AccessFlags access, MemoryRegionPtr* out) {
   if (out == nullptr || addr == nullptr || length == 0)
@@ -116,15 +145,39 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
     if (cap != 0 && length > cap) return Status::kResourceExhausted;
   }
 
-  uint64_t lkey = 0, rkey = 0;
-  Status s =
-      provider_->register_region(addr, length, dev, access, &lkey, &rkey);
-  if (s != Status::kOk) return s;
+  /* An existing registration that already covers this range is reused. The
+   * handle stays its own: it describes what the caller asked for, holds an
+   * independent reference, and is deregistered on its own. */
+  RegistrationPtr reg = find_registration(addr, length, dev, access);
+  if (reg == nullptr) {
+    uint64_t lkey = 0, rkey = 0;
+    Status s =
+        provider_->register_region(addr, length, dev, access, &lkey, &rkey);
+    if (s != Status::kOk) return s;
+
+    auto owned = std::make_shared<Registration>();
+    owned->base = addr;
+    owned->length = length;
+    owned->device = dev;
+    owned->access = access;
+    owned->local_key = lkey;
+    owned->remote_key = rkey;
+
+    /* Released through the provider once nothing references it any more --
+     * another handle, or the cache. */
+    TransportProvider* prov = provider_.get();
+    reg = RegistrationPtr(owned.get(),
+                          [prov, lkey, owned](Registration*) mutable {
+                            prov->deregister_region(lkey);
+                            owned.reset();
+                          });
+    if (cfg_.registration_cache_entries > 0) cache_registration(reg);
+  }
 
   RegionId id = next_region_.fetch_add(1, std::memory_order_relaxed);
   auto r = std::make_shared<MemoryRegionImpl>(
       id, generation_.load(std::memory_order_acquire), addr, length, dev, mem,
-      access, lkey, rkey);
+      access, reg);
   {
     std::lock_guard<std::mutex> g(mu_);
     regions_[id] = r;
@@ -161,7 +214,10 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
     if (!inflight_.empty()) return Status::kWouldBlock;
     regions_.erase(impl->id());
   }
-  return provider_->deregister_region(impl->local_key());
+  /* The underlying registration is released when the last reference to it
+   * goes -- another handle over the same range, or the cache. Releasing it
+   * here would pull it out from under a handle still transferring. */
+  return Status::kOk;
 }
 
 Status EngineImpl::local_metadata(std::vector<uint8_t>* out) const {

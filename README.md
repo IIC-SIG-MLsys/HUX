@@ -124,6 +124,9 @@ tests:
 * **Batches are not atomic.** A failure may have modified part of the target;
   the error carries `may_have_modified_target` and nothing is replayed
   automatically.
+* **Reuse of a registration has to be exact.** A range that only partly
+  overlaps an existing one covers bytes the hardware was never told about, and
+  the transfer that follows fails far from the registration that caused it.
 * **Export the rkey, not the lkey.** Substituting one for the other happens to
   work where they coincide and breaks silently elsewhere.
 * **One queue pair completing says nothing about the others.** Ordering holds

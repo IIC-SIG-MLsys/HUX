@@ -71,6 +71,7 @@ class MockProvider : public TransportProvider {
                          uint64_t* local_key, uint64_t* remote_key) override {
     std::lock_guard<std::mutex> g(mu_);
     uint64_t key = next_key_++;
+    ++total_registrations_;
     regions_[key] = {addr, length};
     *local_key = key;
     /* Deliberately rkey != lkey, so that exporting the lkey by mistake fails
@@ -136,6 +137,17 @@ class MockProvider : public TransportProvider {
   Status flush(ProviderConnection*) override { return Status::kOk; }
   Status drain(ProviderConnection*, int64_t) override { return Status::kOk; }
 
+  /* Registrations ever made, and how many are still live. The first shows
+   * whether a range was reused; the second whether it was released. */
+  uint64_t registration_count() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return total_registrations_;
+  }
+  uint64_t live_registrations() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return regions_.size();
+  }
+
   /* Test helpers. */
   size_t pending() const {
     std::lock_guard<std::mutex> g(mu_);
@@ -163,6 +175,7 @@ class MockProvider : public TransportProvider {
   uint64_t next_key_ = 1;
   uint64_t submitted_ = 0;
   uint64_t inflight_bytes_ = 0;
+  uint64_t total_registrations_ = 0;
   ProviderStats stats_;
 };
 

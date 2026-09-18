@@ -45,6 +45,12 @@ struct EngineConfig {
    * would split work the provider takes as a unit. */
   uint64_t scheduler_quantum_bytes = 1u << 20;
 
+  /* How many registrations may be kept for reuse after their handles are
+   * released. Registering is expensive enough to be worth caching, and
+   * unbounded caching would hold hardware resources the process has no use
+   * for. Zero disables reuse entirely. */
+  uint32_t registration_cache_entries = 64;
+
   CongestionControl cc = CongestionControl::kOff;
   uint64_t cc_window_bytes = 1u << 22;
 

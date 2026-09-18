@@ -133,6 +133,10 @@ class EngineImpl : public Engine {
    * later turn. Returns true when the request has nothing left to submit. */
   bool post_ops(PendingSubmit* p, uint64_t max_bytes);
   void drain_pending();
+  /* An existing registration that covers this request, or nullptr. */
+  RegistrationPtr find_registration(void* addr, uint64_t length,
+                                    DeviceId device, AccessFlags access);
+  void cache_registration(RegistrationPtr reg);
   std::shared_ptr<MemoryRegionImpl> find_region(RegionId id) const;
   std::shared_ptr<RemoteRegionImpl> find_remote(RegionId id) const;
   void progress_loop();
@@ -143,6 +147,9 @@ class EngineImpl : public Engine {
 
   mutable std::mutex mu_;
   std::unordered_map<RegionId, std::shared_ptr<MemoryRegionImpl>> regions_;
+  /* Registrations kept for reuse. Entries stay while any handle references
+   * them; beyond that the bound decides how many are held speculatively. */
+  std::deque<RegistrationPtr> reg_cache_;
   std::unordered_map<RegionId, std::shared_ptr<RemoteRegionImpl>> remotes_;
   std::unordered_map<PeerId, std::shared_ptr<PeerImpl>> peers_;
   std::unordered_map<RequestId, RequestImplPtr> inflight_;

@@ -82,10 +82,27 @@ Status decode_descriptor(std::vector<uint8_t> const& buf,
   return Status::kOk;
 }
 
+bool registration_covers(Registration const& r, void* addr, uint64_t length,
+                         DeviceId device, AccessFlags access) {
+  if (r.device != device) return false;
+  /* Every permission asked for must already be held. A read-only registration
+   * cannot serve a request that needs to write. */
+  uint32_t const want = static_cast<uint32_t>(access);
+  uint32_t const have = static_cast<uint32_t>(r.access);
+  if ((want & ~have) != 0) return false;
+
+  auto const start = reinterpret_cast<uintptr_t>(addr);
+  auto const base = reinterpret_cast<uintptr_t>(r.base);
+  if (start < base) return false;
+  uint64_t const offset = start - base;
+  /* Compared before adding, so a wrapping range cannot appear to fit. */
+  return offset <= r.length && length <= r.length - offset;
+}
+
 MemoryRegionImpl::MemoryRegionImpl(RegionId id, Generation gen, void* base,
                                    uint64_t length, DeviceId dev,
                                    MemoryKind mem, AccessFlags access,
-                                   uint64_t local_key, uint64_t remote_key)
+                                   RegistrationPtr reg)
     : id_(id),
       gen_(gen),
       base_(base),
@@ -93,8 +110,7 @@ MemoryRegionImpl::MemoryRegionImpl(RegionId id, Generation gen, void* base,
       dev_(dev),
       mem_(mem),
       access_(access),
-      local_key_(local_key),
-      remote_key_(remote_key) {}
+      reg_(std::move(reg)) {}
 
 Status MemoryRegionImpl::view(uint64_t offset, uint64_t length,
                               RegionView* out) const {
@@ -116,7 +132,10 @@ Status MemoryRegionImpl::export_descriptor(std::vector<uint8_t>* out) const {
   d.length = length_;
   /* Must export the rkey. Substituting the lkey happens to work where the two
    * coincide and breaks silently elsewhere. */
-  d.remote_key = remote_key_;
+  /* The key belongs to the whole registration, while the address is this
+   * handle's own: a view into a pool must advertise where it actually starts,
+   * or the peer writes somewhere valid but wrong and nothing reports it. */
+  d.remote_key = reg_->remote_key;
   d.device_kind = dev_.kind;
   d.device_index = dev_.index;
   d.access = access_;
