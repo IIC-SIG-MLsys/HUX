@@ -16,3 +16,17 @@ if(HUX_ENABLE_CUDA)
   target_compile_options(hux_cuda_tests PRIVATE -Wall -Wextra)
   add_test(NAME cuda_backend COMMAND hux_cuda_tests)
 endif()
+
+# One suite per vendor, from the same source: every backend claiming a
+# capability must behave identically under it.
+foreach(vendor rocm neuware musa)
+  string(TOUPPER ${vendor} VENDOR_UP)
+  if(TARGET hux_device_${vendor})
+    add_executable(hux_${vendor}_tests test_main.cpp device/test_vendor_backend.cpp)
+    target_include_directories(hux_${vendor}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(hux_${vendor}_tests PRIVATE HUX_TEST_${VENDOR_UP})
+    target_link_libraries(hux_${vendor}_tests PRIVATE hux_device_${vendor})
+    target_compile_options(hux_${vendor}_tests PRIVATE -Wall -Wextra)
+    add_test(NAME ${vendor}_backend COMMAND hux_${vendor}_tests)
+  endif()
+endforeach()

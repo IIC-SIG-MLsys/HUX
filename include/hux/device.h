@@ -43,10 +43,15 @@ struct DeviceCaps {
   bool supports_peer_registration = false;
   bool supports_dmabuf_export = false;  /* False on Hygon DTK. */
 
-  /* Largest single registration, 0 if unbounded. Cambricon MLU tops out near
-   * 32 MiB and varies with fragmentation; callers must see that limit here
-   * rather than discover it at run time. */
+  /* Largest single registration, 0 if unbounded. */
   uint64_t max_registration_bytes = 0;
+
+  /* Ceiling on everything this process has registered at once, 0 if
+   * unbounded. It is a separate limit: on Cambricon MLU each registration up
+   * to 256 MiB succeeds on its own, yet four 64 MiB regions already exhaust
+   * the quota, so a caller that only checks the single-registration limit
+   * still fails once several regions are live. */
+  uint64_t max_total_registration_bytes = 0;
 };
 
 /* One implementation per vendor, each independently buildable and testable. */

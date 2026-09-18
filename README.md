@@ -27,17 +27,20 @@ with the transfer tied into the GPU's own execution order.
 Vendor support comes from device backends and transport providers combined;
 the public interface binds to no vendor SDK.
 
-| Device | Backend | State |
-| --- | --- | --- |
-| NVIDIA GPUs | CUDA | planned |
-| AMD GPUs / Hygon DCUs | ROCm / DTK | planned |
-| Cambricon MLUs | CNRT / Neuware | planned |
-| Moore Threads GPUs | MUSA | planned |
-| CPU memory | host | planned |
+| Device | Backend | RDMA registration | Notes |
+| --- | --- | --- | --- |
+| NVIDIA GPUs | CUDA | device memory | RTX 4090, A40 |
+| Hygon DCUs / AMD GPUs | ROCm / DTK | device memory | Z100L; DTK exports no DMA-BUF |
+| Cambricon MLUs | CNRT / Neuware | device memory, 256 MiB per process | MLU370-X8 |
+| Moore Threads GPUs | MUSA | **host memory only** | S3000; device memory is refused |
+| CPU memory | host | host memory | no execution queue |
 
-Each backend is independently enabled, built and tested. Capabilities are
-reported as they are: where a device caps registration size or lacks DMA-BUF
-export, that shows up in `DeviceCaps` rather than as a silent fallback.
+Each backend is independently enabled, built and tested on its own hardware.
+Capabilities are reported as measured, not as hoped: Cambricon registration is
+bounded per process rather than per call, and Moore Threads device memory
+cannot be registered at any size, so that backend stages through pinned host
+memory and reports `supports_peer_registration = false`. `tools/` holds the
+probe those numbers come from; run it first on any new device.
 
 ### Relation to HMC
 
