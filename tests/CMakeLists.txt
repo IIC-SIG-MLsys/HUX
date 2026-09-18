@@ -9,6 +9,7 @@ add_executable(hux_contract_tests
   contract/test_failure.cpp
   contract/test_observability.cpp
   contract/test_topology.cpp
+  contract/test_local_path.cpp
   device/test_host_backend.cpp
 )
 target_include_directories(hux_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

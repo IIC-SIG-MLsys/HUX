@@ -29,6 +29,7 @@ add_library(hux_core
   src/control/control_message.cpp
   src/device/host_backend.cpp
   src/device/topology.cpp
+  src/transport/local/local_provider.cpp
   src/transport/mock/mock_provider.cpp
 )
 target_include_directories(hux_core PUBLIC

@@ -35,6 +35,12 @@ the public interface binds to no vendor SDK.
 | Moore Threads GPUs | MUSA | **host memory only** | S3000; device memory is refused |
 | CPU memory | host | host memory | no execution queue |
 
+Transfers between engines in the same process take a local path that copies
+directly, reporting those copies rather than claiming to be zero-copy. It
+holds the same contract as the network path: a peer's address is a key plus an
+offset resolved through a registry, never a pointer taken on trust, so code
+written against it keeps working when the peer moves to another host.
+
 Each backend is independently enabled, built and tested on its own hardware.
 Capabilities are reported as measured, not as hoped: Cambricon registration is
 bounded per process rather than per call, and Moore Threads device memory
