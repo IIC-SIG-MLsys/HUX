@@ -1,0 +1,127 @@
+// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+#include "core/region_impl.h"
+
+#include <cstring>
+
+namespace hux {
+namespace {
+
+void put_u16(std::vector<uint8_t>* o, uint16_t v) {
+  o->push_back(static_cast<uint8_t>(v & 0xff));
+  o->push_back(static_cast<uint8_t>((v >> 8) & 0xff));
+}
+void put_u32(std::vector<uint8_t>* o, uint32_t v) {
+  for (int i = 0; i < 4; ++i) o->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+}
+void put_u64(std::vector<uint8_t>* o, uint64_t v) {
+  for (int i = 0; i < 8; ++i) o->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+}
+uint16_t get_u16(uint8_t const* p) {
+  return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(p[1]) << 8;
+}
+uint32_t get_u32(uint8_t const* p) {
+  uint32_t v = 0;
+  for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(p[i]) << (8 * i);
+  return v;
+}
+uint64_t get_u64(uint8_t const* p) {
+  uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(p[i]) << (8 * i);
+  return v;
+}
+
+// major(2) minor(2) region(8) gen(4) base(8) len(8) rkey(8) kind(1) idx(4) access(4)
+constexpr size_t kDescriptorBytes = 2 + 2 + 8 + 4 + 8 + 8 + 8 + 1 + 4 + 4;
+
+}  // namespace
+
+void encode_descriptor(RegionDescriptor const& d, std::vector<uint8_t>* out) {
+  out->clear();
+  out->reserve(kDescriptorBytes);
+  put_u16(out, kDescriptorMajor);
+  put_u16(out, kDescriptorMinor);
+  put_u64(out, d.region);
+  put_u32(out, d.generation);
+  put_u64(out, d.base);
+  put_u64(out, d.length);
+  put_u64(out, d.remote_key);
+  out->push_back(static_cast<uint8_t>(d.device_kind));
+  put_u32(out, static_cast<uint32_t>(d.device_index));
+  put_u32(out, static_cast<uint32_t>(d.access));
+}
+
+Status decode_descriptor(std::vector<uint8_t> const& buf, RegionDescriptor* out) {
+  if (out == nullptr) return Status::kInvalidArgument;
+  if (buf.size() != kDescriptorBytes) return Status::kInvalidArgument;
+  uint8_t const* p = buf.data();
+  out->major = get_u16(p); p += 2;
+  out->minor = get_u16(p); p += 2;
+  // major 不兼容时明确拒绝，不做"尽力而为"的解析。
+  if (out->major != kDescriptorMajor) return Status::kUnsupported;
+  out->region = get_u64(p); p += 8;
+  out->generation = get_u32(p); p += 4;
+  out->base = get_u64(p); p += 8;
+  out->length = get_u64(p); p += 8;
+  out->remote_key = get_u64(p); p += 8;
+  out->device_kind = static_cast<DeviceKind>(*p); p += 1;
+  out->device_index = static_cast<int32_t>(get_u32(p)); p += 4;
+  out->access = static_cast<AccessFlags>(get_u32(p));
+  return Status::kOk;
+}
+
+MemoryRegionImpl::MemoryRegionImpl(RegionId id, Generation gen, void* base,
+                                   uint64_t length, DeviceId dev, MemoryKind mem,
+                                   AccessFlags access, uint64_t local_key,
+                                   uint64_t remote_key)
+    : id_(id), gen_(gen), base_(base), length_(length), dev_(dev), mem_(mem),
+      access_(access), local_key_(local_key), remote_key_(remote_key) {}
+
+Status MemoryRegionImpl::view(uint64_t offset, uint64_t length,
+                              RegionView* out) const {
+  if (out == nullptr) return Status::kInvalidArgument;
+  Span s{offset, length};
+  // within() 先比较再相加，offset+length 回绕不会被误判成合法范围。
+  if (!s.within(length_)) return Status::kOutOfRange;
+  out->region = id_;
+  out->span = s;
+  return Status::kOk;
+}
+
+Status MemoryRegionImpl::export_descriptor(std::vector<uint8_t>* out) const {
+  if (out == nullptr) return Status::kInvalidArgument;
+  RegionDescriptor d;
+  d.region = id_;
+  d.generation = gen_;
+  d.base = reinterpret_cast<uint64_t>(base_);
+  d.length = length_;
+  // 导出给对端的必须是 remote_key。旧实现曾拿 lkey 顶替 rkey，
+  // 在两者偶然相等的设备上能跑通，换一台就悄悄坏掉。
+  d.remote_key = remote_key_;
+  d.device_kind = dev_.kind;
+  d.device_index = dev_.index;
+  d.access = access_;
+  encode_descriptor(d, out);
+  return Status::kOk;
+}
+
+RemoteRegionImpl::RemoteRegionImpl(RegionDescriptor const& d) : d_(d) {}
+
+DeviceId RemoteRegionImpl::device() const {
+  DeviceId id;
+  id.kind = d_.device_kind;
+  id.index = d_.device_index;
+  return id;
+}
+
+Status RemoteRegionImpl::view(uint64_t offset, uint64_t length,
+                              RegionView* out) const {
+  if (out == nullptr) return Status::kInvalidArgument;
+  if (!valid()) return Status::kStaleGeneration;
+  Span s{offset, length};
+  if (!s.within(d_.length)) return Status::kOutOfRange;
+  out->region = d_.region;
+  out->span = s;
+  return Status::kOk;
+}
+
+}  // namespace hux

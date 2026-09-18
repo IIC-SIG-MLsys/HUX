@@ -1,0 +1,71 @@
+// Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
+// 轻量测试框架：core 必须能在没有 GPU/RDMA SDK 的机器上构建并自测，
+// 所以这里不引入任何外部测试依赖。
+#ifndef HUX_TESTS_TEST_MAIN_H
+#define HUX_TESTS_TEST_MAIN_H
+
+#include <cstdio>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace huxtest {
+
+struct Case {
+  std::string name;
+  std::function<void()> fn;
+};
+
+std::vector<Case>& registry();
+int run_all();
+
+struct Registrar {
+  Registrar(char const* name, std::function<void()> fn) {
+    registry().push_back({name, std::move(fn)});
+  }
+};
+
+extern int g_failures;
+extern std::string g_current;
+
+void report_failure(char const* file, int line, std::string const& what);
+
+}  // namespace huxtest
+
+#define HUX_TEST(name)                                                  \
+  static void name();                                                   \
+  static ::huxtest::Registrar reg_##name(#name, name);                  \
+  static void name()
+
+#define CHECK(cond)                                                     \
+  do {                                                                  \
+    if (!(cond)) {                                                      \
+      ::huxtest::report_failure(__FILE__, __LINE__, "CHECK(" #cond ")"); \
+      return;                                                           \
+    }                                                                   \
+  } while (0)
+
+#define CHECK_EQ(a, b)                                                  \
+  do {                                                                  \
+    auto const& _a = (a);                                               \
+    auto const& _b = (b);                                               \
+    if (!(_a == _b)) {                                                  \
+      ::huxtest::report_failure(__FILE__, __LINE__,                     \
+                                "CHECK_EQ(" #a ", " #b ")");            \
+      return;                                                           \
+    }                                                                   \
+  } while (0)
+
+#define CHECK_STATUS(expr, expected)                                    \
+  do {                                                                  \
+    ::hux::Status _s = (expr);                                          \
+    if (_s != (expected)) {                                             \
+      ::huxtest::report_failure(                                        \
+          __FILE__, __LINE__,                                           \
+          std::string(#expr " -> ") + ::hux::to_string(_s) +            \
+              ", want " + ::hux::to_string(expected));                  \
+      return;                                                           \
+    }                                                                   \
+  } while (0)
+
+#endif  // HUX_TESTS_TEST_MAIN_H
