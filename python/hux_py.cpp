@@ -70,10 +70,17 @@ class PyRegion {
   }
 
   MemoryRegionPtr const& region() const { return region_; }
-  uint64_t length() const { return region_->length(); }
-  uint64_t id() const { return region_->id(); }
+  /* Gives up this object's hold on the registration. The engine drops its own
+   * when told to deregister, and the registration itself goes when the last
+   * reference does -- so a caller that only dropped the Python object would
+   * still be holding one here. */
+  void release_handle() { region_.reset(); }
+  uint64_t length() const { return region_ != nullptr ? region_->length() : 0; }
+  uint64_t id() const { return region_ != nullptr ? region_->id() : 0; }
 
   nb::bytes descriptor() const {
+    if (region_ == nullptr)
+      throw std::runtime_error("region has been deregistered");
     std::vector<uint8_t> d;
     raise_on_error(region_->export_descriptor(&d), "export_descriptor");
     return nb::bytes(reinterpret_cast<char const*>(d.data()), d.size());
@@ -102,6 +109,21 @@ class PyPeer {
   uint64_t id() const { return peer_->id(); }
   uint32_t epoch() const { return peer_->epoch(); }
   bool connected() const { return peer_->connected(); }
+
+  /* Which transport this peer is actually reached over, and where it turned
+   * out to be. Without this a fallback to a slower path shows up only as
+   * unexplained slowness, which is the thing this library is supposed to make
+   * impossible. */
+  nb::dict caps() const {
+    PeerCaps c = peer_->caps();
+    nb::dict d;
+    d["path"] = to_string(c.path);
+    d["place"] = to_string(c.place);
+    d["provider"] = c.provider;
+    d["qp_count"] = c.qp_count;
+    d["remote_max_registration_bytes"] = c.remote_max_registration_bytes;
+    return d;
+  }
 
   std::shared_ptr<PyRemoteRegion> import_region(nb::bytes const& desc) {
     std::vector<uint8_t> d(desc.c_str(), desc.c_str() + desc.size());
@@ -268,6 +290,32 @@ class PyEngine {
 
   std::string describe() const { return engine_->describe(); }
 
+  /* Stops new transfers against this region and lets the engine go of it.
+   * The registration itself survives while anything still references it --
+   * another handle, or the reuse cache -- which is what
+   * release_cached_registrations is for. */
+  void deregister_memory(PyRegion& region) {
+    if (region.region() == nullptr) return;
+    MemoryRegionPtr r = region.region();
+    region.release_handle();
+    nb::gil_scoped_release release;
+    engine_->deregister_memory(std::move(r));
+  }
+
+  /* Releases what the reuse cache is holding on nobody's behalf. Deregistering
+   * a handle does not do this -- the cache keeps the registration for the next
+   * caller -- so a caller about to free or unmap the memory needs it. It can
+   * block, which is why the GIL is dropped: the IPC path waits here for the
+   * peer to confirm it unmapped. */
+  uint32_t release_cached_registrations() {
+    uint32_t n = 0;
+    {
+      nb::gil_scoped_release release;
+      engine_->release_cached_registrations(&n);
+    }
+    return n;
+  }
+
   nb::dict stats() const {
     EngineStats s = engine_->stats();
     nb::dict d;
@@ -386,6 +434,8 @@ NB_MODULE(hux, m) {
       .def_prop_ro("id", &PyPeer::id)
       .def_prop_ro("epoch", &PyPeer::epoch)
       .def_prop_ro("connected", &PyPeer::connected)
+      .def("caps", &PyPeer::caps,
+           "The transport in use, where the peer is, and the provider's name.")
       .def("import_region", &PyPeer::import_region, nb::arg("descriptor"));
 
   nb::class_<PyRequest>(m, "Request")
@@ -420,6 +470,12 @@ NB_MODULE(hux, m) {
       .def("poll", &PyEngine::poll, nb::arg("max_items") = 32)
       .def("close", &PyEngine::close, nb::arg("timeout_ms") = 5000)
       .def("describe", &PyEngine::describe)
+      .def("deregister_memory", &PyEngine::deregister_memory,
+           nb::arg("region"),
+           "Retire a region; the registration goes when nothing holds it.")
+      .def("release_cached_registrations",
+           &PyEngine::release_cached_registrations,
+           "Release registrations the reuse cache holds; returns how many.")
       .def("stats", &PyEngine::stats);
 
   m.def("make_mock_engine", &make_mock_engine, nb::arg("move_data") = true,

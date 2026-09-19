@@ -175,6 +175,43 @@ def test_reports_what_it_ran():
     check(isinstance(st["requests_accepted"], int), "stats are plain numbers")
 
 
+def test_peer_says_which_path_it_got():
+    """A fallback to a slower transport should be a question you can ask,
+    not something you infer from throughput."""
+    eng, _ = setup()
+    peer = eng.add_peer(eng.local_metadata())
+    caps = peer.caps()
+    check(caps["provider"] == "mock", "the provider is named")
+    # Same process, but the only transport here is the network-shaped mock,
+    # so the path must not claim to be local.
+    check(caps["place"] == "same_process", "where the peer is")
+    check(caps["path"] == "rdma", "how it is actually reached")
+
+
+def test_deregistering_lets_the_registration_go():
+    """Dropping the Python object is not enough: the engine holds the region
+    too, and the reuse cache holds the registration after that."""
+    eng, _ = setup()
+    buf = bytearray(8192)
+    region = eng.register_memory(buf)
+    check(eng.release_cached_registrations() == 0,
+          "nothing is released while the region is live")
+    eng.deregister_memory(region)
+    check(eng.release_cached_registrations() == 1,
+          "released once the region is retired")
+
+
+def test_a_retired_region_refuses_rather_than_crashes():
+    eng, _ = setup()
+    region = eng.register_memory(bytearray(4096))
+    eng.deregister_memory(region)
+    try:
+        region.descriptor()
+        check(False, "exporting a retired region raises")
+    except RuntimeError:
+        check(True, "exporting a retired region raises")
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -183,6 +220,9 @@ def main():
         test_batch_submits_once,
         test_errors_are_exceptions_not_codes,
         test_reports_what_it_ran,
+        test_peer_says_which_path_it_got,
+        test_deregistering_lets_the_registration_go,
+        test_a_retired_region_refuses_rather_than_crashes,
     ]:
         print(f"{fn.__name__}:")
         fn()
