@@ -116,12 +116,30 @@ Two candidate explanations, and the second is the one being tested:
    the sub-operation counters balance.
 2. The peer's refill has not become visible across the process boundary when
    it says it has. A synchronous copy is supposed to make that impossible,
-   which is exactly why it is worth testing rather than assuming. Two soak
-   arms are running, identical except that one does an explicit device
-   barrier after refilling.
+   which is exactly why it is worth testing rather than assuming.
 
-Until this is settled, the same-host path should not be relied on where a
+Two soak arms were run, identical except that one does an explicit device
+barrier after refilling. Stopped early, so this is a direction and not a
+result:
+
+| arm | rounds | byte faults |
+| --- | --- | --- |
+| as written | 420000 | 13 |
+| explicit barrier after refill | 120000 | 0 |
+
+At the rate the first arm shows, the second would have been expected to see
+about four. Seeing none is worth following, but the two arms ran on different
+GPUs, started at different times, and the first one ran through a period of
+other activity on the host -- and its fault rate rose when that activity did,
+which is itself consistent with a race. The barrier arm needs to reach a
+comparable number of rounds, on the same GPU, before any of this is more than
+a hypothesis with one supporting observation.
+
+Until it is settled, the same-host path should not be relied on where a
 silent partial read would matter. The network path has not shown it.
+
+To resume: `hux_soak/run.sh` and `hux_soak/run_sync.sh`, which differ only in
+`--sync` (and in GPU and port, so the two cannot touch each other).
 
 ## Not verified
 
