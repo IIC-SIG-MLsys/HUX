@@ -188,9 +188,12 @@ bool verify(Buffer const& b, uint8_t seed) {
   return true;
 }
 
-int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc) {
+int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc,
+               std::string const& local_ip) {
   RdmaConfig cfg;
-  cfg.advertise_ip = "0.0.0.0";
+  /* The address this side is reached on. Across hosts it also selects the
+   * port and GID, so it is the local address, never the peer's. */
+  cfg.advertise_ip = local_ip;
   cfg.qp_per_conn = qps;
   cfg.cc = cc;
   std::shared_ptr<RdmaProvider> prov;
@@ -251,6 +254,7 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc) {
     return 1;
   }
   std::printf("[server] connected, holding memory\n");
+  std::printf("[server] %s\n", prov->describe().c_str());
 
   std::vector<uint8_t> ack;
   recv_blob(fd, &ack); /* client says it is done reading and writing */
@@ -290,20 +294,35 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc) {
 }
 
 int run_client(std::string const& ip, int gpu, uint32_t qps,
-               CongestionControllerPtr cc) {
+               CongestionControllerPtr cc, std::string const& local_ip) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in a{};
   a.sin_family = AF_INET;
   a.sin_port = htons(kMetaPort);
   ::inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
-  for (int i = 0; i < 30; ++i) {
-    if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) break;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+  bool linked = false;
+  for (int i = 0; i < 30 && !linked; ++i) {
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0)
+      linked = true;
+    else
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+  /* Reported rather than assumed: reading the handshake off a socket that
+   * never connected used to run on into an empty buffer and crash, which
+   * says nothing about the server that is missing. */
+  if (!linked) {
+    std::printf("[client] no server answering at %s:%u\n", ip.c_str(),
+                kMetaPort);
+    return 1;
   }
 
   std::vector<uint8_t> meta, desc;
   recv_blob(fd, &meta);
   recv_blob(fd, &desc);
+  if (meta.size() < 6 || desc.empty()) {
+    std::printf("[client] server closed before sending its handshake\n");
+    return 1;
+  }
 
   /* The metadata advertises 0.0.0.0 from the server's side; dial the address
    * we actually reached it on. */
@@ -319,7 +338,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
   (void)port;
 
   RdmaConfig cfg;
-  cfg.advertise_ip = ip;
+  cfg.advertise_ip = local_ip;
   cfg.qp_per_conn = qps;
   cfg.cc = cc;
   std::shared_ptr<RdmaProvider> prov;
@@ -360,6 +379,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
   }
   std::printf("[client] connected (%s memory, %u queue pairs)\n",
               buf.on_gpu ? "device" : "host", peer->caps().qp_count);
+  std::printf("[client] %s\n", prov->describe().c_str());
 
   auto drive = [&](RequestPtr const& req) {
     std::vector<RequestPtr> done;
@@ -594,7 +614,10 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::printf("usage: %s server|client <ip> [--gpu N]\n", argv[0]);
+    std::printf(
+        "usage: %s server|client <ip> [--gpu N] [--qp N]\n"
+        "       [--cc off|fixed:<bytes>|timely] [--local <ip>]\n",
+        argv[0]);
     return 2;
   }
   int gpu = -1;
@@ -618,10 +641,17 @@ int main(int argc, char** argv) {
       cc = make_cc_timely();
   }
 
-  if (std::strcmp(argv[1], "server") == 0) return run_server(gpu, qps, cc);
+  /* Across hosts each side names its own RoCE address; on one host the
+   * default keeps everything on loopback. */
+  std::string local_ip = "127.0.0.1";
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::strcmp(argv[i], "--local") == 0) local_ip = argv[i + 1];
+
+  if (std::strcmp(argv[1], "server") == 0)
+    return run_server(gpu, qps, cc, local_ip);
   if (argc < 3) {
     std::printf("client needs an ip\n");
     return 2;
   }
-  return run_client(argv[2], gpu, qps, cc);
+  return run_client(argv[2], gpu, qps, cc, local_ip);
 }

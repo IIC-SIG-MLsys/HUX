@@ -56,6 +56,61 @@ bool recv_all(int fd, void* buf, size_t n) {
   return true;
 }
 
+/* A RoCE v2 IPv4 GID is an IPv4-mapped address: ten zero bytes, 0xffff, then
+ * the four address bytes. */
+bool gid_ipv4(ibv_gid const& g, std::string* out) {
+  for (int i = 0; i < 10; ++i)
+    if (g.raw[i] != 0) return false;
+  if (g.raw[10] != 0xff || g.raw[11] != 0xff) return false;
+  in_addr a{};
+  std::memcpy(&a, g.raw + 12, 4);
+  char buf[INET_ADDRSTRLEN];
+  if (::inet_ntop(AF_INET, &a, buf, sizeof(buf)) == nullptr) return false;
+  *out = buf;
+  return true;
+}
+
+/* Verbs does not report the GID type, so it is read where the kernel
+ * publishes it. Only v2 carries an IP header, so only v2 is routed. */
+bool gid_is_roce_v2(char const* device, uint8_t port, int index) {
+  std::string path = std::string("/sys/class/infiniband/") + device +
+                     "/ports/" + std::to_string(port) + "/gid_attrs/types/" +
+                     std::to_string(index);
+  int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) return false;
+  char buf[64] = {0};
+  ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+  ::close(fd);
+  return n > 0 && std::string(buf).find("v2") != std::string::npos;
+}
+
+/* Scans a port's GID table. With an address, returns the index carrying it;
+ * without one, the first routable entry. -1 when the port has neither. */
+int find_roce_v2_gid(ibv_context* c, char const* device, uint8_t port,
+                     int table_len, std::string const& ip) {
+  int first = -1;
+  for (int i = 0; i < table_len; ++i) {
+    ibv_gid g{};
+    if (ibv_query_gid(c, port, i, &g) != 0) continue;
+    std::string addr;
+    if (!gid_ipv4(g, &addr)) continue;
+    if (!gid_is_roce_v2(device, port, i)) continue;
+    if (ip.empty()) return i;
+    if (addr == ip) return i;
+    if (first < 0) first = i;
+  }
+  return ip.empty() ? first : -1;
+}
+
+/* Whether an address is one a peer on another host could dial. Loopback and
+ * the wildcard name no port, so they carry no constraint. */
+bool routable_ipv4(std::string const& ip) {
+  in_addr a{};
+  if (ip.empty() || ::inet_pton(AF_INET, ip.c_str(), &a) != 1) return false;
+  uint32_t h = ntohl(a.s_addr);
+  return h != 0 && (h >> 24) != 127;
+}
+
 constexpr size_t kEpInfoBytes = 2 + 2 + 4 + 2 + 16 + 4 + 4;
 
 void encode_ep(RdmaEndpointInfo const& e, uint8_t* out) {
@@ -256,6 +311,29 @@ Status RdmaProvider::open_device() {
   /* An explicit name wins; otherwise the nearest NIC to the device, if one
    * was given; otherwise the first port that is up. */
   std::string wanted = cfg_.device_name;
+  int ip_gid = -1;
+  /* An address peers dial back on is a reachability constraint, not a
+   * preference: only the port that carries it can be reached. It therefore
+   * outranks affinity below, which is a performance choice. */
+  if (wanted.empty() && routable_ipv4(cfg_.advertise_ip)) {
+    for (int i = 0; i < num; ++i) {
+      char const* name = ibv_get_device_name(list[i]);
+      ibv_context* c = ibv_open_device(list[i]);
+      if (c == nullptr) continue;
+      ibv_port_attr pa{};
+      if (ibv_query_port(c, cfg_.ib_port, &pa) == 0 &&
+          pa.state == IBV_PORT_ACTIVE) {
+        int g = find_roce_v2_gid(c, name, cfg_.ib_port, pa.gid_tbl_len,
+                                 cfg_.advertise_ip);
+        if (g >= 0) {
+          wanted = name;
+          ip_gid = g;
+        }
+      }
+      ibv_close_device(c);
+      if (ip_gid >= 0) break;
+    }
+  }
   if (wanted.empty() && cfg_.has_affinity) {
     NicInfo nic;
     Proximity how = Proximity::kUnknown;
@@ -305,6 +383,14 @@ Status RdmaProvider::open_device() {
   /* RoCE needs a GID index and the two ends need not agree on which one, so
    * it is resolved locally and carried in the metadata. */
   gid_index_ = cfg_.gid_index;
+  if (gid_index_ < 0) gid_index_ = ip_gid;
+  if (gid_index_ < 0 && port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET) {
+    /* Index 3 is a common layout, not a rule -- one host here puts its
+     * routable entry at 5 -- so the table is scanned rather than assumed. */
+    gid_index_ =
+        find_roce_v2_gid(ctx_, ibv_get_device_name(ctx_->device), cfg_.ib_port,
+                         port_attr_.gid_tbl_len, std::string());
+  }
   if (gid_index_ < 0) {
     gid_index_ = port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET ? 3 : 0;
   }
@@ -361,6 +447,7 @@ std::string RdmaProvider::describe() const {
   std::ostringstream o;
   o << "{"
     << "\"provider\":\"rdma\","
+    << "\"advertise_ip\":\"" << cfg_.advertise_ip << "\","
     << "\"device\":\""
     << (ctx_ != nullptr ? ibv_get_device_name(ctx_->device) : "none") << "\","
     << "\"ib_port\":" << static_cast<int>(cfg_.ib_port) << ','

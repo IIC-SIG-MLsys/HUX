@@ -28,6 +28,22 @@ if(TARGET hux_transport_rdma)
   target_link_libraries(hux_rdma_tests PRIVATE hux_transport_rdma)
   target_compile_options(hux_rdma_tests PRIVATE -Wall -Wextra)
   add_test(NAME rdma_wire COMMAND hux_rdma_tests)
+
+  # Two processes and a real NIC, so it is built but never run by ctest.
+  # Built here rather than compiled by hand, so it cannot drift from the
+  # library it exercises.
+  add_executable(hux_rdma_loopback manual/rdma_loopback.cpp)
+  target_include_directories(hux_rdma_loopback PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(hux_rdma_loopback PRIVATE hux_transport_rdma)
+  target_compile_options(hux_rdma_loopback PRIVATE -Wall -Wextra)
+  # Device memory comes from whichever vendor backend is present.
+  foreach(vendor cuda rocm neuware)
+    string(TOUPPER ${vendor} VENDOR_UP)
+    if(TARGET hux_device_${vendor})
+      target_compile_definitions(hux_rdma_loopback PRIVATE HUX_LOOPBACK_${VENDOR_UP})
+      target_link_libraries(hux_rdma_loopback PRIVATE hux_device_${vendor})
+    endif()
+  endforeach()
 endif()
 
 if(HUX_ENABLE_CUDA)

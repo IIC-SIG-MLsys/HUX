@@ -50,11 +50,28 @@ above transfers to it.
 | UCX | measured, with a caveat | Works under `UCX_TLS=self,sm`; default transport selection aborts inside the library on this host (see [ucx.md](ucx.md)) |
 | IPC between processes on one host | not implemented | Locality is detected and reported; the path itself falls back to RDMA |
 
+## Across machines
+
+Measured between two hosts on RoCE v2, each with a ConnectX-5: a Hygon Z100L
+on one and a Cambricon MLU370-X8 on the other. Device memory to device memory,
+one and four queue pairs, read and write, both sides verifying the bytes, zero
+payload copies, and the notification, handoff and failure paths behaving as
+they do on one host. With TIMELY the window settled at 64 KiB and 153
+submissions were deferred, which an idle loopback never produces.
+
+One operational point, because it fails in a way that names nothing: the
+address in `advertise_ip` selects the port and the GID, so it has to be the
+address the kernel actually routes to that peer. One host here has two ports
+on the same subnet; naming the other one leaves the queue pairs connected and
+every transfer failing with a retry counter that has nothing to say about
+which port was wrong. `ip route get <peer>` names the right one.
+
 ## Features against hardware
 
 | Feature | Verified on |
 | --- | --- |
 | In-place transfer, zero payload copies | RDMA (host, NVIDIA A40, Hygon Z100L and Cambricon MLU370 device memory), UCX, both directions |
+| Transfer between two machines, and between two vendors | RDMA over RoCE v2, Hygon Z100L to Cambricon MLU370, host and device memory |
 | Multiple queue pairs, 1 to 16, balanced accounting | RDMA, loopback |
 | Congestion control: off, fixed window, adaptive | RDMA, loopback |
 | Device dependencies (`after`), non-blocking submission | RDMA with CUDA on A40 |
@@ -68,16 +85,14 @@ above transfers to it.
 
 Stated rather than left to be assumed:
 
-- **Cross-machine transfers.** Everything above ran between two processes on
-  one host. The path is the same and the loopback figures are not fabric
-  numbers.
 - **Multiple NICs carrying one transfer.** Selection by proximity is measured;
   striping a request across NICs is not implemented.
 - **Sustained operation.** The longest run here is minutes. The roadmap asks
   for 24 hours with zero silent data errors, which has not been attempted.
-- **Congestion behaviour under contention.** The controllers are measured on
-  synthetic delay samples and on an idle loopback path. Incast, competing
-  flows and tail latency under load need several machines.
+- **Congestion behaviour under contention.** The controllers now run over a
+  real fabric, where TIMELY closes its window on measured delay rather than on
+  the zero one loopback reports. The fabric was idle. Incast, competing flows
+  and tail latency under load still need several machines at once.
 - **Moore Threads end to end.** Its registration limit is measured and is
   absolute: device memory cannot be registered at any size, so the in-place
   path is impossible there and a staged one is not implemented. Nothing has
