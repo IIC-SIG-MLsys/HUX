@@ -72,6 +72,11 @@ class RequestImpl : public Request {
   /* The connection this request went out on: a handoff belongs on the same
    * one, not on whichever peer happens to be registered. */
   ProviderConnectionPtr connection() const { return held_conn_; }
+  /* And the transport it went out on, for the same reason: a handoff has to
+   * travel over the one that reaches this peer, which is not necessarily the
+   * engine's first. */
+  void set_provider(TransportProvider* p) { provider_ = p; }
+  TransportProvider* provider() const { return provider_; }
 
   void set_device_backend(DeviceBackend* d) { device_ = d; }
   void set_target(void* addr, uint64_t bytes);
@@ -110,6 +115,7 @@ class RequestImpl : public Request {
 
   std::vector<MemoryRegionPtr> held_regions_;
   ProviderConnectionPtr held_conn_;
+  TransportProvider* provider_ = nullptr;
   DeviceBackend* device_ = nullptr;
   void* target_addr_ = nullptr;
   uint64_t target_bytes_ = 0;

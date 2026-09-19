@@ -81,10 +81,21 @@ struct Buffer {
   void fill(uint8_t seed) const {
     dev->copy(ptr, pattern(seed).data(), kBytes);
   }
-  bool verify(uint8_t seed) const {
+  bool verify(uint8_t seed) const { return first_mismatch(seed) < 0; }
+  /* Where the first wrong byte is, or -1. A soak run reporting only that
+   * something did not match says nothing about whether a transfer went
+   * astray or a whole round never ran. */
+  int64_t first_mismatch(uint8_t seed) const {
     scratch.resize(kBytes);
     dev->copy(scratch.data(), ptr, kBytes);
-    return std::memcmp(scratch.data(), pattern(seed).data(), kBytes) == 0;
+    auto const& want = pattern(seed);
+    /* memcmp first: the byte-by-byte search is three times slower, and on a
+     * soak run that difference is the run. Only a round that already failed
+     * pays for finding out where. */
+    if (std::memcmp(scratch.data(), want.data(), kBytes) == 0) return -1;
+    for (uint64_t i = 0; i < kBytes; ++i)
+      if (scratch[i] != want[i]) return static_cast<int64_t>(i);
+    return -1;
   }
 
   mutable std::map<uint8_t, std::vector<uint8_t>> patterns;
@@ -388,11 +399,25 @@ int run_client(int gpu, uint64_t loops) {
    * directions, so a fault that only appears after hours is still caught
    * where it happens. */
   if (loops > 0) {
-    uint64_t bad = 0;
     auto const start = std::chrono::steady_clock::now();
     /* Split by phase, because a soak run that is slower than expected should
      * say which part is slow rather than leave it to be guessed. */
     int64_t us_read = 0, us_verify = 0, us_write = 0, us_peer = 0;
+    /* Counted apart. A submission refused, a request that never finished and
+     * bytes that arrived wrong are three different faults, and a single
+     * total cannot tell them apart. */
+    uint64_t bad_write = 0, bad_read = 0, bad_bytes = 0;
+    bool told = false;
+    auto const report = [&](char const* what, uint64_t round, Status st,
+                            int64_t at) {
+      if (told) return;
+      told = true;
+      std::printf("   FIRST FAULT at round %llu: %s, status %s",
+                  (unsigned long long)round, what, to_string(st));
+      if (at >= 0) std::printf(", first wrong byte at %lld", (long long)at);
+      std::printf("\n");
+      std::fflush(stdout);
+    };
     auto const tick = [] { return std::chrono::steady_clock::now(); };
     auto const since = [](std::chrono::steady_clock::time_point t) {
       return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -408,9 +433,12 @@ int run_client(int gpu, uint64_t loops) {
       buf.fill(0x22);
       us_verify += since(t);
       t = tick();
-      if (engine->write(peer.get(), lv, rv, {}, &r2) != Status::kOk ||
-          drive(r2) != Status::kOk)
-        ++bad;
+      Status ws = engine->write(peer.get(), lv, rv, {}, &r2);
+      if (ws == Status::kOk) ws = drive(r2);
+      if (ws != Status::kOk) {
+        ++bad_write;
+        report("write", i, ws, -1);
+      }
       us_write += since(t);
 
       t = tick();
@@ -426,12 +454,19 @@ int run_client(int gpu, uint64_t loops) {
       /* Only now: the peer has verified what was written and put the read
        * pattern back. */
       t = tick();
-      if (engine->read(peer.get(), lv, rv, {}, &r1) != Status::kOk ||
-          drive(r1) != Status::kOk)
-        ++bad;
+      Status rs = engine->read(peer.get(), lv, rv, {}, &r1);
+      if (rs == Status::kOk) rs = drive(r1);
+      if (rs != Status::kOk) {
+        ++bad_read;
+        report("read", i, rs, -1);
+      }
       us_read += since(t);
       t = tick();
-      if (!buf.verify(0x11)) ++bad;
+      int64_t const at = buf.first_mismatch(0x11);
+      if (at >= 0) {
+        ++bad_bytes;
+        report("bytes", i, Status::kOk, at);
+      }
       us_verify += since(t);
 
       if ((i + 1) % 10000 == 0) {
@@ -439,18 +474,24 @@ int run_client(int gpu, uint64_t loops) {
                               std::chrono::steady_clock::now() - start)
                               .count();
         std::printf(
-            "   %llu rounds, %llu faults, %llds elapsed"
-            " (read %lldus verify %lldus write %lldus peer %lldus each)\n",
-            (unsigned long long)(i + 1), (unsigned long long)bad,
-            (long long)secs, (long long)(us_read / (int64_t)(i + 1)),
+            "   %llu rounds, %llds elapsed, faults: write %llu read %llu "
+            "bytes %llu (read %lldus verify %lldus write %lldus peer %lldus "
+            "each)\n",
+            (unsigned long long)(i + 1), (long long)secs,
+            (unsigned long long)bad_write, (unsigned long long)bad_read,
+            (unsigned long long)bad_bytes,
+            (long long)(us_read / (int64_t)(i + 1)),
             (long long)(us_verify / (int64_t)(i + 1)),
             (long long)(us_write / (int64_t)(i + 1)),
             (long long)(us_peer / (int64_t)(i + 1)));
         std::fflush(stdout);
       }
     }
-    std::printf("   soak finished: %llu rounds, %llu faults\n",
-                (unsigned long long)loops, (unsigned long long)bad);
+    std::printf(
+        "   soak finished: %llu rounds, faults: write %llu read %llu "
+        "bytes %llu\n",
+        (unsigned long long)loops, (unsigned long long)bad_write,
+        (unsigned long long)bad_read, (unsigned long long)bad_bytes);
   }
 
   send_blob(fd, "k", 1);

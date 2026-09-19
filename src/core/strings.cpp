@@ -122,6 +122,20 @@ char const* to_string(PathKind p) {
   return "unknown";
 }
 
+char const* to_string(PeerPlace p) {
+  switch (p) {
+    case PeerPlace::kSameProcess:
+      return "same_process";
+    case PeerPlace::kSameHost:
+      return "same_host";
+    case PeerPlace::kAnotherHost:
+      return "another_host";
+    case PeerPlace::kUnknown:
+      break;
+  }
+  return "unknown";
+}
+
 namespace {
 
 char const* progress_name(ProgressMode m) {

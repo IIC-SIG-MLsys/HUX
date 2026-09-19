@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "control/identity.h"
 #include "core/region_impl.h"
 #include "core/request_impl.h"
 #include "hux/engine.h"
@@ -22,7 +23,7 @@ class EngineImpl;
 class PeerImpl : public Peer {
  public:
   PeerImpl(PeerId id, ProviderConnectionPtr conn, PeerCaps caps,
-           EngineImpl* engine);
+           EngineImpl* engine, TransportProviderPtr provider);
 
   PeerId id() const override { return id_; }
   Epoch epoch() const override {
@@ -39,6 +40,11 @@ class PeerImpl : public Peer {
 
   ProviderConnection* conn() const { return conn_.get(); }
   ProviderConnectionPtr conn_ptr() const { return conn_; }
+  /* The provider this peer was reached over. Held per peer rather than per
+   * engine: a peer in the next process and a peer on the next machine are
+   * reached by different transports, and a request has to go out over the one
+   * that can actually reach its peer. */
+  TransportProvider* provider() const { return provider_.get(); }
   /* Bumping the epoch keeps old requests off a new connection. */
   void bump_epoch() {
     epoch_.fetch_add(1, std::memory_order_acq_rel);
@@ -48,6 +54,7 @@ class PeerImpl : public Peer {
  private:
   PeerId const id_;
   ProviderConnectionPtr conn_;
+  TransportProviderPtr provider_;
   PeerCaps const caps_;
   EngineImpl* const engine_;
   std::atomic<Epoch> epoch_{0};
@@ -59,7 +66,7 @@ class PeerImpl : public Peer {
 class EngineImpl : public Engine {
  public:
   EngineImpl(EngineConfig cfg, std::shared_ptr<DeviceBackend> device,
-             TransportProviderPtr provider);
+             std::vector<TransportProviderPtr> providers);
   ~EngineImpl() override;
 
   EngineConfig const& config() const override { return cfg_; }
@@ -102,8 +109,9 @@ class EngineImpl : public Engine {
   std::string describe() const override;
   Status close(int64_t timeout_ms) override;
 
-  /* For PeerImpl. */
-  TransportProvider* provider() const { return provider_.get(); }
+  /* For PeerImpl. The first provider, which is the only one when there is
+   * only one. */
+  TransportProvider* provider() const { return providers_.front().get(); }
 
  private:
   Status submit_vector(Peer* peer, std::vector<RegionView> const& local,
@@ -113,7 +121,8 @@ class EngineImpl : public Engine {
   /* Splits paired segments into SubOps of at most chunk_bytes. */
   Status build_subops(std::vector<RegionView> const& local,
                       std::vector<RegionView> const& remote, SubOp::Kind kind,
-                      RequestId req, std::vector<SubOp>* out,
+                      RequestId req, std::string const& provider,
+                      std::vector<SubOp>* out,
                       std::vector<MemoryRegionPtr>* held, void** target_addr,
                       uint64_t* target_bytes);
   /* A request whose device dependencies have not been met yet. It is admitted
@@ -124,6 +133,10 @@ class EngineImpl : public Engine {
     std::vector<SubOp> ops;
     ProviderConnectionPtr conn;
     PeerId peer = 0;
+    /* The peer's provider, carried with the work: by the time a deferred
+     * request is submitted, looking the peer up again would be a second
+     * chance to pick the wrong one. */
+    TransportProvider* provider = nullptr;
     std::vector<DeviceEventPtr> after;
   };
 
@@ -143,9 +156,17 @@ class EngineImpl : public Engine {
   std::shared_ptr<RemoteRegionImpl> find_remote(RegionId id) const;
   void progress_loop();
 
+  /* Chooses the provider for a peer from where that peer is. Returns null
+   * when nothing here can reach it, which is a refusal, not a fallback: a
+   * transfer quietly taking a slower path than the caller was told is worse
+   * than one that does not start. */
+  TransportProviderPtr provider_for(Locality locality) const;
+
   EngineConfig cfg_;
   std::shared_ptr<DeviceBackend> device_;
-  TransportProviderPtr provider_;
+  /* In preference order. The first is what a caller gets when nothing more
+   * specific applies. */
+  std::vector<TransportProviderPtr> providers_;
 
   mutable std::mutex mu_;
   std::unordered_map<RegionId, std::shared_ptr<MemoryRegionImpl>> regions_;

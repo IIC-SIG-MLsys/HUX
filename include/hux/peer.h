@@ -25,8 +25,24 @@ enum class PathKind : uint8_t {
 
 char const* to_string(PathKind p);
 
+/* Where the peer is, which is a different question from how it is reached. A
+ * peer in the next process can still be served over the network when no
+ * closer transport is available, and a caller asking which it got must not be
+ * given the better answer. */
+enum class PeerPlace : uint8_t {
+  kUnknown = 0,
+  kSameProcess,
+  kSameHost,
+  kAnotherHost,
+};
+
+char const* to_string(PeerPlace p);
+
 struct PeerCaps {
+  /* The transport actually in use. */
   PathKind path = PathKind::kUnknown;
+  /* Where the peer turned out to be. */
+  PeerPlace place = PeerPlace::kUnknown;
   std::string provider;
   uint32_t qp_count = 0;
   bool remote_device_is_gpu = false;

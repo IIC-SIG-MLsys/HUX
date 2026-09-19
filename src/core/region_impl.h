@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "hux/region.h"
@@ -13,6 +14,12 @@ namespace hux {
 
 /* Decoded descriptor. Field widths and byte order are fixed by the codec, so
  * nothing depends on the local ABI and no raw C++ struct goes on the wire. */
+/* A remote key together with the provider that minted it. */
+struct ProviderKey {
+  std::string provider;
+  uint64_t remote_key = 0;
+};
+
 struct RegionDescriptor {
   uint16_t major = 0;
   uint16_t minor = 0;
@@ -20,7 +27,15 @@ struct RegionDescriptor {
   Generation generation = 0;
   uint64_t base = 0; /* Peer virtual address; never dereferenced here. */
   uint64_t length = 0;
+  /* The first provider's key, kept as its own field so the common case reads
+   * the same as it always did. */
   uint64_t remote_key = 0;
+  /* One key per provider that registered this region. A peer reached over IPC
+   * cannot use an rkey minted by a NIC, so the descriptor carries every key
+   * and the importer takes the one for the path it arrived on -- rather than
+   * taking the only key on offer and failing later, somewhere that says
+   * nothing about why. */
+  std::vector<ProviderKey> provider_keys;
   DeviceKind device_kind = DeviceKind::kHost;
   int32_t device_index = 0;
   AccessFlags access = AccessFlags::kNone;
@@ -40,8 +55,32 @@ struct Registration {
   uint64_t length = 0;
   DeviceId device;
   AccessFlags access = AccessFlags::kNone;
+
+  /* What one provider gave back for this range. A region is registered with
+   * every provider the engine holds, because which one a peer will be reached
+   * over is not known when the memory is registered. */
+  struct Key {
+    std::string provider;
+    uint64_t local_key = 0;
+    uint64_t remote_key = 0;
+  };
+  std::vector<Key> keys;
+
+  /* The first provider's, which is the only one when there is only one. */
   uint64_t local_key = 0;
   uint64_t remote_key = 0;
+
+  /* The local key for a named provider, or none if that provider refused this
+   * memory -- IPC refuses host memory, so this genuinely happens. */
+  bool local_key_for(std::string const& provider, uint64_t* out) const {
+    for (auto const& k : keys) {
+      if (k.provider == provider) {
+        if (out != nullptr) *out = k.local_key;
+        return true;
+      }
+    }
+    return false;
+  }
 };
 using RegistrationPtr = std::shared_ptr<Registration>;
 
@@ -71,6 +110,11 @@ class MemoryRegionImpl : public MemoryRegion {
   Status export_descriptor(std::vector<uint8_t>* out) const override;
 
   uint64_t local_key() const { return reg_->local_key; }
+  /* The key from a named transport, when that transport registered this
+   * memory at all. */
+  bool local_key_for(std::string const& provider, uint64_t* out) const {
+    return reg_->local_key_for(provider, out);
+  }
   uint64_t remote_key() const { return reg_->remote_key; }
   RegistrationPtr const& registration() const { return reg_; }
 

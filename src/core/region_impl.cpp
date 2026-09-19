@@ -51,12 +51,20 @@ void encode_descriptor(RegionDescriptor const& d, std::vector<uint8_t>* out) {
   out->push_back(static_cast<uint8_t>(d.device_kind));
   put_u32(out, static_cast<uint32_t>(d.device_index));
   put_u32(out, static_cast<uint32_t>(d.access));
+  /* Then the per-provider keys, length-prefixed, so a descriptor stays one
+   * self-describing blob the application can hand over however it likes. */
+  put_u16(out, static_cast<uint16_t>(d.provider_keys.size()));
+  for (auto const& k : d.provider_keys) {
+    put_u16(out, static_cast<uint16_t>(k.provider.size()));
+    out->insert(out->end(), k.provider.begin(), k.provider.end());
+    put_u64(out, k.remote_key);
+  }
 }
 
 Status decode_descriptor(std::vector<uint8_t> const& buf,
                          RegionDescriptor* out) {
   if (out == nullptr) return Status::kInvalidArgument;
-  if (buf.size() != kDescriptorBytes) return Status::kInvalidArgument;
+  if (buf.size() < kDescriptorBytes) return Status::kInvalidArgument;
   uint8_t const* p = buf.data();
   out->major = get_u16(p);
   p += 2;
@@ -79,7 +87,32 @@ Status decode_descriptor(std::vector<uint8_t> const& buf,
   out->device_index = static_cast<int32_t>(get_u32(p));
   p += 4;
   out->access = static_cast<AccessFlags>(get_u32(p));
-  return Status::kOk;
+  p += 4;
+
+  out->provider_keys.clear();
+  size_t remaining = buf.size() - kDescriptorBytes;
+  if (remaining < 2)
+    return remaining == 0 ? Status::kOk : Status::kInvalidArgument;
+  uint16_t const count = get_u16(p);
+  p += 2;
+  remaining -= 2;
+  for (uint16_t i = 0; i < count; ++i) {
+    if (remaining < 2) return Status::kInvalidArgument;
+    uint16_t const n = get_u16(p);
+    p += 2;
+    remaining -= 2;
+    /* Checked before reading: a truncated descriptor must be refused, not
+     * parsed as far as it goes and then used. */
+    if (remaining < n + 8u) return Status::kInvalidArgument;
+    ProviderKey k;
+    k.provider.assign(reinterpret_cast<char const*>(p), n);
+    p += n;
+    k.remote_key = get_u64(p);
+    p += 8;
+    remaining -= n + 8u;
+    out->provider_keys.push_back(std::move(k));
+  }
+  return remaining == 0 ? Status::kOk : Status::kInvalidArgument;
 }
 
 bool registration_covers(Registration const& r, void* addr, uint64_t length,
@@ -136,6 +169,10 @@ Status MemoryRegionImpl::export_descriptor(std::vector<uint8_t>* out) const {
    * handle's own: a view into a pool must advertise where it actually starts,
    * or the peer writes somewhere valid but wrong and nothing reports it. */
   d.remote_key = reg_->remote_key;
+  /* Every provider's key travels, because which path a peer will reach this
+   * region over is not known when it is registered. */
+  for (auto const& k : reg_->keys)
+    d.provider_keys.push_back(ProviderKey{k.provider, k.remote_key});
   d.device_kind = dev_.kind;
   d.device_index = dev_.index;
   d.access = access_;

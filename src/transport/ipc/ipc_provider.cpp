@@ -2,10 +2,12 @@
 #include "transport/ipc/ipc_provider.h"
 
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <sstream>
@@ -206,6 +208,14 @@ Status IpcProvider::local_metadata(std::vector<uint8_t>* out) const {
 }
 
 Status IpcProvider::handshake(int fd) {
+  /* Bounded. A peer that accepted the connection and then said nothing --
+   * or a socket dialled at a name whose owner is not listening on it -- would
+   * otherwise leave this blocked in a read for ever, inside what the caller
+   * thinks is a connect. */
+  timeval tv{5, 0};
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
   std::vector<uint8_t> mine;
   put_u16(&mine, kIpcWireMajor);
   put_u16(&mine, kIpcWireMinor);
@@ -214,7 +224,8 @@ Status IpcProvider::handshake(int fd) {
 
   std::vector<uint8_t> theirs(4 + kIdentityBytes);
   if (!recv_all(fd, theirs.data(), theirs.size()))
-    return Status::kPeerDisconnected;
+    return errno == EAGAIN || errno == EWOULDBLOCK ? Status::kTimeout
+                                                   : Status::kPeerDisconnected;
   if (get_u16(theirs.data()) != kIpcWireMajor) return Status::kUnsupported;
 
   Identity peer;

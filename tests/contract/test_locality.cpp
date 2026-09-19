@@ -77,7 +77,12 @@ HUX_TEST(two_engines_in_one_process_see_each_other_as_local) {
 
   PeerPtr peer;
   CHECK_STATUS(a->add_peer(meta, &peer), Status::kOk);
-  CHECK(peer->caps().path == PathKind::kSameProcess);
+  CHECK(peer->caps().place == PeerPlace::kSameProcess);
+  /* And the path is the network one, because that is the only transport this
+   * engine was given. Being next door does not make a NIC transfer local, and
+   * reporting otherwise would hide exactly the fallback a caller is asking
+   * about. */
+  CHECK(peer->caps().path == PathKind::kRdma);
 }
 
 HUX_TEST(a_peer_on_another_host_is_reported_as_remote) {

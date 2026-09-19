@@ -14,8 +14,12 @@ namespace hux {
 // ---------------- PeerImpl ----------------
 
 PeerImpl::PeerImpl(PeerId id, ProviderConnectionPtr conn, PeerCaps caps,
-                   EngineImpl* engine)
-    : id_(id), conn_(std::move(conn)), caps_(caps), engine_(engine) {}
+                   EngineImpl* engine, TransportProviderPtr provider)
+    : id_(id),
+      conn_(std::move(conn)),
+      provider_(std::move(provider)),
+      caps_(caps),
+      engine_(engine) {}
 
 Status PeerImpl::import_region(std::vector<uint8_t> const& descriptor,
                                RemoteRegionPtr* out) {
@@ -23,6 +27,23 @@ Status PeerImpl::import_region(std::vector<uint8_t> const& descriptor,
   RegionDescriptor d;
   Status s = decode_descriptor(descriptor, &d);
   if (s != Status::kOk) return s;
+
+  /* The peer exported a key per transport; take the one minted by the
+   * transport this peer is reached over. A region exported only for another
+   * path is refused here, where the reason is visible, rather than accepted
+   * and rejected by hardware somewhere with no context. */
+  if (!d.provider_keys.empty()) {
+    std::string const want = provider_->caps().name;
+    bool found = false;
+    for (auto const& k : d.provider_keys) {
+      if (k.provider == want) {
+        d.remote_key = k.remote_key;
+        found = true;
+        break;
+      }
+    }
+    if (!found) return Status::kUnsupported;
+  }
 
   auto r = std::make_shared<RemoteRegionImpl>(d);
   {
@@ -56,10 +77,10 @@ Status PeerImpl::import_region_batch(
 // ---------------- EngineImpl ----------------
 
 EngineImpl::EngineImpl(EngineConfig cfg, std::shared_ptr<DeviceBackend> device,
-                       TransportProviderPtr provider)
+                       std::vector<TransportProviderPtr> providers)
     : cfg_(std::move(cfg)),
       device_(std::move(device)),
-      provider_(std::move(provider)),
+      providers_(std::move(providers)),
       engine_id_(next_engine_id()) {
   if (cfg_.progress == ProgressMode::kThread) {
     progress_thread_ = std::thread([this] { progress_loop(); });
@@ -91,9 +112,42 @@ Status make_engine(EngineConfig const& cfg,
   std::string reason;
   Status s = cfg.validate(&reason);
   if (s != Status::kOk) return s;
+  std::vector<TransportProviderPtr> providers;
+  providers.push_back(std::move(provider));
   *out = std::unique_ptr<Engine>(
-      new EngineImpl(cfg, std::move(device), std::move(provider)));
+      new EngineImpl(cfg, std::move(device), std::move(providers)));
   return Status::kOk;
+}
+
+Status make_engine(EngineConfig const& cfg,
+                   std::shared_ptr<DeviceBackend> device,
+                   std::vector<TransportProviderPtr> providers,
+                   std::unique_ptr<Engine>* out) {
+  if (out == nullptr || providers.empty()) return Status::kInvalidArgument;
+  for (auto const& p : providers)
+    if (p == nullptr) return Status::kInvalidArgument;
+  std::string reason;
+  Status s = cfg.validate(&reason);
+  if (s != Status::kOk) return s;
+  *out = std::unique_ptr<Engine>(
+      new EngineImpl(cfg, std::move(device), std::move(providers)));
+  return Status::kOk;
+}
+
+/* Where a peer is decides which transport can reach it. A peer in this
+ * process or on this host is served by a provider that says it can do that;
+ * anything else goes to the first provider, which is the network one in every
+ * configuration that has one. */
+TransportProviderPtr EngineImpl::provider_for(Locality locality) const {
+  if (locality == Locality::kSameHost || locality == Locality::kSameProcess) {
+    for (auto const& p : providers_) {
+      std::string const name = p->caps().name;
+      if (name == "ipc" ||
+          (locality == Locality::kSameProcess && name == "local"))
+        return p;
+    }
+  }
+  return providers_.front();
 }
 
 RegistrationPtr EngineImpl::find_registration(void* addr, uint64_t length,
@@ -159,34 +213,48 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
       ++stats_.registrations_created;
   }
   if (reg == nullptr) {
-    uint64_t lkey = 0, rkey = 0;
-    Status s =
-        provider_->register_region(addr, length, dev, access, &lkey, &rkey);
-    if (s != Status::kOk) return s;
-
     auto owned = std::make_shared<Registration>();
     owned->base = addr;
     owned->length = length;
     owned->device = dev;
     owned->access = access;
-    owned->local_key = lkey;
-    owned->remote_key = rkey;
 
-    /* Released through the provider once nothing references it any more --
+    /* Registered with every provider, because which path a peer will be
+     * reached over is not known here. A provider that refuses this particular
+     * memory -- IPC cannot export what the caller allocated on the host --
+     * contributes no key, and a peer arriving over that provider will find
+     * the region has none, which is the truthful answer. The registration
+     * fails only when no provider took it at all. */
+    std::vector<std::pair<TransportProviderPtr, uint64_t>> held;
+    Status first_error = Status::kOk;
+    for (auto const& prov : providers_) {
+      uint64_t lkey = 0, rkey = 0;
+      Status s = prov->register_region(addr, length, dev, access, &lkey, &rkey);
+      if (s != Status::kOk) {
+        if (first_error == Status::kOk) first_error = s;
+        continue;
+      }
+      owned->keys.push_back(Registration::Key{prov->caps().name, lkey, rkey});
+      held.emplace_back(prov, lkey);
+    }
+    if (owned->keys.empty())
+      return first_error == Status::kOk ? Status::kUnsupported : first_error;
+    owned->local_key = owned->keys.front().local_key;
+    owned->remote_key = owned->keys.front().remote_key;
+
+    /* Released through the providers once nothing references it any more --
      * another handle, or the cache.
      *
-     * The provider is captured by shared_ptr, not by raw pointer. A region
-     * can outlive the engine that created it: a caller holding a handle after
+     * They are captured by shared_ptr, not by raw pointer. A region can
+     * outlive the engine that created it: a caller holding a handle after
      * dropping the engine is doing nothing wrong, and a raw pointer would
      * leave this deleter calling into freed memory at some later teardown,
      * with nothing in the stack to say why. */
-    TransportProviderPtr prov = provider_;
-    reg = RegistrationPtr(owned.get(),
-                          [prov, lkey, owned](Registration*) mutable {
-                            prov->deregister_region(lkey);
-                            owned.reset();
-                            prov.reset();
-                          });
+    reg = RegistrationPtr(owned.get(), [held, owned](Registration*) mutable {
+      for (auto& h : held) h.first->deregister_region(h.second);
+      held.clear();
+      owned.reset();
+    });
     if (cfg_.registration_cache_entries > 0) cache_registration(reg);
   }
 
@@ -246,7 +314,7 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
   }
   for (auto& p : peers) {
     if (!p->connected()) continue;
-    provider_->send_control(
+    p->provider()->send_control(
         p->conn(), static_cast<uint16_t>(ControlType::kRegionInvalidate),
         payload);
   }
@@ -294,12 +362,46 @@ Status EngineImpl::local_metadata(std::vector<uint8_t>* out) const {
   Identity id = local_identity();
   id.engine = engine_id_;
   encode_identity(id, out);
-  std::vector<uint8_t> provider_meta;
-  Status s = provider_->local_metadata(&provider_meta);
-  if (s != Status::kOk) return s;
-  out->insert(out->end(), provider_meta.begin(), provider_meta.end());
+
+  /* Every provider's dialling information, each named. A peer picks the one
+   * it can actually use: which transport suits depends on where the peer is,
+   * and that is known on its side, not here. */
+  std::vector<std::pair<std::string, std::vector<uint8_t>>> metas;
+  for (auto const& prov : providers_) {
+    std::vector<uint8_t> m;
+    if (prov->local_metadata(&m) != Status::kOk) continue;
+    metas.emplace_back(prov->caps().name, std::move(m));
+  }
+  if (metas.empty()) return Status::kInternal;
+
+  auto put_u16 = [out](uint16_t v) {
+    out->push_back(v & 0xff);
+    out->push_back((v >> 8) & 0xff);
+  };
+  put_u16(static_cast<uint16_t>(metas.size()));
+  for (auto const& m : metas) {
+    put_u16(static_cast<uint16_t>(m.first.size()));
+    out->insert(out->end(), m.first.begin(), m.first.end());
+    put_u16(static_cast<uint16_t>(m.second.size()));
+    out->insert(out->end(), m.second.begin(), m.second.end());
+  }
   return Status::kOk;
 }
+
+namespace {
+
+/* Whether a transport is usable for a peer in that place. IPC needs one host;
+ * the same-process path needs one address space. Nothing else is filtered --
+ * the network path reaches a peer wherever it is, including next door. */
+bool suits(std::string const& provider, Locality locality) {
+  if (provider == "ipc")
+    return locality == Locality::kSameHost ||
+           locality == Locality::kSameProcess;
+  if (provider == "local") return locality == Locality::kSameProcess;
+  return true;
+}
+
+}  // namespace
 
 Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
                             PeerPtr* out) {
@@ -310,41 +412,116 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
   Identity peer_id;
   Locality locality = Locality::kRemote;
   std::vector<uint8_t> provider_meta = metadata;
+  /* What the peer offers, by provider name. Empty for metadata from a
+   * single-provider peer, which carries one unnamed blob. */
+  std::vector<std::pair<std::string, std::vector<uint8_t>>> offered;
   if (decode_identity(metadata, 0, &peer_id) == Status::kOk) {
     Identity mine = local_identity();
     mine.engine = engine_id_;
     locality = locality_of(mine, peer_id);
     provider_meta.assign(metadata.begin() + kIdentityBytes, metadata.end());
+
+    size_t at = kIdentityBytes;
+    auto const u16 = [&metadata](size_t i) {
+      return static_cast<uint16_t>(metadata[i] |
+                                   (uint16_t(metadata[i + 1]) << 8));
+    };
+    if (metadata.size() >= at + 2) {
+      uint16_t const count = u16(at);
+      at += 2;
+      bool ok = true;
+      std::vector<std::pair<std::string, std::vector<uint8_t>>> parsed;
+      for (uint16_t i = 0; i < count && ok; ++i) {
+        if (metadata.size() < at + 2) {
+          ok = false;
+          break;
+        }
+        uint16_t const n = u16(at);
+        at += 2;
+        if (metadata.size() < at + n + 2u) {
+          ok = false;
+          break;
+        }
+        std::string name(reinterpret_cast<char const*>(metadata.data() + at),
+                         n);
+        at += n;
+        uint16_t const mlen = u16(at);
+        at += 2;
+        if (metadata.size() < at + mlen) {
+          ok = false;
+          break;
+        }
+        parsed.emplace_back(std::move(name),
+                            std::vector<uint8_t>(metadata.begin() + at,
+                                                 metadata.begin() + at + mlen));
+        at += mlen;
+      }
+      /* Accepted only if it parses exactly. A trailing byte means this is not
+       * the layout it looked like, and guessing would dial the wrong
+       * transport with the wrong bytes. */
+      if (ok && at == metadata.size()) offered = std::move(parsed);
+    }
   }
 
+  /* In local preference order, the first transport that suits where the peer
+   * is and that the peer also offers. */
+  TransportProviderPtr chosen;
+  for (auto const& prov : providers_) {
+    std::string const name = prov->caps().name;
+    if (!suits(name, locality)) continue;
+    if (offered.empty()) {
+      chosen = prov;
+      break;
+    }
+    for (auto const& o : offered) {
+      if (o.first == name) {
+        chosen = prov;
+        provider_meta = o.second;
+        break;
+      }
+    }
+    if (chosen != nullptr) break;
+  }
+  if (chosen == nullptr) return Status::kUnsupported;
+
   ProviderConnectionPtr conn;
-  Status s = provider_->connect(provider_meta, &conn);
+  Status s = chosen->connect(provider_meta, &conn);
   if (s != Status::kOk) return s;
 
   PeerCaps caps;
-  caps.provider = provider_->caps().name;
+  caps.provider = chosen->caps().name;
   /* Reported as observed rather than assumed, so a caller that needs to know
    * whether a transfer crosses the network can ask instead of inferring it
    * from throughput. */
+  /* The path taken, not the path the peer's location would allow: a peer on
+   * this host reached over the network is a network transfer, and a caller
+   * asking which it got must not be told the better answer. */
   switch (locality) {
     case Locality::kSameEngine:
     case Locality::kSameProcess:
-      caps.path = PathKind::kSameProcess;
+      caps.place = PeerPlace::kSameProcess;
       break;
     case Locality::kSameHost:
-      caps.path = PathKind::kIpc;
+      caps.place = PeerPlace::kSameHost;
       break;
     case Locality::kRemote:
-      caps.path = PathKind::kRdma;
+      caps.place = PeerPlace::kAnotherHost;
       break;
   }
+  if (caps.provider == "local")
+    caps.path = PathKind::kSameProcess;
+  else if (caps.provider == "ipc")
+    caps.path = PathKind::kIpc;
+  else
+    caps.path = PathKind::kRdma;
   caps.qp_count = conn->qp_count();
   if (device_ != nullptr) {
     caps.remote_max_registration_bytes = device_->caps().max_registration_bytes;
   }
 
   PeerId id = next_peer_.fetch_add(1, std::memory_order_relaxed);
-  auto p = std::make_shared<PeerImpl>(id, std::move(conn), caps, this);
+  auto p = std::make_shared<PeerImpl>(id, std::move(conn), caps, this,
+                                      std::move(chosen));
   {
     std::lock_guard<std::mutex> g(mu_);
     peers_[id] = p;
@@ -361,7 +538,7 @@ Status EngineImpl::remove_peer(PeerPtr peer) {
     std::lock_guard<std::mutex> g(mu_);
     peers_.erase(p->id());
   }
-  return provider_->disconnect(p->conn_ptr());
+  return p->provider()->disconnect(p->conn_ptr());
 }
 
 std::shared_ptr<MemoryRegionImpl> EngineImpl::find_region(RegionId id) const {
@@ -379,6 +556,7 @@ std::shared_ptr<RemoteRegionImpl> EngineImpl::find_remote(RegionId id) const {
 Status EngineImpl::build_subops(std::vector<RegionView> const& local,
                                 std::vector<RegionView> const& remote,
                                 SubOp::Kind kind, RequestId req,
+                                std::string const& provider,
                                 std::vector<SubOp>* out,
                                 std::vector<MemoryRegionPtr>* held,
                                 void** target_addr, uint64_t* target_bytes) {
@@ -413,7 +591,12 @@ Status EngineImpl::build_subops(std::vector<RegionView> const& local,
       op.sub_id = sub_id++;
       op.local_addr =
           static_cast<char*>(lr->base()) + local[i].span.offset + off;
-      op.local_key = lr->local_key();
+      /* The key from the transport that will carry this, not whichever came
+       * first. A key minted by a NIC means nothing to a mapping, and using one
+       * for the other would be accepted here and refused far away. */
+      uint64_t lkey = 0;
+      if (!lr->local_key_for(provider, &lkey)) return Status::kUnsupported;
+      op.local_key = lkey;
       op.remote_addr = rr->base() + remote[i].span.offset + off;
       op.remote_key = rr->remote_key();
       op.length = n;
@@ -471,7 +654,11 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
 
   std::vector<SubOp> slice(p->ops.begin(), p->ops.begin() + take);
   p->req->set_state(RequestState::kInflight);
-  SubmitResult sr = provider_->submit(p->conn.get(), slice);
+  /* The peer's transport, carried on the work item: a deferred request must
+   * go out over the same one it was admitted against. */
+  TransportProvider* prov =
+      p->provider != nullptr ? p->provider : providers_.front().get();
+  SubmitResult sr = prov->submit(p->conn.get(), slice);
   p->req->add_accepted_subops(sr.accepted);
 
   p->ops.erase(p->ops.begin(), p->ops.begin() + sr.accepted);
@@ -486,7 +673,7 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
   if (sr.accepted == 0 && sr.status != Status::kOk) {
     ErrorInfo e;
     e.status = sr.status;
-    e.provider = provider_->caps().name;
+    e.provider = prov->caps().name;
     e.peer_id = p->peer;
     e.provider_errno = sr.provider_errno;
     e.detail = "submit rejected";
@@ -502,7 +689,7 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
   if (sr.accepted < slice.size()) {
     ErrorInfo e;
     e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
-    e.provider = provider_->caps().name;
+    e.provider = prov->caps().name;
     e.peer_id = p->peer;
     e.provider_errno = sr.provider_errno;
     e.may_have_modified_target = true;
@@ -578,8 +765,9 @@ Status EngineImpl::submit_vector(Peer* peer,
   std::vector<MemoryRegionPtr> held;
   void* target_addr = nullptr;
   uint64_t target_bytes = 0;
-  Status s = build_subops(local, remote, kind, req_id, &ops, &held,
-                          &target_addr, &target_bytes);
+  Status s =
+      build_subops(local, remote, kind, req_id, p->provider()->caps().name,
+                   &ops, &held, &target_addr, &target_bytes);
   if (s != Status::kOk) return s;
 
   auto req = std::make_shared<RequestImpl>(
@@ -619,6 +807,8 @@ Status EngineImpl::submit_vector(Peer* peer,
   ps.ops = std::move(ops);
   ps.conn = p->conn_ptr();
   ps.peer = p->id();
+  ps.provider = p->provider();
+  req->set_provider(p->provider());
   ps.after = opts.after;
 
   if (!ps.after.empty() && !dependencies_met(ps.after)) {
@@ -697,7 +887,7 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
     notify_pending_[id] = req;
   }
 
-  Status s = provider_->send_control(
+  Status s = p->provider()->send_control(
       p->conn(), static_cast<uint16_t>(ControlType::kNotification), body);
   if (s == Status::kOk) {
     std::lock_guard<std::mutex> g(stats_mu_);
@@ -710,7 +900,7 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
     }
     ErrorInfo e;
     e.status = s;
-    e.provider = provider_->caps().name;
+    e.provider = p->provider()->caps().name;
     e.peer_id = p->id();
     e.detail = "control send failed";
     req->fail(e);
@@ -769,9 +959,13 @@ Status EngineImpl::progress() {
    * in this same call rather than a later one. */
   drain_pending();
 
-  {
+  /* Every transport in turn. A peer next door and a peer on another machine
+   * are reached over different ones, and a control message left unread on
+   * either is a request that never completes. */
+  for (auto const& prov_ptr : providers_) {
+    TransportProvider* const prov = prov_ptr.get();
     std::vector<ControlMessage> msgs;
-    if (provider_->poll_control(cfg_.cq_batch, &msgs) == Status::kOk) {
+    if (prov->poll_control(cfg_.cq_batch, &msgs) == Status::kOk) {
       for (auto const& m : msgs) {
         if (static_cast<ControlType>(m.type) == ControlType::kReadyHandoff) {
           ReadyHandoffBody b;
@@ -825,7 +1019,8 @@ Status EngineImpl::progress() {
           if (queued && m.conn != nullptr) {
             std::vector<uint8_t> ack;
             encode_u64(id, &ack);
-            provider_->send_control(
+            /* Back over the transport it arrived on. */
+            prov->send_control(
                 m.conn, static_cast<uint16_t>(ControlType::kNotificationAck),
                 ack);
           }
@@ -868,10 +1063,9 @@ Status EngineImpl::progress() {
     }
   }
 
-  {
+  for (auto const& prov : providers_) {
     std::vector<PeerArrival> arrivals;
-    if (provider_->poll_peer_arrivals(cfg_.cq_batch, &arrivals) ==
-            Status::kOk &&
+    if (prov->poll_peer_arrivals(cfg_.cq_batch, &arrivals) == Status::kOk &&
         !arrivals.empty()) {
       std::lock_guard<std::mutex> g(mu_);
       for (auto const& a : arrivals) {
@@ -882,10 +1076,16 @@ Status EngineImpl::progress() {
   }
 
   std::vector<CompletionEvent> events;
-  /* Take and handle the whole batch. The provider contract requires every
-   * event it collected; returning early drops other requests' completions. */
-  Status s = provider_->poll(cfg_.cq_batch, &events);
-  if (s != Status::kOk) return s;
+  /* Take and handle the whole batch, from every transport. The provider
+   * contract requires every event it collected; returning early drops other
+   * requests' completions, and skipping a transport strands whatever is in
+   * flight on it. */
+  for (auto const& prov : providers_) {
+    std::vector<CompletionEvent> batch;
+    Status ps = prov->poll(cfg_.cq_batch, &batch);
+    if (ps != Status::kOk) return ps;
+    events.insert(events.end(), batch.begin(), batch.end());
+  }
 
   for (auto const& ev : events) {
     RequestImplPtr req;
@@ -928,10 +1128,13 @@ Status EngineImpl::progress() {
         std::vector<uint8_t> payload;
         encode_ready_handoff(b, &payload);
         ProviderConnectionPtr conn = req->connection();
+        TransportProvider* prov = req->provider() != nullptr
+                                      ? req->provider()
+                                      : providers_.front().get();
         if (conn != nullptr) {
-          provider_->send_control(
-              conn.get(), static_cast<uint16_t>(ControlType::kReadyHandoff),
-              payload);
+          prov->send_control(conn.get(),
+                             static_cast<uint16_t>(ControlType::kReadyHandoff),
+                             payload);
           std::lock_guard<std::mutex> g(stats_mu_);
           ++stats_.ready_handoffs_sent;
         }
@@ -958,11 +1161,19 @@ void EngineImpl::progress_loop() {
 
 std::string EngineImpl::describe() const {
   std::string engine = describe_config(cfg_);
-  std::string provider = provider_->describe();
   /* Both halves, side by side, so nothing has to be inferred about which
-   * settings were actually in force. */
-  return std::string("{\"engine\":") + engine + ",\"provider\":" + provider +
-         "}";
+   * settings were actually in force. The first transport is also reported on
+   * its own, under the name it has always had, so a reader looking for one
+   * provider still finds it where it was. */
+  std::string out = std::string("{\"engine\":") + engine +
+                    ",\"provider\":" + providers_.front()->describe() +
+                    ",\"providers\":[";
+  for (size_t i = 0; i < providers_.size(); ++i) {
+    if (i > 0) out += ",";
+    out += providers_[i]->describe();
+  }
+  out += "]}";
+  return out;
 }
 
 EngineStats EngineImpl::stats() const {
@@ -976,14 +1187,17 @@ EngineStats EngineImpl::stats() const {
     s.requests_waiting_on_dependency = pending_.size();
     s.registration_cache_size = reg_cache_.size();
   }
-  /* Sub-operation and byte counts come from the provider, which is the only
-   * layer that knows whether a copy happened. */
-  ProviderStats ps = provider_->stats();
-  s.subops_posted = ps.subops_posted;
-  s.subops_completed = ps.subops_completed;
-  s.subops_failed = ps.subops_failed;
-  s.payload_bytes = ps.payload_bytes;
-  s.payload_bytes_copied = ps.payload_bytes_copied;
+  /* Sub-operation and byte counts come from the providers, which are the only
+   * layer that knows whether a copy happened, and are summed across them: a
+   * caller asking what this engine moved means all of it, however it went. */
+  for (auto const& prov : providers_) {
+    ProviderStats ps = prov->stats();
+    s.subops_posted += ps.subops_posted;
+    s.subops_completed += ps.subops_completed;
+    s.subops_failed += ps.subops_failed;
+    s.payload_bytes += ps.payload_bytes;
+    s.payload_bytes_copied += ps.payload_bytes_copied;
+  }
   return s;
 }
 
