@@ -9,12 +9,14 @@
  *   ./hux_ipc_pair client [--gpu N] */
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <thread>
 #include <vector>
 
@@ -65,19 +67,28 @@ struct Buffer {
   std::shared_ptr<DeviceBackend> dev;
   void* ptr = nullptr;
 
-  void fill(uint8_t seed) const {
-    std::vector<uint8_t> host(kBytes);
+  /* Built once and kept. A soak run does this tens of thousands of times, and
+   * a pattern rebuilt per round would put the test's own arithmetic on the
+   * critical path instead of the transfer. */
+  std::vector<uint8_t> const& pattern(uint8_t seed) const {
+    auto it = patterns.find(seed);
+    if (it != patterns.end()) return it->second;
+    std::vector<uint8_t> v(kBytes);
     for (uint64_t i = 0; i < kBytes; ++i)
-      host[i] = static_cast<uint8_t>(i * 31 + seed);
-    dev->copy(ptr, host.data(), kBytes);
+      v[i] = static_cast<uint8_t>(i * 31 + seed);
+    return patterns.emplace(seed, std::move(v)).first->second;
+  }
+  void fill(uint8_t seed) const {
+    dev->copy(ptr, pattern(seed).data(), kBytes);
   }
   bool verify(uint8_t seed) const {
-    std::vector<uint8_t> host(kBytes, 0);
-    dev->copy(host.data(), ptr, kBytes);
-    for (uint64_t i = 0; i < kBytes; ++i)
-      if (host[i] != static_cast<uint8_t>(i * 31 + seed)) return false;
-    return true;
+    scratch.resize(kBytes);
+    dev->copy(scratch.data(), ptr, kBytes);
+    return std::memcmp(scratch.data(), pattern(seed).data(), kBytes) == 0;
   }
+
+  mutable std::map<uint8_t, std::vector<uint8_t>> patterns;
+  mutable std::vector<uint8_t> scratch;
 };
 
 bool make_buffer(int gpu, Buffer* out) {
@@ -166,10 +177,23 @@ int run_server(int gpu) {
   a.sin_family = AF_INET;
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   a.sin_port = htons(kMetaPort);
-  ::bind(srv, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-  ::listen(srv, 1);
+  /* Checked, because an unchecked bind is how a second server silently hands
+   * its clients to the first one still holding the port -- and the run that
+   * follows measures the wrong process. */
+  if (::bind(srv, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0 ||
+      ::listen(srv, 1) != 0) {
+    std::printf("[server] port %u is already taken\n", kMetaPort);
+    return 1;
+  }
   std::printf("[server] waiting on :%u\n", kMetaPort);
   int fd = ::accept(srv, nullptr, nullptr);
+  /* Without this the small request-and-reply of a soak round meets Nagle on
+   * one side and the delayed acknowledgement on the other, and every round
+   * costs about 40 ms per direction -- which reads as a slow transfer and is
+   * nothing of the kind. TCP_NODELAY is not inherited from the listening
+   * socket, so it is set on the accepted one. */
+  int nodelay = 1;
+  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
   send_blob(fd, meta.data(), static_cast<uint32_t>(meta.size()));
   send_blob(fd, desc.data(), static_cast<uint32_t>(desc.size()));
 
@@ -180,17 +204,44 @@ int run_server(int gpu) {
   }
   std::printf("[server] %s\n", prov->describe().c_str());
 
+  /* The client drives; this side answers until it says it is finished. Each
+   * round it verifies what was written, so a corruption at hour three is
+   * caught at hour three rather than at the end. */
   std::vector<uint8_t> ack;
-  recv_blob(fd, &ack);
+  uint64_t rounds = 0, bad = 0, handoffs = 0;
+  for (;;) {
+    if (!recv_blob(fd, &ack)) break;
+    if (!ack.empty() && ack[0] == 'k') break;
+    ++rounds;
+    if (!buf.verify(0x22)) ++bad;
+    buf.fill(0x11);
+    /* Drained every round. Progress is explicit here, and each write the peer
+     * makes leaves a ready handoff on the control channel: left unread it
+     * fills the socket, and the peer's sends start blocking on a buffer this
+     * side never empties -- which looks like a slow transfer and is not one. */
+    std::vector<ReadyEventPtr> evs;
+    engine->poll_ready_events(32, &evs);
+    handoffs += evs.size();
+    std::vector<RequestPtr> fin;
+    engine->poll_completions(32, &fin);
+    send_blob(fd, "r", 1);
+  }
+  if (rounds > 0) {
+    std::printf("[server] soak rounds: %llu, mismatches: %llu\n",
+                (unsigned long long)rounds, (unsigned long long)bad);
+  }
 
   std::vector<ReadyEventPtr> ready;
-  for (int i = 0; i < 2000 && ready.empty(); ++i) {
+  for (int i = 0; i < 2000 && ready.empty() && handoffs == 0; ++i) {
     engine->poll_ready_events(8, &ready);
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  std::printf("[server] ready handoffs received: %zu\n", ready.size());
+  std::printf("[server] ready handoffs received: %llu\n",
+              (unsigned long long)(ready.size() + handoffs));
+  /* After a soak run the last thing this side did was refill for the peer's
+   * read, so that is what should be there. */
   std::printf("[server] verifying what the client wrote: %s\n",
-              buf.verify(0x22) ? "OK" : "MISMATCH");
+              buf.verify(rounds > 0 ? 0x11 : 0x22) ? "OK" : "MISMATCH");
 
   /* The point of the exercise: the peer still holds a mapping of this
    * allocation, and releasing the region has to wait for it to let go before
@@ -219,7 +270,7 @@ int run_server(int gpu) {
   return rs == Status::kOk ? 0 : 1;
 }
 
-int run_client(int gpu) {
+int run_client(int gpu, uint64_t loops) {
   Buffer buf;
   if (!make_buffer(gpu, &buf)) return 1;
   buf.fill(0x99); /* overwritten by the read, so a stale buffer cannot pass */
@@ -240,6 +291,8 @@ int run_client(int gpu) {
     std::printf("[client] no server answering on :%u\n", kMetaPort);
     return 1;
   }
+  int nodelay = 1;
+  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
   std::vector<uint8_t> meta, desc;
   if (!recv_blob(fd, &meta) || !recv_blob(fd, &desc) || meta.empty()) {
@@ -331,6 +384,75 @@ int run_client(int gpu) {
               (unsigned long long)st.subops_failed);
   std::printf("   %s\n", prov->describe().c_str());
 
+  /* A soak run repeats the pair of transfers; every round verifies both
+   * directions, so a fault that only appears after hours is still caught
+   * where it happens. */
+  if (loops > 0) {
+    uint64_t bad = 0;
+    auto const start = std::chrono::steady_clock::now();
+    /* Split by phase, because a soak run that is slower than expected should
+     * say which part is slow rather than leave it to be guessed. */
+    int64_t us_read = 0, us_verify = 0, us_write = 0, us_peer = 0;
+    auto const tick = [] { return std::chrono::steady_clock::now(); };
+    auto const since = [](std::chrono::steady_clock::time_point t) {
+      return std::chrono::duration_cast<std::chrono::microseconds>(
+                 std::chrono::steady_clock::now() - t)
+          .count();
+    };
+    /* Write first, then let the peer check and refill, then read back what it
+     * put there. Reading first would check bytes this side wrote a moment
+     * ago, which proves nothing about the round. */
+    for (uint64_t i = 0; i < loops; ++i) {
+      RequestPtr r1, r2;
+      auto t = tick();
+      buf.fill(0x22);
+      us_verify += since(t);
+      t = tick();
+      if (engine->write(peer.get(), lv, rv, {}, &r2) != Status::kOk ||
+          drive(r2) != Status::kOk)
+        ++bad;
+      us_write += since(t);
+
+      t = tick();
+      send_blob(fd, "n", 1);
+      std::vector<uint8_t> reply;
+      if (!recv_blob(fd, &reply)) {
+        std::printf("   peer stopped answering at round %llu\n",
+                    (unsigned long long)i);
+        break;
+      }
+      us_peer += since(t);
+
+      /* Only now: the peer has verified what was written and put the read
+       * pattern back. */
+      t = tick();
+      if (engine->read(peer.get(), lv, rv, {}, &r1) != Status::kOk ||
+          drive(r1) != Status::kOk)
+        ++bad;
+      us_read += since(t);
+      t = tick();
+      if (!buf.verify(0x11)) ++bad;
+      us_verify += since(t);
+
+      if ((i + 1) % 10000 == 0) {
+        auto const secs = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+        std::printf(
+            "   %llu rounds, %llu faults, %llds elapsed"
+            " (read %lldus verify %lldus write %lldus peer %lldus each)\n",
+            (unsigned long long)(i + 1), (unsigned long long)bad,
+            (long long)secs, (long long)(us_read / (int64_t)(i + 1)),
+            (long long)(us_verify / (int64_t)(i + 1)),
+            (long long)(us_write / (int64_t)(i + 1)),
+            (long long)(us_peer / (int64_t)(i + 1)));
+        std::fflush(stdout);
+      }
+    }
+    std::printf("   soak finished: %llu rounds, %llu faults\n",
+                (unsigned long long)loops, (unsigned long long)bad);
+  }
+
   send_blob(fd, "k", 1);
 
   /* Deliberately idle: the peer is dropping the region during this pause, and
@@ -357,12 +479,17 @@ int run_client(int gpu) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::printf("usage: %s server|client [--gpu N]\n", argv[0]);
+    std::printf("usage: %s server|client [--gpu N] [--loop ROUNDS]\n", argv[0]);
     return 2;
   }
   int gpu = 0;
-  for (int i = 1; i < argc - 1; ++i)
+  uint64_t loops = 0;
+  for (int i = 1; i < argc - 1; ++i) {
     if (std::strcmp(argv[i], "--gpu") == 0) gpu = std::atoi(argv[i + 1]);
+    /* Rounds of read-and-verify plus write-and-verify, for a soak run. */
+    if (std::strcmp(argv[i], "--loop") == 0)
+      loops = std::strtoull(argv[i + 1], nullptr, 10);
+  }
   if (std::strcmp(argv[1], "server") == 0) return run_server(gpu);
-  return run_client(gpu);
+  return run_client(gpu, loops);
 }
