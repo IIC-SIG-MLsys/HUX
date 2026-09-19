@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "hux/status.h"
 #include "hux/types.h"
@@ -43,6 +44,11 @@ struct DeviceCaps {
   bool supports_graph_capture = false; /* Tracked separately from streams. */
   bool supports_peer_registration = false;
   bool supports_dmabuf_export = false; /* False on Hygon DTK. */
+  /* Whether an allocation can be named to another process on this host and
+   * mapped there. Being on one host is not enough on its own: host memory the
+   * caller allocated itself cannot be exported at all, and two devices from
+   * different vendors have no handle they both understand. */
+  bool supports_ipc = false;
 
   /* Largest single registration, 0 if unbounded. */
   uint64_t max_registration_bytes = 0;
@@ -53,6 +59,20 @@ struct DeviceCaps {
    * the quota, so a caller that only checks the single-registration limit
    * still fails once several regions are live. */
   uint64_t max_total_registration_bytes = 0;
+};
+
+/* An allocation named so another process on this host can map it. Vendor
+ * handles are opaque fixed-size blobs, carried as bytes so nothing above this
+ * layer needs the vendor type.
+ *
+ * It names the allocation, never the span: vendors export what was allocated,
+ * so a caller registering the middle of a buffer exports the whole thing and
+ * the offset travels with it. An importer that ignored the offset would map
+ * the right memory and read the wrong bytes. */
+struct IpcHandle {
+  std::vector<uint8_t> bytes;
+  uint64_t offset = 0; /* Where the exported address sits in the allocation. */
+  uint64_t allocation_bytes = 0;
 };
 
 /* One implementation per vendor, each independently buildable and testable. */
@@ -78,6 +98,47 @@ class DeviceBackend {
    */
   virtual Status make_visible(DeviceStream* stream, void* addr,
                               uint64_t bytes) = 0;
+
+  /* Copies between two addresses this process can reach, one of which may be
+   * a mapping of another process's memory. It is a copy and is counted as
+   * one: the IPC path maps rather than transfers, so the bytes still have to
+   * be moved by somebody, and a path that hid this would look zero-copy while
+   * spending the same bandwidth. */
+  virtual Status copy(void* dst, void const* src, uint64_t bytes) {
+    (void)dst;
+    (void)src;
+    (void)bytes;
+    return Status::kUnsupported;
+  }
+
+  /* Names an allocation for another process on this host. Default is a
+   * refusal, so a backend that has not implemented it cannot be mistaken for
+   * one that can. */
+  virtual Status export_ipc(void* addr, uint64_t length, IpcHandle* out) {
+    (void)addr;
+    (void)length;
+    (void)out;
+    return Status::kUnsupported;
+  }
+
+  /* Maps a handle exported by another process, returning the address of the
+   * span the exporter named. Mapping is per process and per allocation --
+   * opening one twice is an error on CUDA -- so callers cache rather than
+   * reopening. */
+  virtual Status import_ipc(IpcHandle const& handle, void** out) {
+    (void)handle;
+    (void)out;
+    return Status::kUnsupported;
+  }
+
+  /* Releases a mapping, given any address within it. The exporting process
+   * must not free the allocation until every importer has done this: the
+   * mapping outlives the handle, and freeing underneath one leaves the
+   * importer reading memory that has been handed to something else. */
+  virtual Status close_ipc(void* mapped) {
+    (void)mapped;
+    return Status::kUnsupported;
+  }
 };
 
 }  // namespace hux

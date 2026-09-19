@@ -99,6 +99,20 @@ class Engine {
   /* Blocks new submissions first, then drains local use. */
   virtual Status deregister_memory(MemoryRegionPtr region) = 0;
 
+  /* Releases registrations the reuse cache is holding on nobody's behalf, and
+   * reports how many went.
+   *
+   * Deregistering a handle does not do this: the cache exists to keep the
+   * registration for the next caller, so the hardware still holds a key to
+   * the memory afterwards. That is fine until the memory is about to be freed
+   * or unmapped, which is when a caller needs this -- a NIC with a key to
+   * reused memory writes into whatever took its place, and on the IPC path
+   * the peer keeps its mapping of an allocation about to disappear.
+   *
+   * It can block: the IPC path waits here for the peer to confirm it
+   * unmapped. */
+  virtual Status release_cached_registrations(uint32_t* released) = 0;
+
   /* Peers. Re-adding a valid identity reuses the existing connection. */
   virtual Status local_metadata(std::vector<uint8_t>* out) const = 0;
   virtual Status add_peer(std::vector<uint8_t> const& metadata,

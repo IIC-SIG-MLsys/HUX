@@ -1,6 +1,8 @@
 /* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "device/host_backend.h"
 
+#include <cstring>
+
 namespace hux {
 
 DeviceCaps HostBackend::caps() const {
@@ -41,6 +43,13 @@ Status HostBackend::stream_wait_event(DeviceStream*, DeviceEvent*) {
 Status HostBackend::make_visible(DeviceStream*, void*, uint64_t) {
   /* Host writes are visible to host reads once the transport reports
    * completion; there is no device-side visibility step to perform. */
+  return Status::kOk;
+}
+
+Status HostBackend::copy(void* dst, void const* src, uint64_t bytes) {
+  if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
+  if (bytes == 0) return Status::kOk;
+  std::memcpy(dst, src, static_cast<size_t>(bytes));
   return Status::kOk;
 }
 

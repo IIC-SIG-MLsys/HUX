@@ -71,6 +71,7 @@ class EngineImpl : public Engine {
                                AccessFlags access,
                                std::vector<RegistrationResult>* out) override;
   Status deregister_memory(MemoryRegionPtr region) override;
+  Status release_cached_registrations(uint32_t* released) override;
 
   Status local_metadata(std::vector<uint8_t>* out) const override;
   Status add_peer(std::vector<uint8_t> const& metadata, PeerPtr* out) override;

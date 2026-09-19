@@ -1,6 +1,7 @@
 /* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "device/cuda_backend.h"
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 #include <cstring>
@@ -100,6 +101,15 @@ DeviceCaps CudaBackend::caps() const {
     clear_sticky_error();
   }
   c.max_registration_bytes = 0; /* No practical cap on NVIDIA. */
+  /* Unified addressing is what IPC is built on, so a device without it cannot
+   * export an allocation whatever else it supports. */
+  value = 0;
+  if (cudaDeviceGetAttribute(&value, cudaDevAttrUnifiedAddressing,
+                             device_index_) == cudaSuccess) {
+    c.supports_ipc = value != 0;
+  } else {
+    clear_sticky_error();
+  }
   return c;
 }
 
@@ -212,6 +222,122 @@ Status CudaBackend::make_visible(DeviceStream* stream, void* addr,
    * primitive (stream memory operations) and is not implemented yet -- see
    * DEV-01. Until then the engine reaches target_ready only after completion,
    * never before. */
+  return Status::kOk;
+}
+
+Status CudaBackend::copy(void* dst, void const* src, uint64_t bytes) {
+  if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
+  if (bytes == 0) return Status::kOk;
+  /* cudaMemcpyDefault, not an explicit direction: one side may be a mapping
+   * of another process's allocation, and the runtime knows where each address
+   * lives while the caller does not. */
+  if (cudaMemcpy(dst, src, static_cast<size_t>(bytes), cudaMemcpyDefault) !=
+      cudaSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
+  return Status::kOk;
+}
+
+Status CudaBackend::export_ipc(void* addr, uint64_t length, IpcHandle* out) {
+  if (addr == nullptr || length == 0 || out == nullptr)
+    return Status::kInvalidArgument;
+
+  /* What gets exported is the allocation, so the allocation this address sits
+   * in has to be found first. Host memory and anything not allocated on the
+   * device fail here, which is the honest answer: neither can be named to
+   * another process this way. */
+  CUdeviceptr base = 0;
+  size_t allocated = 0;
+  if (cuMemGetAddressRange(&base, &allocated,
+                           reinterpret_cast<CUdeviceptr>(addr)) != CUDA_SUCCESS)
+    return Status::kUnsupported;
+
+  uint64_t const offset =
+      reinterpret_cast<uintptr_t>(addr) - static_cast<uintptr_t>(base);
+  /* Refused rather than clamped: an importer told the span fits would map the
+   * allocation and read past its end. */
+  if (offset > allocated || length > allocated - offset)
+    return Status::kInvalidArgument;
+
+  cudaIpcMemHandle_t handle;
+  if (cudaIpcGetMemHandle(&handle, reinterpret_cast<void*>(base)) !=
+      cudaSuccess) {
+    clear_sticky_error();
+    return Status::kUnsupported;
+  }
+
+  auto const* raw = reinterpret_cast<uint8_t const*>(&handle);
+  out->bytes.assign(raw, raw + sizeof(handle));
+  out->offset = offset;
+  out->allocation_bytes = allocated;
+  return Status::kOk;
+}
+
+Status CudaBackend::import_ipc(IpcHandle const& handle, void** out) {
+  if (out == nullptr || handle.bytes.size() != sizeof(cudaIpcMemHandle_t))
+    return Status::kInvalidArgument;
+  if (handle.offset > handle.allocation_bytes) return Status::kInvalidArgument;
+
+  std::string const key(reinterpret_cast<char const*>(handle.bytes.data()),
+                        handle.bytes.size());
+  std::lock_guard<std::mutex> g(ipc_mu_);
+
+  auto it = imports_by_handle_.find(key);
+  if (it != imports_by_handle_.end()) {
+    ++it->second.refs;
+    *out = static_cast<char*>(it->second.base) + handle.offset;
+    return Status::kOk;
+  }
+
+  cudaIpcMemHandle_t native;
+  std::memcpy(&native, handle.bytes.data(), sizeof(native));
+  void* base = nullptr;
+  /* Lazy peer access: enabling it eagerly would fail on a pair of devices
+   * that cannot reach each other, for an allocation the caller may only ever
+   * read from its own side. */
+  if (cudaIpcOpenMemHandle(&base, native, cudaIpcMemLazyEnablePeerAccess) !=
+      cudaSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
+
+  Import rec;
+  rec.base = base;
+  rec.bytes = handle.allocation_bytes;
+  rec.handle = key;
+  rec.refs = 1;
+  imports_by_handle_[key] = rec;
+  imports_by_base_[reinterpret_cast<uintptr_t>(base)] = key;
+  *out = static_cast<char*>(base) + handle.offset;
+  return Status::kOk;
+}
+
+Status CudaBackend::close_ipc(void* mapped) {
+  if (mapped == nullptr) return Status::kInvalidArgument;
+  auto const addr = reinterpret_cast<uintptr_t>(mapped);
+
+  std::lock_guard<std::mutex> g(ipc_mu_);
+  /* The greatest base at or below the address, then a range check: an address
+   * from an allocation this process never mapped must be refused rather than
+   * closing whichever mapping happens to sit below it. */
+  auto it = imports_by_base_.upper_bound(addr);
+  if (it == imports_by_base_.begin()) return Status::kNotFound;
+  --it;
+
+  auto rec = imports_by_handle_.find(it->second);
+  if (rec == imports_by_handle_.end()) return Status::kNotFound;
+  if (addr - it->first > rec->second.bytes) return Status::kNotFound;
+
+  if (--rec->second.refs > 0) return Status::kOk;
+
+  void* base = rec->second.base;
+  imports_by_base_.erase(it);
+  imports_by_handle_.erase(rec);
+  if (cudaIpcCloseMemHandle(base) != cudaSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
   return Status::kOk;
 }
 

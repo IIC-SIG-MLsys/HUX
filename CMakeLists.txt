@@ -41,6 +41,12 @@ find_package(Threads REQUIRED)
 target_link_libraries(hux_core PUBLIC Threads::Threads)
 target_compile_options(hux_core PRIVATE -Wall -Wextra)
 
+# ---- 同机跨进程路径：只用 POSIX，所以无条件构建 ----
+# 能不能用由设备后端回答，不由构建开关回答。
+add_library(hux_transport_ipc src/transport/ipc/ipc_provider.cpp)
+target_link_libraries(hux_transport_ipc PUBLIC hux_core)
+target_compile_options(hux_transport_ipc PRIVATE -Wall -Wextra)
+
 # ---- 可选后端：启用了就必须找得到，缺依赖在配置阶段失败 ----
 # 不允许"找不到就静默跳过"——那会让人以为自己构建出了带 RDMA 的库。
 if(HUX_ENABLE_RDMA)
@@ -83,7 +89,10 @@ if(HUX_ENABLE_CUDA)
   # Compiled as plain C++ against the runtime API; no nvcc needed, so the
   # backend builds wherever the toolkit headers are present.
   add_library(hux_device_cuda src/device/cuda_backend.cpp)
-  target_link_libraries(hux_device_cuda PUBLIC hux_core CUDA::cudart)
+  # The driver API is needed for one thing only: finding the allocation an
+  # address belongs to, which IPC export requires and the runtime API does
+  # not expose.
+  target_link_libraries(hux_device_cuda PUBLIC hux_core CUDA::cudart CUDA::cuda_driver)
   target_compile_options(hux_device_cuda PRIVATE -Wall -Wextra)
   message(STATUS "HUX: CUDA device backend enabled (${CUDAToolkit_VERSION})")
 endif()

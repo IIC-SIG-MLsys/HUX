@@ -12,10 +12,11 @@ add_executable(hux_contract_tests
   contract/test_local_path.cpp
   contract/test_locality.cpp
   contract/test_stress.cpp
+  contract/test_ipc_path.cpp
   device/test_host_backend.cpp
 )
 target_include_directories(hux_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(hux_contract_tests PRIVATE hux_core)
+target_link_libraries(hux_contract_tests PRIVATE hux_core hux_transport_ipc)
 target_compile_options(hux_contract_tests PRIVATE -Wall -Wextra)
 add_test(NAME contract COMMAND hux_contract_tests)
 
@@ -47,6 +48,13 @@ if(TARGET hux_transport_rdma)
 endif()
 
 if(HUX_ENABLE_CUDA)
+  # Two processes and a device that can export an allocation, so it is built
+  # but never run by ctest.
+  add_executable(hux_ipc_pair manual/ipc_pair.cpp)
+  target_include_directories(hux_ipc_pair PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(hux_ipc_pair PRIVATE hux_transport_ipc hux_device_cuda)
+  target_compile_options(hux_ipc_pair PRIVATE -Wall -Wextra)
+
   add_executable(hux_cuda_tests test_main.cpp device/test_cuda_backend.cpp)
   target_include_directories(hux_cuda_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(hux_cuda_tests PRIVATE hux_device_cuda)

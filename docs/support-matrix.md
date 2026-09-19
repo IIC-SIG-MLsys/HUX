@@ -38,6 +38,12 @@ the RTX 4090s support neither: `CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED` is 0
 and `ibv_reg_mr` returns EFAULT at every size. Consumer cards should be
 assumed unable until probed.
 
+**Host memory cannot be exported to another process.** Memory the caller
+allocated has no handle another process could map, and `process_vm_readv` is
+refused between unrelated processes wherever `kernel.yama.ptrace_scope` is 1 --
+the default on all three hosts measured here. The IPC path therefore refuses
+host memory rather than staging it through a shared buffer.
+
 Run `tools/probe_registration` on any new device before assuming anything
 above transfers to it.
 
@@ -48,7 +54,7 @@ above transfers to it.
 | Native RDMA | measured | Multiple queue pairs, congestion control, per-queue accounting, NIC affinity |
 | Same-process | measured | Copies directly, reports those copies |
 | UCX | measured, with a caveat | Works under `UCX_TLS=self,sm`; default transport selection aborts inside the library on this host (see [ucx.md](ucx.md)) |
-| IPC between processes on one host | not implemented | Locality is detected and reported; the path itself falls back to RDMA |
+| IPC between processes on one host | measured | Maps the peer's allocation and copies across it, counting the copy; device memory only, and releasing a region waits for the peer to unmap ([decision](decisions/0002-ipc-path.md)) |
 
 ## Across machines
 
@@ -72,6 +78,7 @@ which port was wrong. `ip route get <peer>` names the right one.
 | --- | --- |
 | In-place transfer, zero payload copies | RDMA (host, NVIDIA A40, Hygon Z100L and Cambricon MLU370 device memory), UCX, both directions |
 | Transfer between two machines, and between two vendors | RDMA over RoCE v2, Hygon Z100L to Cambricon MLU370, host and device memory |
+| Transfer between two processes on one host | IPC with CUDA on RTX 4090, read and write, release waiting on the peer's unmap |
 | Multiple queue pairs, 1 to 16, balanced accounting | RDMA, loopback |
 | Congestion control: off, fixed window, adaptive | RDMA, loopback |
 | Device dependencies (`after`), non-blocking submission | RDMA with CUDA on A40 |

@@ -253,7 +253,35 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
 
   /* The underlying registration is released when the last reference to it
    * goes -- another handle over the same range, or the cache. Releasing it
-   * here would pull it out from under a handle still transferring. */
+   * here would pull it out from under a handle still transferring.
+   *
+   * So deregistering a handle does not, on its own, mean the hardware has let
+   * go: with the cache on, the registration is kept for the next caller. A
+   * caller about to free or unmap the memory needs
+   * release_cached_registrations() as well. */
+  return Status::kOk;
+}
+
+Status EngineImpl::release_cached_registrations(uint32_t* released) {
+  std::vector<RegistrationPtr> dropped;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto it = reg_cache_.begin(); it != reg_cache_.end();) {
+      /* Only what nothing else holds. One still in use stays: releasing it
+       * would pull the registration out from under a live handle. */
+      if (it->use_count() == 1) {
+        dropped.push_back(*it);
+        it = reg_cache_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  if (released != nullptr) *released = static_cast<uint32_t>(dropped.size());
+  /* Cleared outside the lock. Deregistration can block -- the IPC path waits
+   * for the peer to confirm it unmapped -- and doing that while holding the
+   * engine's lock would stop the progress that delivers the confirmation. */
+  dropped.clear();
   return Status::kOk;
 }
 

@@ -21,6 +21,7 @@ class HostBackend : public DeviceBackend {
   Status stream_wait_event(DeviceStream* stream, DeviceEvent* ev) override;
   Status make_visible(DeviceStream* stream, void* addr,
                       uint64_t bytes) override;
+  Status copy(void* dst, void const* src, uint64_t bytes) override;
 };
 
 }  // namespace hux

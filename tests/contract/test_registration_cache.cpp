@@ -177,6 +177,45 @@ HUX_TEST(a_cached_registration_survives_deregistration) {
   CHECK_EQ(f.provider->registration_count(), 1u);
 }
 
+HUX_TEST(releasing_the_cache_lets_the_registration_go) {
+  /* The counterpart to the test above: the cache holding a registration is
+   * what makes a deregistration look like it did nothing, and this is how a
+   * caller about to free the memory makes it happen. */
+  CacheFixture f;
+  CHECK(f.setup());
+
+  MemoryRegionPtr a;
+  CHECK_STATUS(
+      f.engine->register_memory(f.at(0), 8192, AccessFlags::kRemoteRead, &a),
+      Status::kOk);
+  CHECK_STATUS(f.engine->deregister_memory(a), Status::kOk);
+  a.reset();
+  CHECK_EQ(f.provider->live_registrations(), 1u);
+
+  uint32_t released = 0;
+  CHECK_STATUS(f.engine->release_cached_registrations(&released), Status::kOk);
+  CHECK_EQ(released, 1u);
+  CHECK_EQ(f.provider->live_registrations(), 0u);
+}
+
+HUX_TEST(releasing_the_cache_keeps_what_is_still_held) {
+  /* A live handle is not a cache entry nobody wants. Releasing it here would
+   * take the registration out from under a caller that is still using it,
+   * which is worse than holding memory a little longer. */
+  CacheFixture f;
+  CHECK(f.setup());
+
+  MemoryRegionPtr a;
+  CHECK_STATUS(
+      f.engine->register_memory(f.at(0), 8192, AccessFlags::kRemoteRead, &a),
+      Status::kOk);
+
+  uint32_t released = 0;
+  CHECK_STATUS(f.engine->release_cached_registrations(&released), Status::kOk);
+  CHECK_EQ(released, 0u);
+  CHECK_EQ(f.provider->live_registrations(), 1u);
+}
+
 HUX_TEST(a_reused_registration_exports_the_right_remote_address) {
   /* A view into a pool has to advertise its own address, not the pool's, or
    * the peer writes to the wrong place -- and the bytes land somewhere valid,
