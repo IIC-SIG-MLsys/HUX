@@ -64,6 +64,12 @@ if(HUX_ENABLE_RDMA)
   target_link_libraries(hux_transport_rdma PUBLIC hux_core ${IBVERBS_LIBRARY})
   target_compile_options(hux_transport_rdma PRIVATE -Wall -Wextra)
   message(STATUS "HUX: RDMA provider enabled (${IBVERBS_LIBRARY})")
+
+  # Needs two machines, so it is built but never run by ctest. Built here
+  # rather than compiled by hand, so it cannot drift from the library.
+  add_executable(hux-bench benchmarks/hux_bench.cpp)
+  target_link_libraries(hux-bench PRIVATE hux_transport_rdma)
+  target_compile_options(hux-bench PRIVATE -Wall -Wextra)
 endif()
 
 if(HUX_ENABLE_UCX)

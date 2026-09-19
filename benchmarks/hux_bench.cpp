@@ -43,6 +43,14 @@ constexpr uint16_t kMetaPort = 18516;
 struct Options {
   uint32_t qp = 1;
   std::string cc = "off";
+  /* The address peers dial back on, which across machines also selects the
+   * port and the GID. It has to be the address the kernel routes to the peer:
+   * a host with two ports on one subnet will otherwise connect and then fail
+   * every transfer. */
+  std::string local_ip = "0.0.0.0";
+  /* 0 leaves the engine's default. Sweeping it is how a caller finds out
+   * whether tuning is worth doing at all. */
+  uint64_t chunk = 0;
   std::vector<uint64_t> sizes = {4096, 65536, 1u << 20, 8u << 20};
   int iters = 50;
   int warmup = 5;
@@ -108,7 +116,7 @@ Summary summarize(std::vector<double> us, uint64_t bytes) {
 
 int run_server(Options const& o) {
   RdmaConfig cfg;
-  cfg.advertise_ip = "0.0.0.0";
+  cfg.advertise_ip = o.local_ip;
   cfg.qp_per_conn = o.qp;
   cfg.cc = make_cc(o.cc);
   std::shared_ptr<RdmaProvider> prov;
@@ -119,6 +127,7 @@ int run_server(Options const& o) {
 
   EngineConfig ecfg;
   ecfg.progress = ProgressMode::kExplicit;
+  if (o.chunk > 0) ecfg.chunk_bytes = o.chunk;
   std::unique_ptr<Engine> engine;
   if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) return 1;
 
@@ -192,7 +201,9 @@ int run_client(std::string const& ip, Options const& o) {
   fixed.insert(fixed.end(), ip.begin(), ip.end());
 
   RdmaConfig cfg;
-  cfg.advertise_ip = ip;
+  /* This side's own address, not the peer's: it selects the local port and
+   * GID. */
+  cfg.advertise_ip = o.local_ip;
   cfg.qp_per_conn = o.qp;
   cfg.cc = make_cc(o.cc);
   std::shared_ptr<RdmaProvider> prov;
@@ -200,6 +211,7 @@ int run_client(std::string const& ip, Options const& o) {
 
   EngineConfig ecfg;
   ecfg.progress = ProgressMode::kExplicit;
+  if (o.chunk > 0) ecfg.chunk_bytes = o.chunk;
   std::unique_ptr<Engine> engine;
   if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) return 1;
 
@@ -280,13 +292,17 @@ int run_client(std::string const& ip, Options const& o) {
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
-                " [--sizes a,b,c] [--iters N]\n", argv[0]);
+                " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]\n",
+                argv[0]);
     return 2;
   }
   Options o;
   for (int i = 1; i + 1 < argc; ++i) {
     std::string const k = argv[i];
     if (k == "--qp") o.qp = static_cast<uint32_t>(std::atoi(argv[i + 1]));
+    else if (k == "--local") o.local_ip = argv[i + 1];
+    else if (k == "--chunk")
+      o.chunk = std::strtoull(argv[i + 1], nullptr, 10);
     else if (k == "--cc") o.cc = argv[i + 1];
     else if (k == "--iters") o.iters = std::atoi(argv[i + 1]);
     else if (k == "--sizes") {
