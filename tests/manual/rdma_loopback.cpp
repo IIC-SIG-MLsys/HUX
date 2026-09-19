@@ -33,6 +33,11 @@
 
 #include "device/cuda_backend.h"
 #endif
+#ifdef HUX_LOOPBACK_ROCM
+#include <hip/hip_runtime.h>
+
+#include "device/rocm_backend.h"
+#endif
 
 using namespace hux;
 
@@ -86,12 +91,24 @@ struct Buffer {
       return;
     }
 #endif
+#ifdef HUX_LOOPBACK_ROCM
+    if (on_gpu) {
+      hipMemcpy(ptr, src, kBytes, hipMemcpyHostToDevice);
+      return;
+    }
+#endif
     std::memcpy(ptr, src, kBytes);
   }
   void load(void* dst) const {
 #ifdef HUX_LOOPBACK_CUDA
     if (on_gpu) {
       cudaMemcpy(dst, ptr, kBytes, cudaMemcpyDeviceToHost);
+      return;
+    }
+#endif
+#ifdef HUX_LOOPBACK_ROCM
+    if (on_gpu) {
+      hipMemcpy(dst, ptr, kBytes, hipMemcpyDeviceToHost);
       return;
     }
 #endif
@@ -106,6 +123,16 @@ Buffer make_buffer(int gpu) {
     cudaSetDevice(gpu);
     if (cudaMalloc(&b.ptr, kBytes) != cudaSuccess) {
       std::printf("cudaMalloc failed\n");
+      std::exit(1);
+    }
+    b.on_gpu = true;
+    return b;
+  }
+#elif defined(HUX_LOOPBACK_ROCM)
+  if (gpu >= 0) {
+    hipSetDevice(gpu);
+    if (hipMalloc(&b.ptr, kBytes) != hipSuccess) {
+      std::printf("hipMalloc failed\n");
       std::exit(1);
     }
     b.on_gpu = true;
