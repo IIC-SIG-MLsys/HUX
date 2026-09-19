@@ -99,6 +99,30 @@ which port was wrong. `ip route get <peer>` names the right one.
 | Registration reuse | mock and RDMA |
 | Python bindings | mock |
 
+## Known defect, under investigation
+
+**The same-host path loses the tail of a read, rarely, and reports success.**
+Seen four times in 300000 rounds of a soak run on one RTX 4090, 4 MiB each
+way with every round verified. The damage is always a run of bytes ending at
+the end of the buffer -- once the whole second half, once 45440 bytes -- and
+what is there is always exactly what this side wrote the round before, so the
+read did not cover the range rather than covering it with wrong data. The
+request reports success.
+
+Two candidate explanations, and the second is the one being tested:
+
+1. Sub-operations are lost between the scheduler and the provider. Against
+   it: 45440 bytes is not a multiple of anything the engine chunks by, and
+   the sub-operation counters balance.
+2. The peer's refill has not become visible across the process boundary when
+   it says it has. A synchronous copy is supposed to make that impossible,
+   which is exactly why it is worth testing rather than assuming. Two soak
+   arms are running, identical except that one does an explicit device
+   barrier after refilling.
+
+Until this is settled, the same-host path should not be relied on where a
+silent partial read would matter. The network path has not shown it.
+
 ## Not verified
 
 Stated rather than left to be assumed:

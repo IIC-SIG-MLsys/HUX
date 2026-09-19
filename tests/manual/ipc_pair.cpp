@@ -54,6 +54,25 @@ constexpr uint64_t kBytes = 4u << 20;
  * exactly that, and it shows up as rare, unreproducible corruption. */
 uint16_t g_port = 18516;
 
+/* Diagnostic, off by default. The soak run sees rare rounds where the tail of
+ * a read still holds what this side wrote the round before -- as if the
+ * peer's refill had not become visible across the process boundary by the
+ * time it said it had. A synchronous copy is supposed to make that
+ * impossible; this switch is how that assumption gets tested rather than
+ * argued about. */
+bool g_sync_after_fill = false;
+
+void device_barrier() {
+  if (!g_sync_after_fill) return;
+#if defined(HUX_LOOPBACK_CUDA)
+  cudaDeviceSynchronize();
+#elif defined(HUX_LOOPBACK_ROCM)
+  hipDeviceSynchronize();
+#elif defined(HUX_LOOPBACK_NEUWARE)
+  cnrtSyncDevice();
+#endif
+}
+
 void send_blob(int fd, void const* p, uint32_t n) {
   ::send(fd, &n, 4, 0);
   if (n > 0) ::send(fd, p, n, 0);
@@ -264,6 +283,7 @@ int run_server(int gpu) {
     ++rounds;
     if (!buf.verify(0x22)) ++bad;
     buf.fill(0x11);
+    device_barrier();
     /* Drained every round. Progress is explicit here, and each write the peer
      * makes leaves a ready handoff on the control channel: left unread it
      * fills the socket, and the peer's sends start blocking on a buffer this
@@ -572,12 +592,15 @@ int run_client(int gpu, uint64_t loops) {
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf(
-        "usage: %s server|client [--gpu N] [--loop ROUNDS] [--port P]\n",
+        "usage: %s server|client [--gpu N] [--loop ROUNDS] [--port P]"
+        " [--sync]\n",
         argv[0]);
     return 2;
   }
   int gpu = 0;
   uint64_t loops = 0;
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--sync") == 0) g_sync_after_fill = true;
   for (int i = 1; i < argc - 1; ++i) {
     if (std::strcmp(argv[i], "--gpu") == 0) gpu = std::atoi(argv[i + 1]);
     /* Rounds of read-and-verify plus write-and-verify, for a soak run. */
