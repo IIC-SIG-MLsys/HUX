@@ -176,6 +176,10 @@ tests:
 * **Every blocking call releases the GIL.** One that does not freezes every
   other thread in the interpreter, including whichever one would have polled
   for the completion being waited on.
+* **Which NIC a device uses is not a detail.** On a host with a NIC per
+  socket, the wrong pairing puts the interconnect in the path of every
+  transfer and nothing reports it. The RDMA provider picks the nearest NIC
+  when told where the memory lives, and says which one it chose.
 * **A configuration report has to cover both halves.** Queue pairs,
   signalling and the congestion controller belong to the provider; a report
   built from the engine's settings alone describes a configuration nobody is

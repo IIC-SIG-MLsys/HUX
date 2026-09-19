@@ -253,11 +253,25 @@ Status RdmaProvider::open_device() {
   ibv_device** list = ibv_get_device_list(&num);
   if (list == nullptr || num == 0) return Status::kDeviceError;
 
+  /* An explicit name wins; otherwise the nearest NIC to the device, if one
+   * was given; otherwise the first port that is up. */
+  std::string wanted = cfg_.device_name;
+  if (wanted.empty() && cfg_.has_affinity) {
+    NicInfo nic;
+    Proximity how = Proximity::kUnknown;
+    if (best_nic_for(cfg_.affinity, discover_nics(), &nic, &how)) {
+      wanted = nic.name;
+      nic_proximity_ = how;
+    }
+    /* No pairing established: fall through to the first active port rather
+     * than naming one on a guess. */
+  }
+
   ibv_device* chosen = nullptr;
   for (int i = 0; i < num; ++i) {
     char const* name = ibv_get_device_name(list[i]);
-    if (!cfg_.device_name.empty()) {
-      if (cfg_.device_name == name) {
+    if (!wanted.empty()) {
+      if (wanted == name) {
         chosen = list[i];
         break;
       }
@@ -350,6 +364,7 @@ std::string RdmaProvider::describe() const {
     << "\"device\":\""
     << (ctx_ != nullptr ? ibv_get_device_name(ctx_->device) : "none") << "\","
     << "\"ib_port\":" << static_cast<int>(cfg_.ib_port) << ','
+    << "\"nic_proximity\":\"" << to_string(nic_proximity_) << "\","
     << "\"gid_index\":" << gid_index_ << ',' << "\"link_layer\":\""
     << (port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET ? "ethernet"
                                                          : "infiniband")

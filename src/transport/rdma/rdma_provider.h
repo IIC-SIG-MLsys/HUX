@@ -27,13 +27,21 @@
 #include <unordered_map>
 #include <vector>
 
+#include "device/topology.h"
 #include "transport/cc/controller.h"
 #include "transport/provider.h"
 
 namespace hux {
 
 struct RdmaConfig {
-  std::string device_name; /* Empty selects the first port that is up. */
+  /* Empty selects automatically: the NIC nearest the device below when one is
+   * given, otherwise the first port that is up. */
+  std::string device_name;
+  /* Where the memory being transferred lives. Given, the provider picks the
+   * NIC closest to it. On a host with a NIC per socket the wrong choice puts
+   * the interconnect in the path of every transfer, and nothing reports it. */
+  DeviceLocation affinity;
+  bool has_affinity = false;
   uint8_t ib_port = 1;
   /* Queue pairs per connection. More of them raises the number of requests in
    * flight, not the number of network paths -- the two are often confused.
@@ -159,6 +167,7 @@ class RdmaProvider : public TransportProvider {
   ibv_port_attr port_attr_{};
   ibv_gid local_gid_{};
   int gid_index_ = 0;
+  Proximity nic_proximity_ = Proximity::kUnknown;
   int listen_fd_ = -1;
   uint16_t listen_port_ = 0;
   std::string local_ip_;
