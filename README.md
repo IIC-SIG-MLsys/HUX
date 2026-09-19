@@ -131,6 +131,16 @@ Hardware paths are exercised on the machines that have the hardware —
 `tests/manual/` for transfers and sweeps, `tools/` for what a new device can
 do. A pipeline that could only run there would check nothing on most changes.
 
+## Before committing
+
+```bash
+./check.sh            # format, rebuild, tests, bindings
+./check.sh build-cuda # or against another configured build
+```
+
+It rebuilds first, deliberately. A test run against a stale build passes
+while the change under test was never compiled.
+
 ## Formatting
 
 ```bash
