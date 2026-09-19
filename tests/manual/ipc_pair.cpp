@@ -47,7 +47,12 @@ using namespace hux;
 namespace {
 
 constexpr uint64_t kBytes = 4u << 20;
-constexpr uint16_t kMetaPort = 18516;
+/* Overridable, and worth overriding. Two runs of this program on one host
+ * sharing a port do not fail cleanly: the second server's bind is refused,
+ * but a client can still reach the first one and then verify bytes a
+ * different pair is overwriting. A soak run alongside a short test is
+ * exactly that, and it shows up as rare, unreproducible corruption. */
+uint16_t g_port = 18516;
 
 void send_blob(int fd, void const* p, uint32_t n) {
   ::send(fd, &n, 4, 0);
@@ -220,16 +225,16 @@ int run_server(int gpu) {
   sockaddr_in a{};
   a.sin_family = AF_INET;
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  a.sin_port = htons(kMetaPort);
+  a.sin_port = htons(g_port);
   /* Checked, because an unchecked bind is how a second server silently hands
    * its clients to the first one still holding the port -- and the run that
    * follows measures the wrong process. */
   if (::bind(srv, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0 ||
       ::listen(srv, 1) != 0) {
-    std::printf("[server] port %u is already taken\n", kMetaPort);
+    std::printf("[server] port %u is already taken\n", g_port);
     return 1;
   }
-  std::printf("[server] waiting on :%u\n", kMetaPort);
+  std::printf("[server] waiting on :%u\n", g_port);
   int fd = ::accept(srv, nullptr, nullptr);
   /* Without this the small request-and-reply of a soak round meets Nagle on
    * one side and the delayed acknowledgement on the other, and every round
@@ -322,7 +327,7 @@ int run_client(int gpu, uint64_t loops) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in a{};
   a.sin_family = AF_INET;
-  a.sin_port = htons(kMetaPort);
+  a.sin_port = htons(g_port);
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   bool linked = false;
   for (int i = 0; i < 20 && !linked; ++i) {
@@ -332,7 +337,7 @@ int run_client(int gpu, uint64_t loops) {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
   if (!linked) {
-    std::printf("[client] no server answering on :%u\n", kMetaPort);
+    std::printf("[client] no server answering on :%u\n", g_port);
     return 1;
   }
   int nodelay = 1;
@@ -566,7 +571,9 @@ int run_client(int gpu, uint64_t loops) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::printf("usage: %s server|client [--gpu N] [--loop ROUNDS]\n", argv[0]);
+    std::printf(
+        "usage: %s server|client [--gpu N] [--loop ROUNDS] [--port P]\n",
+        argv[0]);
     return 2;
   }
   int gpu = 0;
@@ -576,6 +583,8 @@ int main(int argc, char** argv) {
     /* Rounds of read-and-verify plus write-and-verify, for a soak run. */
     if (std::strcmp(argv[i], "--loop") == 0)
       loops = std::strtoull(argv[i + 1], nullptr, 10);
+    if (std::strcmp(argv[i], "--port") == 0)
+      g_port = static_cast<uint16_t>(std::atoi(argv[i + 1]));
   }
   if (std::strcmp(argv[1], "server") == 0) return run_server(gpu);
   return run_client(gpu, loops);
