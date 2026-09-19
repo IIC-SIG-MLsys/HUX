@@ -94,6 +94,10 @@ DeviceCaps NeuwareBackend::caps() const {
    * visible reason. Measured 2026-09-18 on MLU370-X8. */
   c.max_registration_bytes = 256ull << 20;
   c.max_total_registration_bytes = 256ull << 20;
+  /* The driver exports handles for device allocations and for pinned host
+   * memory, so this is reported rather than probed per call -- export_ipc
+   * refuses anything it cannot name. */
+  c.supports_ipc = true;
   return c;
 }
 
@@ -176,6 +180,96 @@ Status NeuwareBackend::make_visible(DeviceStream* stream, void* addr,
   (void)addr;
   (void)bytes;
   if (stream == nullptr) return Status::kInvalidArgument;
+  return Status::kOk;
+}
+
+Status NeuwareBackend::copy(void* dst, void const* src, uint64_t bytes) {
+  if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
+  if (bytes == 0) return Status::kOk;
+  /* No direction given: either side may be a mapping of another process's
+   * allocation, and the runtime resolves where each address lives. */
+  if (cnrtMemcpy(dst, const_cast<void*>(src), static_cast<size_t>(bytes),
+                 cnrtMemcpyNoDirection) != cnrtSuccess)
+    return Status::kDeviceError;
+  return Status::kOk;
+}
+
+Status NeuwareBackend::export_ipc(void* addr, uint64_t length, IpcHandle* out) {
+  if (addr == nullptr || length == 0 || out == nullptr)
+    return Status::kInvalidArgument;
+
+  /* There is no call here for finding the allocation an address belongs to,
+   * and none is needed: the driver refuses an address that is not one it
+   * allocated. Measured on MLU370-X8 -- a handle for base+4096 comes back
+   * CN_MEMORY_ERROR_INVALID_ADDRESS. So a region inside a larger allocation
+   * is refused rather than exported with an offset this backend cannot
+   * compute, which would map the right memory and read the wrong bytes. */
+  cnrtIpcMemHandle handle;
+  std::memset(&handle, 0, sizeof(handle));
+  if (cnrtAcquireMemHandle(&handle, addr) != cnrtSuccess)
+    return Status::kUnsupported;
+
+  auto const* raw = reinterpret_cast<uint8_t const*>(&handle);
+  out->bytes.assign(raw, raw + sizeof(handle));
+  out->offset = 0;
+  /* The allocation's real size is not reported by this driver, so what the
+   * caller registered is what is claimed. It is used only to bound the
+   * lookup that finds a mapping from an address inside it. */
+  out->allocation_bytes = length;
+  return Status::kOk;
+}
+
+Status NeuwareBackend::import_ipc(IpcHandle const& handle, void** out) {
+  if (out == nullptr || handle.bytes.size() != sizeof(cnrtIpcMemHandle))
+    return Status::kInvalidArgument;
+  if (handle.offset != 0) return Status::kInvalidArgument;
+
+  std::string const key(reinterpret_cast<char const*>(handle.bytes.data()),
+                        handle.bytes.size());
+  std::lock_guard<std::mutex> g(ipc_mu_);
+
+  auto it = imports_by_handle_.find(key);
+  if (it != imports_by_handle_.end()) {
+    ++it->second.refs;
+    *out = it->second.base;
+    return Status::kOk;
+  }
+
+  cnrtIpcMemHandle native;
+  std::memcpy(&native, handle.bytes.data(), sizeof(native));
+  void* base = nullptr;
+  if (cnrtMapMemHandle(&base, native, 0) != cnrtSuccess)
+    return Status::kDeviceError;
+
+  Import rec;
+  rec.base = base;
+  rec.bytes = handle.allocation_bytes;
+  rec.refs = 1;
+  imports_by_handle_[key] = rec;
+  imports_by_base_[reinterpret_cast<uintptr_t>(base)] = key;
+  *out = base;
+  return Status::kOk;
+}
+
+Status NeuwareBackend::close_ipc(void* mapped) {
+  if (mapped == nullptr) return Status::kInvalidArgument;
+  auto const addr = reinterpret_cast<uintptr_t>(mapped);
+
+  std::lock_guard<std::mutex> g(ipc_mu_);
+  auto it = imports_by_base_.upper_bound(addr);
+  if (it == imports_by_base_.begin()) return Status::kNotFound;
+  --it;
+
+  auto rec = imports_by_handle_.find(it->second);
+  if (rec == imports_by_handle_.end()) return Status::kNotFound;
+  if (addr - it->first > rec->second.bytes) return Status::kNotFound;
+
+  if (--rec->second.refs > 0) return Status::kOk;
+
+  void* base = rec->second.base;
+  imports_by_base_.erase(it);
+  imports_by_handle_.erase(rec);
+  if (cnrtUnMapMemHandle(base) != cnrtSuccess) return Status::kDeviceError;
   return Status::kOk;
 }
 

@@ -47,14 +47,23 @@ if(TARGET hux_transport_rdma)
   endforeach()
 endif()
 
-if(HUX_ENABLE_CUDA)
-  # Two processes and a device that can export an allocation, so it is built
-  # but never run by ctest.
+# Two processes and a device that can export an allocation, so it is built
+# but never run by ctest. Built for whichever vendor backend is present.
+if(TARGET hux_device_cuda OR TARGET hux_device_rocm OR TARGET hux_device_neuware)
   add_executable(hux_ipc_pair manual/ipc_pair.cpp)
   target_include_directories(hux_ipc_pair PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(hux_ipc_pair PRIVATE hux_transport_ipc hux_device_cuda)
+  target_link_libraries(hux_ipc_pair PRIVATE hux_transport_ipc)
   target_compile_options(hux_ipc_pair PRIVATE -Wall -Wextra)
+  foreach(vendor cuda rocm neuware)
+    string(TOUPPER ${vendor} VENDOR_UP)
+    if(TARGET hux_device_${vendor})
+      target_compile_definitions(hux_ipc_pair PRIVATE HUX_LOOPBACK_${VENDOR_UP})
+      target_link_libraries(hux_ipc_pair PRIVATE hux_device_${vendor})
+    endif()
+  endforeach()
+endif()
 
+if(HUX_ENABLE_CUDA)
   add_executable(hux_cuda_tests test_main.cpp device/test_cuda_backend.cpp)
   target_include_directories(hux_cuda_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(hux_cuda_tests PRIVATE hux_device_cuda)

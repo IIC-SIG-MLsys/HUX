@@ -38,6 +38,15 @@ the RTX 4090s support neither: `CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED` is 0
 and `ibv_reg_mr` returns EFAULT at every size. Consumer cards should be
 assumed unable until probed.
 
+**Two vendors answer the IPC question differently from NVIDIA.** Hygon's DTK
+23.10 returns an error for the unified-addressing attribute and leaves the
+value untouched, while exporting handles perfectly well, so the capability is
+settled by asking the driver for a handle rather than by believing the query.
+Cambricon exports only an allocation's base address -- a handle for base+4096
+comes back `CN_MEMORY_ERROR_INVALID_ADDRESS` -- and its handle is 8 bytes, so
+a region inside a larger allocation is refused there rather than exported with
+an offset the driver gives no way to compute.
+
 **Host memory cannot be exported to another process.** Memory the caller
 allocated has no handle another process could map, and `process_vm_readv` is
 refused between unrelated processes wherever `kernel.yama.ptrace_scope` is 1 --
@@ -78,7 +87,7 @@ which port was wrong. `ip route get <peer>` names the right one.
 | --- | --- |
 | In-place transfer, zero payload copies | RDMA (host, NVIDIA A40, Hygon Z100L and Cambricon MLU370 device memory), UCX, both directions |
 | Transfer between two machines, and between two vendors | RDMA over RoCE v2, Hygon Z100L to Cambricon MLU370, host and device memory |
-| Transfer between two processes on one host | IPC with CUDA on RTX 4090, read and write, release waiting on the peer's unmap |
+| Transfer between two processes on one host | IPC on NVIDIA RTX 4090, Hygon Z100L and Cambricon MLU370-X8, read and write, release waiting on the peer's unmap |
 | Multiple queue pairs, 1 to 16, balanced accounting | RDMA, loopback |
 | Congestion control: off, fixed window, adaptive | RDMA, loopback |
 | Device dependencies (`after`), non-blocking submission | RDMA with CUDA on A40 |

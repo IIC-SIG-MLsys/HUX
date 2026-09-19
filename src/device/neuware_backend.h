@@ -2,6 +2,10 @@
 #ifndef HUX_DEVICE_NEUWARE_BACKEND_H
 #define HUX_DEVICE_NEUWARE_BACKEND_H
 
+#include <map>
+#include <mutex>
+#include <string>
+
 #include "hux/device.h"
 
 namespace hux {
@@ -26,8 +30,22 @@ class NeuwareBackend : public DeviceBackend {
   Status make_visible(DeviceStream* stream, void* addr,
                       uint64_t bytes) override;
 
+  Status copy(void* dst, void const* src, uint64_t bytes) override;
+  Status export_ipc(void* addr, uint64_t length, IpcHandle* out) override;
+  Status import_ipc(IpcHandle const& handle, void** out) override;
+  Status close_ipc(void* mapped) override;
+
  private:
+  struct Import {
+    void* base = nullptr;
+    uint64_t bytes = 0;
+    uint64_t refs = 0;
+  };
+
   int device_index_ = 0;
+  mutable std::mutex ipc_mu_;
+  std::map<std::string, Import> imports_by_handle_;
+  std::map<uintptr_t, std::string> imports_by_base_;
 };
 
 }  // namespace hux

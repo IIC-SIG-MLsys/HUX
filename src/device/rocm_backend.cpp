@@ -97,6 +97,7 @@ DeviceCaps RocmBackend::caps() const {
 #endif
   c.max_registration_bytes = 0;
   c.max_total_registration_bytes = 0;
+  c.supports_ipc = ipc_supported();
   return c;
 }
 
@@ -189,6 +190,145 @@ Status RocmBackend::make_visible(DeviceStream* stream, void* addr,
   /* Same reasoning as the CUDA backend: called after the transport observed
    * completion, so work queued afterwards sees the bytes. Installing a
    * dependency for a transfer still in flight is DEV-01. */
+  return Status::kOk;
+}
+
+/* Hygon's DTK 23.10 does not answer the unified-addressing query -- it returns
+ * an error and leaves the value untouched -- and yet exports handles perfectly
+ * well. Believing the query would report a card with no IPC support when it
+ * has it, so where the query cannot answer, the driver is asked directly with
+ * a 4 KiB allocation. Done once. */
+bool RocmBackend::ipc_supported() const {
+  std::call_once(ipc_probe_, [this] {
+    int value = 0;
+    if (hipDeviceGetAttribute(&value, hipDeviceAttributeUnifiedAddressing,
+                              device_index_) == hipSuccess) {
+      ipc_supported_ = value != 0;
+      return;
+    }
+    clear_sticky_error();
+    void* probe = nullptr;
+    if (hipMalloc(&probe, 4096) != hipSuccess) {
+      clear_sticky_error();
+      ipc_supported_ = false;
+      return;
+    }
+    hipIpcMemHandle_t handle;
+    ipc_supported_ = hipIpcGetMemHandle(&handle, probe) == hipSuccess;
+    if (!ipc_supported_) clear_sticky_error();
+    hipFree(probe);
+  });
+  return ipc_supported_;
+}
+
+Status RocmBackend::copy(void* dst, void const* src, uint64_t bytes) {
+  if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
+  if (bytes == 0) return Status::kOk;
+  /* Default direction, not an explicit one: either side may be a mapping of
+   * another process's allocation, and the runtime knows where each address
+   * lives while the caller does not. */
+  if (hipMemcpy(dst, src, static_cast<size_t>(bytes), hipMemcpyDefault) !=
+      hipSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
+  return Status::kOk;
+}
+
+Status RocmBackend::export_ipc(void* addr, uint64_t length, IpcHandle* out) {
+  if (addr == nullptr || length == 0 || out == nullptr)
+    return Status::kInvalidArgument;
+
+  /* What gets exported is the allocation, so the allocation this address sits
+   * in has to be found first. Host memory fails here, which is the honest
+   * answer: it cannot be named to another process this way. */
+  void* base = nullptr;
+  size_t allocated = 0;
+  if (hipMemGetAddressRange(
+          reinterpret_cast<hipDeviceptr_t*>(&base), &allocated,
+          reinterpret_cast<hipDeviceptr_t>(addr)) != hipSuccess) {
+    clear_sticky_error();
+    return Status::kUnsupported;
+  }
+
+  uint64_t const offset =
+      reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(base);
+  if (offset > allocated || length > allocated - offset)
+    return Status::kInvalidArgument;
+
+  hipIpcMemHandle_t handle;
+  if (hipIpcGetMemHandle(&handle, base) != hipSuccess) {
+    clear_sticky_error();
+    return Status::kUnsupported;
+  }
+
+  auto const* raw = reinterpret_cast<uint8_t const*>(&handle);
+  out->bytes.assign(raw, raw + sizeof(handle));
+  out->offset = offset;
+  out->allocation_bytes = allocated;
+  return Status::kOk;
+}
+
+Status RocmBackend::import_ipc(IpcHandle const& handle, void** out) {
+  if (out == nullptr || handle.bytes.size() != sizeof(hipIpcMemHandle_t))
+    return Status::kInvalidArgument;
+  if (handle.offset > handle.allocation_bytes) return Status::kInvalidArgument;
+
+  std::string const key(reinterpret_cast<char const*>(handle.bytes.data()),
+                        handle.bytes.size());
+  std::lock_guard<std::mutex> g(ipc_mu_);
+
+  auto it = imports_by_handle_.find(key);
+  if (it != imports_by_handle_.end()) {
+    ++it->second.refs;
+    *out = static_cast<char*>(it->second.base) + handle.offset;
+    return Status::kOk;
+  }
+
+  hipIpcMemHandle_t native;
+  std::memcpy(&native, handle.bytes.data(), sizeof(native));
+  void* base = nullptr;
+  if (hipIpcOpenMemHandle(&base, native, hipIpcMemLazyEnablePeerAccess) !=
+      hipSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
+
+  Import rec;
+  rec.base = base;
+  rec.bytes = handle.allocation_bytes;
+  rec.refs = 1;
+  imports_by_handle_[key] = rec;
+  imports_by_base_[reinterpret_cast<uintptr_t>(base)] = key;
+  *out = static_cast<char*>(base) + handle.offset;
+  return Status::kOk;
+}
+
+Status RocmBackend::close_ipc(void* mapped) {
+  if (mapped == nullptr) return Status::kInvalidArgument;
+  auto const addr = reinterpret_cast<uintptr_t>(mapped);
+
+  std::lock_guard<std::mutex> g(ipc_mu_);
+  /* The greatest base at or below the address, then a range check: an address
+   * from an allocation this process never mapped is refused rather than
+   * closing whichever mapping happens to sit below it. */
+  auto it = imports_by_base_.upper_bound(addr);
+  if (it == imports_by_base_.begin()) return Status::kNotFound;
+  --it;
+
+  auto rec = imports_by_handle_.find(it->second);
+  if (rec == imports_by_handle_.end()) return Status::kNotFound;
+  if (addr - it->first > rec->second.bytes) return Status::kNotFound;
+
+  if (--rec->second.refs > 0) return Status::kOk;
+
+  void* base = rec->second.base;
+  imports_by_base_.erase(it);
+  imports_by_handle_.erase(rec);
+  if (hipIpcCloseMemHandle(base) != hipSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
   return Status::kOk;
 }
 

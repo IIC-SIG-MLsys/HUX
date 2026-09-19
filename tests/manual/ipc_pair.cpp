@@ -8,7 +8,6 @@
  *   ./hux_ipc_pair server [--gpu N]
  *   ./hux_ipc_pair client [--gpu N] */
 #include <arpa/inet.h>
-#include <cuda_runtime.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -20,9 +19,26 @@
 #include <vector>
 
 #include "core/factory.h"
-#include "device/cuda_backend.h"
 #include "hux/engine.h"
 #include "transport/ipc/ipc_provider.h"
+
+/* One program, whichever vendor was built in. The backend differs; nothing
+ * below it does. */
+#ifdef HUX_LOOPBACK_CUDA
+#include <cuda_runtime.h>
+
+#include "device/cuda_backend.h"
+#endif
+#ifdef HUX_LOOPBACK_ROCM
+#include <hip/hip_runtime.h>
+
+#include "device/rocm_backend.h"
+#endif
+#ifdef HUX_LOOPBACK_NEUWARE
+#include <cnrt.h>
+
+#include "device/neuware_backend.h"
+#endif
 
 using namespace hux;
 
@@ -65,19 +81,45 @@ struct Buffer {
 };
 
 bool make_buffer(int gpu, Buffer* out) {
+  int const index = gpu < 0 ? 0 : gpu;
   std::shared_ptr<DeviceBackend> dev;
-  if (CudaBackend::create(gpu < 0 ? 0 : gpu, &dev) != Status::kOk) {
-    std::printf("no CUDA device %d\n", gpu);
+  void* p = nullptr;
+#if defined(HUX_LOOPBACK_CUDA)
+  if (CudaBackend::create(index, &dev) != Status::kOk) return false;
+  if (cudaSetDevice(index) != cudaSuccess ||
+      cudaMalloc(&p, kBytes) != cudaSuccess) {
+    std::printf("device allocation failed\n");
     return false;
   }
+#elif defined(HUX_LOOPBACK_ROCM)
+  if (RocmBackend::create(index, &dev) != Status::kOk) return false;
+  if (hipSetDevice(index) != hipSuccess ||
+      hipMalloc(&p, kBytes) != hipSuccess) {
+    std::printf("device allocation failed\n");
+    return false;
+  }
+#elif defined(HUX_LOOPBACK_NEUWARE)
+  if (NeuwareBackend::create(index, &dev) != Status::kOk) return false;
+  if (cnrtSetDevice(index) != cnrtSuccess ||
+      cnrtMalloc(&p, kBytes) != cnrtSuccess) {
+    std::printf("device allocation failed\n");
+    return false;
+  }
+#else
+  (void)index;
+  std::printf(
+      "built without a device backend, and host memory cannot be exported to "
+      "another process\n");
+  return false;
+#endif
+  if (dev == nullptr) {
+    std::printf("no device %d\n", gpu);
+    return false;
+  }
+  /* Asked, not assumed: a backend that cannot export an allocation fails
+   * later at registration, which says less about why. */
   if (!dev->caps().supports_ipc) {
     std::printf("device reports no IPC support\n");
-    return false;
-  }
-  void* p = nullptr;
-  if (cudaSetDevice(gpu < 0 ? 0 : gpu) != cudaSuccess ||
-      cudaMalloc(&p, kBytes) != cudaSuccess) {
-    std::printf("cudaMalloc failed\n");
     return false;
   }
   out->dev = dev;

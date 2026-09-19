@@ -63,7 +63,17 @@ using the region, and a peer that never answers produces a timeout rather than
 a hang. Removing the range check fails the third; not recording the pending
 confirmation fails the sixth.
 
-End to end between two processes on one 4090: 4 MiB read and 4 MiB write, both
-verified byte for byte, the ready handoff delivered, 8 of 8 sub-operations
-completed, and a release that returned after 295 ms because the peer had been
-told to hold its mapping for 300 ms before polling.
+End to end between two processes, on three vendors -- NVIDIA RTX 4090, Hygon
+Z100L, Cambricon MLU370-X8 -- 4 MiB read and 4 MiB write each, all verified
+byte for byte, the ready handoff delivered, 8 of 8 sub-operations completed,
+and a release returning after 293-295 ms because the peer had been told to
+hold its mapping for 300 ms before polling.
+
+Two of the three needed something NVIDIA did not. Hygon's DTK 23.10 answers
+the unified-addressing query with an error, so a capability read from that
+query reported a card with no IPC support when the same card exports handles
+without complaint; the question now goes to the driver. Cambricon exports only
+an allocation's base -- base+4096 is refused by the driver -- which happens to
+be exactly the guarantee this path needs, since that backend has no call for
+finding the allocation an address belongs to and could not otherwise compute
+the offset.
