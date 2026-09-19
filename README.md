@@ -122,14 +122,25 @@ asked for.
 ## What CI checks
 
 Everything in the pipeline runs on a machine with no GPU, no RDMA device and
-no vendor SDK: the core and mock suite (94 cases, none of them skipped), the
+no vendor SDK: the core and mock suite (107 cases, none of them skipped), the
 Python bindings, formatting, and that enabling a backend whose dependency is
 absent fails at configure time rather than producing a build without the
 transport it was asked for.
 
-Hardware paths are exercised on the machines that have the hardware —
-`tests/manual/` for transfers and sweeps, `tools/` for what a new device can
-do. A pipeline that could only run there would check nothing on most changes.
+Hardware paths are exercised on the machines that have the hardware. They are
+built by CMake wherever their dependencies are present, so they cannot drift
+from the library even though CI never runs them:
+
+| | |
+| --- | --- |
+| `tests/manual/rdma_loopback` | One transfer over RDMA, end to end, against any vendor backend built in |
+| `tests/manual/ipc_pair` | Two processes on one host through a mapping, including a soak mode |
+| `tests/manual/two_paths` | One engine with both transports live at once, three processes |
+| `benchmarks/hux-bench` | Latency and bandwidth across two machines |
+| `tools/probe_registration` | What a new device will let a NIC register |
+| `tools/hux_topology` | NICs, devices and how close they are |
+
+A pipeline that could only run these would check nothing on most changes.
 
 ## Before committing
 
