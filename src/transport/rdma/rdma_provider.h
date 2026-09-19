@@ -45,8 +45,13 @@ struct RdmaConfig {
   uint8_t ib_port = 1;
   /* Queue pairs per connection. More of them raises the number of requests in
    * flight, not the number of network paths -- the two are often confused.
-   * One stays supported as the baseline every measurement compares against. */
-  uint32_t qp_per_conn = 1;
+   *
+   * Four by default, from a sweep across two machines on RoCE: one queue pair
+   * put a 1 MiB write at 212 us, four at 98, and eight at 98 as well. On a
+   * loopback the same sweep shows nothing at all, which is why this was set
+   * to one for as long as loopback was the only measurement available. One
+   * stays supported, and is the baseline every measurement compares against. */
+  uint32_t qp_per_conn = 4;
   /* Signal one work request in every N. Completions are the only way posted
    * entries are reclaimed, so a period that leaves none signalled would fill
    * the queue and stall it permanently. */

@@ -90,7 +90,7 @@ which port was wrong. `ip route get <peer>` names the right one.
 | Transfer between two machines, and between two vendors | RDMA over RoCE v2, Hygon Z100L to Cambricon MLU370, host and device memory |
 | Transfer between two processes on one host | IPC on NVIDIA RTX 4090, Hygon Z100L and Cambricon MLU370-X8, read and write, release waiting on the peer's unmap |
 | One engine carrying both a close and a network transport at once | Cambricon MLU370-X8 client with an IPC peer in the next process and an RDMA peer on a Hygon Z100L across RoCE, one registration serving both |
-| Multiple queue pairs, 1 to 16, balanced accounting | RDMA, loopback |
+| Multiple queue pairs, 1 to 16, balanced accounting | RDMA, loopback and across two machines (where four are 2.2x one; see [tuning](tuning.md)) |
 | Congestion control: off, fixed window, adaptive | RDMA, loopback |
 | Device dependencies (`after`), non-blocking submission | RDMA with CUDA on A40 |
 | Write-side ready handoff with region and span | RDMA, loopback |

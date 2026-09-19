@@ -254,7 +254,23 @@ int run_client(std::string const& ip, Options const& o) {
   };
 
   for (uint64_t bytes : o.sizes) {
-    if (bytes > pool.size()) continue;
+    /* Said out loud. A size that cannot run used to print as 0.0 us and
+     * 0 Gb/s, which reads as a measurement rather than as a size that was
+     * never attempted -- and the usual cause is the two sides having been
+     * started with different --sizes, which nothing else would reveal. */
+    if (bytes > pool.size()) {
+      std::printf("%-10llu %-8s  skipped: larger than this side's buffer\n",
+                  (unsigned long long)bytes, "-");
+      continue;
+    }
+    if (bytes > remote->length()) {
+      std::printf(
+          "%-10llu %-8s  skipped: larger than the peer's region (%llu B)."
+          " Start the server with the same --sizes.\n",
+          (unsigned long long)bytes, "-",
+          (unsigned long long)remote->length());
+      continue;
+    }
     for (bool write : {false, true}) {
       /* Discarded: the first transfers pay for connection setup and page
        * faults, which are real costs but not the one being measured. */
@@ -265,6 +281,11 @@ int run_client(std::string const& ip, Options const& o) {
       for (int i = 0; i < o.iters; ++i) {
         double us = one_transfer(bytes, write);
         if (us >= 0) samples.push_back(us);
+      }
+      if (samples.empty()) {
+        std::printf("%-10llu %-8s  no transfer succeeded\n",
+                    (unsigned long long)bytes, write ? "write" : "read");
+        continue;
       }
       Summary const sum = summarize(samples, bytes);
       std::printf("%-10llu %-8s %10.1f %10.1f %10.1f %10.2f\n",
