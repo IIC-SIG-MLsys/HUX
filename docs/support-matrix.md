@@ -14,7 +14,7 @@ family. Where a device was never available, that is said rather than inferred.
 | NVIDIA RTX 4090 | CUDA | device memory | yes | measured | 2026-09-18 |
 | NVIDIA A40 | CUDA | device memory | yes | measured | 2026-09-18 |
 | Hygon Z100L | ROCm / DTK | device memory, all sizes to 512 MiB | yes | measured, transfers end to end | 2026-09-19 |
-| Cambricon MLU370-X8 | CNRT | device memory, **256 MiB per process** | yes | measured | 2026-09-18 |
+| Cambricon MLU370-X8 | CNRT | device memory, **256 MiB per process** | yes | measured, transfers end to end | 2026-09-19 |
 | Moore Threads S3000 | MUSA | **host memory only** | yes | measured | 2026-09-18 |
 | CPU memory | host | host memory | none | measured | 2026-09-18 |
 | Ascend | — | — | — | not supported | — |
@@ -54,7 +54,7 @@ above transfers to it.
 
 | Feature | Verified on |
 | --- | --- |
-| In-place transfer, zero payload copies | RDMA (host, NVIDIA A40 and Hygon Z100L device memory), UCX, both directions |
+| In-place transfer, zero payload copies | RDMA (host, NVIDIA A40, Hygon Z100L and Cambricon MLU370 device memory), UCX, both directions |
 | Multiple queue pairs, 1 to 16, balanced accounting | RDMA, loopback |
 | Congestion control: off, fixed window, adaptive | RDMA, loopback |
 | Device dependencies (`after`), non-blocking submission | RDMA with CUDA on A40 |
@@ -78,9 +78,12 @@ Stated rather than left to be assumed:
 - **Congestion behaviour under contention.** The controllers are measured on
   synthetic delay samples and on an idle loopback path. Incast, competing
   flows and tail latency under load need several machines.
-- **GPU memory on Cambricon and Moore Threads end to end.** Their
-  registration limits and stream semantics are measured; transfers on those
-  hosts have not been run through this library. Hygon Z100L has now been run
-  end to end -- device memory to device memory, four queue pairs, zero payload
-  copies, both directions verified, with the notification and failure paths
-  behaving as on NVIDIA.
+- **Moore Threads end to end.** Its registration limit is measured and is
+  absolute: device memory cannot be registered at any size, so the in-place
+  path is impossible there and a staged one is not implemented. Nothing has
+  been transferred through this library on that host.
+
+  Hygon Z100L and Cambricon MLU370-X8 have both now been run end to end --
+  device memory to device memory, four queue pairs, zero payload copies, both
+  directions verified, with the notification and failure paths behaving as on
+  NVIDIA.

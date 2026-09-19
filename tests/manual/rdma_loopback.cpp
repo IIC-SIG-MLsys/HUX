@@ -38,6 +38,11 @@
 
 #include "device/rocm_backend.h"
 #endif
+#ifdef HUX_LOOPBACK_NEUWARE
+#include <cnrt.h>
+
+#include "device/neuware_backend.h"
+#endif
 
 using namespace hux;
 
@@ -97,6 +102,12 @@ struct Buffer {
       return;
     }
 #endif
+#ifdef HUX_LOOPBACK_NEUWARE
+    if (on_gpu) {
+      cnrtMemcpy(ptr, const_cast<void*>(src), kBytes, cnrtMemcpyHostToDev);
+      return;
+    }
+#endif
     std::memcpy(ptr, src, kBytes);
   }
   void load(void* dst) const {
@@ -109,6 +120,12 @@ struct Buffer {
 #ifdef HUX_LOOPBACK_ROCM
     if (on_gpu) {
       hipMemcpy(dst, ptr, kBytes, hipMemcpyDeviceToHost);
+      return;
+    }
+#endif
+#ifdef HUX_LOOPBACK_NEUWARE
+    if (on_gpu) {
+      cnrtMemcpy(dst, ptr, kBytes, cnrtMemcpyDevToHost);
       return;
     }
 #endif
@@ -133,6 +150,18 @@ Buffer make_buffer(int gpu) {
     hipSetDevice(gpu);
     if (hipMalloc(&b.ptr, kBytes) != hipSuccess) {
       std::printf("hipMalloc failed\n");
+      std::exit(1);
+    }
+    b.on_gpu = true;
+    return b;
+  }
+#elif defined(HUX_LOOPBACK_NEUWARE)
+  if (gpu >= 0) {
+    cnrtSetDevice(gpu);
+    /* Plain cnrtMalloc: cnMallocPeerAble memory is refused by ibv_reg_mr at
+     * every size on this driver. */
+    if (cnrtMalloc(&b.ptr, kBytes) != cnrtSuccess) {
+      std::printf("cnrtMalloc failed\n");
       std::exit(1);
     }
     b.on_gpu = true;
