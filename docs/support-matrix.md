@@ -63,6 +63,7 @@ above transfers to it.
 | Native RDMA | measured | Multiple queue pairs, congestion control, per-queue accounting, NIC affinity |
 | Same-process | measured | Copies directly, reports those copies |
 | UCX | measured, with a caveat | Works under `UCX_TLS=self,sm`; default transport selection aborts inside the library on this host (see [ucx.md](ucx.md)) |
+| Choosing among them by where the peer is | measured | One engine holds several in preference order; a peer is reached over the first that suits its location and that the peer also offers ([decision](decisions/0003-path-selection.md)) |
 | IPC between processes on one host | measured | Maps the peer's allocation and copies across it, counting the copy; device memory only, and releasing a region waits for the peer to unmap ([decision](decisions/0002-ipc-path.md)) |
 
 ## Across machines
@@ -88,6 +89,7 @@ which port was wrong. `ip route get <peer>` names the right one.
 | In-place transfer, zero payload copies | RDMA (host, NVIDIA A40, Hygon Z100L and Cambricon MLU370 device memory), UCX, both directions |
 | Transfer between two machines, and between two vendors | RDMA over RoCE v2, Hygon Z100L to Cambricon MLU370, host and device memory |
 | Transfer between two processes on one host | IPC on NVIDIA RTX 4090, Hygon Z100L and Cambricon MLU370-X8, read and write, release waiting on the peer's unmap |
+| One engine choosing between a close and a network transport | contract tests with a real IPC provider and a mock network one; not yet exercised with both on hardware at once |
 | Multiple queue pairs, 1 to 16, balanced accounting | RDMA, loopback |
 | Congestion control: off, fixed window, adaptive | RDMA, loopback |
 | Device dependencies (`after`), non-blocking submission | RDMA with CUDA on A40 |
