@@ -82,6 +82,39 @@ struct Buffer {
     dev->copy(ptr, pattern(seed).data(), kBytes);
   }
   bool verify(uint8_t seed) const { return first_mismatch(seed) < 0; }
+
+  /* What went wrong, in enough detail to tell the two candidate faults
+   * apart: bytes never written keep the pattern that was there before, while
+   * bytes written wrongly hold something else entirely. */
+  struct Damage {
+    int64_t first = -1;
+    int64_t last = -1;
+    uint64_t count = 0;
+    uint8_t got = 0;
+    uint8_t want = 0;
+    bool looks_like_stale = false; /* still the other pattern */
+  };
+  Damage inspect(uint8_t seed, uint8_t previous) const {
+    Damage d;
+    scratch.resize(kBytes);
+    dev->copy(scratch.data(), ptr, kBytes);
+    auto const& want = pattern(seed);
+    auto const& before = pattern(previous);
+    uint64_t stale = 0;
+    for (uint64_t i = 0; i < kBytes; ++i) {
+      if (scratch[i] == want[i]) continue;
+      if (d.first < 0) {
+        d.first = static_cast<int64_t>(i);
+        d.got = scratch[i];
+        d.want = want[i];
+      }
+      d.last = static_cast<int64_t>(i);
+      ++d.count;
+      if (scratch[i] == before[i]) ++stale;
+    }
+    d.looks_like_stale = d.count > 0 && stale == d.count;
+    return d;
+  }
   /* Where the first wrong byte is, or -1. A soak run reporting only that
    * something did not match says nothing about whether a transfer went
    * astray or a whole round never ran. */
@@ -466,6 +499,19 @@ int run_client(int gpu, uint64_t loops) {
       if (at >= 0) {
         ++bad_bytes;
         report("bytes", i, Status::kOk, at);
+        if (bad_bytes <= 3) {
+          auto const d = buf.inspect(0x11, 0x22);
+          std::printf(
+              "     damage: %llu bytes in [%lld,%lld], got 0x%02x want 0x%02x,"
+              " %s\n",
+              (unsigned long long)d.count, (long long)d.first,
+              (long long)d.last, d.got, d.want,
+              d.looks_like_stale ? "all of it is what this side wrote before "
+                                   "-- the read never covered it"
+                                 : "not the previous contents -- something "
+                                   "else landed there");
+          std::fflush(stdout);
+        }
       }
       us_verify += since(t);
 
