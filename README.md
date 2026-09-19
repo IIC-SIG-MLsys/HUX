@@ -41,6 +41,9 @@ holds the same contract as the network path: a peer's address is a key plus an
 offset resolved through a registry, never a pointer taken on trust, so code
 written against it keeps working when the peer moves to another host.
 
+Full detail, including what has not been verified, is in
+[docs/support-matrix.md](docs/support-matrix.md).
+
 Each backend is independently enabled, built and tested on its own hardware.
 Capabilities are reported as measured, not as hoped: Cambricon registration is
 bounded per process rather than per call, and Moore Threads device memory
