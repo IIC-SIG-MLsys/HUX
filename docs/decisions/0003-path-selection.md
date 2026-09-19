@@ -55,6 +55,14 @@ accepted left `connect` blocked for ever. It is bounded now and reports a
 timeout, which is what the rest of this library does with a wait that cannot
 finish.
 
-Not yet measured: both transports carrying real traffic from one engine at the
-same time. The choice is tested with a real IPC provider and a mock network
-one, which exercises the selection but not two live fabrics at once.
+Both transports have since carried real traffic from one engine at the same
+time, and across two vendors: a client on a Cambricon MLU370-X8 with a peer in
+the next process on that host and a peer on a Hygon Z100L over RoCE. One
+registration served both -- the descriptor is 78 bytes and carries a key for
+each -- and the peers were reported as `same_host`/`ipc` and
+`another_host`/`rdma` without being told which to use. Both sides verified
+what was written.
+
+The byte counts are the clearest evidence that the two paths are different in
+kind and not just in name: 4 MiB of payload and 2 MiB of extra copies, which
+is exactly the IPC half. The network half moved in place.
