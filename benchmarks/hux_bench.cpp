@@ -57,7 +57,10 @@ using Clock = std::chrono::steady_clock;
 
 namespace {
 
-constexpr uint16_t kMetaPort = 18516;
+/* Overridable so several flows can run at once on one pair of machines,
+ * which is the only way to put this fabric under contention and the only
+ * condition where congestion control can be worth anything. */
+uint16_t g_meta_port = 18516;
 
 struct Options {
   uint32_t qp = 1;
@@ -215,10 +218,10 @@ int run_server(Options const& o) {
   sockaddr_in a{};
   a.sin_family = AF_INET;
   a.sin_addr.s_addr = INADDR_ANY;
-  a.sin_port = htons(kMetaPort);
+  a.sin_port = htons(g_meta_port);
   ::bind(srv, reinterpret_cast<sockaddr*>(&a), sizeof(a));
   ::listen(srv, 1);
-  std::printf("[server] ready on :%u, %llu MiB registered\n", kMetaPort,
+  std::printf("[server] ready on :%u, %llu MiB registered\n", g_meta_port,
               (unsigned long long)(pool.bytes >> 20));
   int fd = ::accept(srv, nullptr, nullptr);
 
@@ -244,7 +247,7 @@ int run_client(std::string const& ip, Options const& o) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in a{};
   a.sin_family = AF_INET;
-  a.sin_port = htons(kMetaPort);
+  a.sin_port = htons(g_meta_port);
   ::inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
   for (int i = 0; i < 30; ++i) {
     if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) break;
@@ -381,7 +384,7 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
-                " [--gpu N]\n",
+                " [--gpu N] [--port P]\n",
                 argv[0]);
     return 2;
   }
@@ -394,6 +397,8 @@ int main(int argc, char** argv) {
       o.chunk = std::strtoull(argv[i + 1], nullptr, 10);
     else if (k == "--gpu")
       o.gpu = std::atoi(argv[i + 1]);
+    else if (k == "--port")
+      g_meta_port = static_cast<uint16_t>(std::atoi(argv[i + 1]));
     else if (k == "--cc") o.cc = argv[i + 1];
     else if (k == "--iters") o.iters = std::atoi(argv[i + 1]);
     else if (k == "--sizes") {

@@ -11,41 +11,20 @@
  *   on this machine:      ./hux_two_paths near --gpu N
  *                         ./hux_two_paths client --gpu N --far <far ip>
  *                                                --local <this ip> */
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <thread>
 #include <vector>
 
 #include "core/factory.h"
+#include "harness.h"
 #include "hux/engine.h"
 #include "transport/ipc/ipc_provider.h"
 #include "transport/rdma/rdma_provider.h"
 
-#ifdef HUX_LOOPBACK_CUDA
-#include <cuda_runtime.h>
-
-#include "device/cuda_backend.h"
-#endif
-#ifdef HUX_LOOPBACK_ROCM
-#include <hip/hip_runtime.h>
-
-#include "device/rocm_backend.h"
-#endif
-#ifdef HUX_LOOPBACK_NEUWARE
-#include <cnrt.h>
-
-#include "device/neuware_backend.h"
-#endif
-
 using namespace hux;
+using namespace hux::manual;
 
 namespace {
 
@@ -53,112 +32,13 @@ constexpr uint64_t kBytes = 1u << 20;
 constexpr uint16_t kNearPort = 18520;
 constexpr uint16_t kFarPort = 18521;
 
-void nodelay(int fd) {
-  int on = 1;
-  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
-}
-
-void send_blob(int fd, void const* p, uint32_t n) {
-  ::send(fd, &n, 4, 0);
-  if (n > 0) ::send(fd, p, n, 0);
-}
-
-bool recv_blob(int fd, std::vector<uint8_t>* out) {
-  uint32_t n = 0;
-  if (::recv(fd, &n, 4, MSG_WAITALL) != 4) return false;
-  out->resize(n);
-  return n == 0 || ::recv(fd, out->data(), n, MSG_WAITALL) == ssize_t(n);
-}
-
-int listen_on(uint16_t port) {
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  int one = 1;
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-  sockaddr_in a{};
-  a.sin_family = AF_INET;
-  a.sin_addr.s_addr = INADDR_ANY;
-  a.sin_port = htons(port);
-  if (::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0 ||
-      ::listen(fd, 4) != 0) {
-    std::printf("port %u is already taken\n", port);
-    ::close(fd);
-    return -1;
-  }
-  return fd;
-}
-
-int dial(std::string const& ip, uint16_t port, int seconds) {
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  sockaddr_in a{};
-  a.sin_family = AF_INET;
-  a.sin_port = htons(port);
-  ::inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
-  for (int i = 0; i < seconds * 5; ++i) {
-    if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
-      nodelay(fd);
-      return fd;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-  }
-  ::close(fd);
-  return -1;
-}
-
-struct Buffer {
-  std::shared_ptr<DeviceBackend> dev;
-  void* ptr = nullptr;
-
-  void fill(uint8_t seed) const {
-    std::vector<uint8_t> host(kBytes);
-    for (uint64_t i = 0; i < kBytes; ++i)
-      host[i] = static_cast<uint8_t>(i * 31 + seed);
-    dev->copy(ptr, host.data(), kBytes);
-  }
-  bool verify(uint8_t seed) const {
-    std::vector<uint8_t> host(kBytes, 0);
-    dev->copy(host.data(), ptr, kBytes);
-    for (uint64_t i = 0; i < kBytes; ++i)
-      if (host[i] != static_cast<uint8_t>(i * 31 + seed)) return false;
-    return true;
-  }
-};
-
-bool make_buffer(int gpu, Buffer* out) {
-  int const index = gpu < 0 ? 0 : gpu;
-  std::shared_ptr<DeviceBackend> dev;
-  void* p = nullptr;
-#if defined(HUX_LOOPBACK_CUDA)
-  if (CudaBackend::create(index, &dev) != Status::kOk) return false;
-  if (cudaSetDevice(index) != cudaSuccess ||
-      cudaMalloc(&p, kBytes) != cudaSuccess)
-    return false;
-#elif defined(HUX_LOOPBACK_ROCM)
-  if (RocmBackend::create(index, &dev) != Status::kOk) return false;
-  if (hipSetDevice(index) != hipSuccess || hipMalloc(&p, kBytes) != hipSuccess)
-    return false;
-#elif defined(HUX_LOOPBACK_NEUWARE)
-  if (NeuwareBackend::create(index, &dev) != Status::kOk) return false;
-  if (cnrtSetDevice(index) != cnrtSuccess ||
-      cnrtMalloc(&p, kBytes) != cnrtSuccess)
-    return false;
-#else
-  (void)index;
-  std::printf("built without a device backend\n");
-  return false;
-#endif
-  if (dev == nullptr) return false;
-  out->dev = dev;
-  out->ptr = p;
-  return true;
-}
-
 /* A side that waits to be reached. `ipc` decides which transport it offers,
  * which is how the client ends up choosing differently for the two of them
  * without being told to. */
 int run_server(char const* role, int gpu, bool ipc, std::string const& local_ip,
                uint16_t port) {
   Buffer buf;
-  if (!make_buffer(gpu, &buf)) {
+  if (!buf.make(gpu, kBytes)) {
     std::printf("[%s] no usable device\n", role);
     return 1;
   }
@@ -246,7 +126,7 @@ int run_server(char const* role, int gpu, bool ipc, std::string const& local_ip,
 int run_client(int gpu, std::string const& far_ip,
                std::string const& local_ip) {
   Buffer buf;
-  if (!make_buffer(gpu, &buf)) return 1;
+  if (!buf.make(gpu, kBytes)) return 1;
 
   std::shared_ptr<IpcProvider> ipc_prov;
   std::shared_ptr<RdmaProvider> rdma_prov;

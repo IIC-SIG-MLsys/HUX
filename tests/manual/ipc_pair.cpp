@@ -7,12 +7,6 @@
  *
  *   ./hux_ipc_pair server [--gpu N]
  *   ./hux_ipc_pair client [--gpu N] */
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -21,32 +15,17 @@
 #include <vector>
 
 #include "core/factory.h"
+#include "harness.h"
 #include "hux/engine.h"
 #include "transport/ipc/ipc_provider.h"
 
-/* One program, whichever vendor was built in. The backend differs; nothing
- * below it does. */
-#ifdef HUX_LOOPBACK_CUDA
-#include <cuda_runtime.h>
-
-#include "device/cuda_backend.h"
-#endif
-#ifdef HUX_LOOPBACK_ROCM
-#include <hip/hip_runtime.h>
-
-#include "device/rocm_backend.h"
-#endif
-#ifdef HUX_LOOPBACK_NEUWARE
-#include <cnrt.h>
-
-#include "device/neuware_backend.h"
-#endif
-
 using namespace hux;
+using namespace hux::manual;
 
 namespace {
 
 constexpr uint64_t kBytes = 4u << 20;
+
 /* Overridable, and worth overriding. Two runs of this program on one host
  * sharing a port do not fail cleanly: the second server's bind is refused,
  * but a client can still reach the first one and then verify bytes a
@@ -84,43 +63,10 @@ void device_barrier() {
 #endif
 }
 
-void send_blob(int fd, void const* p, uint32_t n) {
-  ::send(fd, &n, 4, 0);
-  if (n > 0) ::send(fd, p, n, 0);
-}
-
-bool recv_blob(int fd, std::vector<uint8_t>* out) {
-  uint32_t n = 0;
-  if (::recv(fd, &n, 4, MSG_WAITALL) != 4) return false;
-  out->resize(n);
-  return n == 0 || ::recv(fd, out->data(), n, MSG_WAITALL) == ssize_t(n);
-}
-
-/* Device memory plus the two things a test needs from it: filling it and
- * reading it back, both through the backend so no vendor call appears here. */
-struct Buffer {
-  std::shared_ptr<DeviceBackend> dev;
-  void* ptr = nullptr;
-
-  /* Built once and kept. A soak run does this tens of thousands of times, and
-   * a pattern rebuilt per round would put the test's own arithmetic on the
-   * critical path instead of the transfer. */
-  std::vector<uint8_t> const& pattern(uint8_t seed) const {
-    auto it = patterns.find(seed);
-    if (it != patterns.end()) return it->second;
-    std::vector<uint8_t> v(kBytes);
-    for (uint64_t i = 0; i < kBytes; ++i)
-      v[i] = static_cast<uint8_t>(i * 31 + seed);
-    return patterns.emplace(seed, std::move(v)).first->second;
-  }
-  void fill(uint8_t seed) const {
-    dev->copy(ptr, pattern(seed).data(), kBytes);
-  }
-  bool verify(uint8_t seed) const { return first_mismatch(seed) < 0; }
-
-  /* What went wrong, in enough detail to tell the two candidate faults
-   * apart: bytes never written keep the pattern that was there before, while
-   * bytes written wrongly hold something else entirely. */
+/* The harness buffer plus what only this test needs: a description of what
+ * went wrong, detailed enough to tell a lost transfer from one that had not
+ * landed yet. */
+struct Buffer : manual::Buffer {
   struct Damage {
     int64_t first = -1;
     int64_t last = -1;
@@ -185,61 +131,12 @@ struct Buffer {
     return -1;
   }
 
-  mutable std::map<uint8_t, std::vector<uint8_t>> patterns;
-  mutable std::vector<uint8_t> scratch;
   mutable std::vector<uint8_t> reread;
 };
 
-bool make_buffer(int gpu, Buffer* out) {
-  int const index = gpu < 0 ? 0 : gpu;
-  std::shared_ptr<DeviceBackend> dev;
-  void* p = nullptr;
-#if defined(HUX_LOOPBACK_CUDA)
-  if (CudaBackend::create(index, &dev) != Status::kOk) return false;
-  if (cudaSetDevice(index) != cudaSuccess ||
-      cudaMalloc(&p, kBytes) != cudaSuccess) {
-    std::printf("device allocation failed\n");
-    return false;
-  }
-#elif defined(HUX_LOOPBACK_ROCM)
-  if (RocmBackend::create(index, &dev) != Status::kOk) return false;
-  if (hipSetDevice(index) != hipSuccess ||
-      hipMalloc(&p, kBytes) != hipSuccess) {
-    std::printf("device allocation failed\n");
-    return false;
-  }
-#elif defined(HUX_LOOPBACK_NEUWARE)
-  if (NeuwareBackend::create(index, &dev) != Status::kOk) return false;
-  if (cnrtSetDevice(index) != cnrtSuccess ||
-      cnrtMalloc(&p, kBytes) != cnrtSuccess) {
-    std::printf("device allocation failed\n");
-    return false;
-  }
-#else
-  (void)index;
-  std::printf(
-      "built without a device backend, and host memory cannot be exported to "
-      "another process\n");
-  return false;
-#endif
-  if (dev == nullptr) {
-    std::printf("no device %d\n", gpu);
-    return false;
-  }
-  /* Asked, not assumed: a backend that cannot export an allocation fails
-   * later at registration, which says less about why. */
-  if (!dev->caps().supports_ipc) {
-    std::printf("device reports no IPC support\n");
-    return false;
-  }
-  out->dev = dev;
-  out->ptr = p;
-  return true;
-}
-
 int run_server(int gpu) {
   Buffer buf;
-  if (!make_buffer(gpu, &buf)) return 1;
+  if (!buf.make(gpu, kBytes)) return 1;
   buf.fill(0x11);
 
   std::shared_ptr<IpcProvider> prov;
@@ -382,7 +279,7 @@ int run_server(int gpu) {
 
 int run_client(int gpu, uint64_t loops) {
   Buffer buf;
-  if (!make_buffer(gpu, &buf)) return 1;
+  if (!buf.make(gpu, kBytes)) return 1;
   buf.fill(0x99); /* overwritten by the read, so a stale buffer cannot pass */
 
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -443,15 +340,7 @@ int run_client(int gpu, uint64_t loops) {
   /* Progress is explicit, so completions are collected here rather than by a
    * thread the test does not own. */
   auto drive = [&](RequestPtr const& req) {
-    std::vector<RequestPtr> done;
-    for (int i = 0; i < 200000; ++i) {
-      engine->poll_completions(32, &done);
-      bool fin = false;
-      req->test(&fin);
-      if (fin) return req->wait(5000);
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
-    }
-    return Status::kTimeout;
+    return hux::manual::drive(engine.get(), req);
   };
 
   RegionView lv, rv;

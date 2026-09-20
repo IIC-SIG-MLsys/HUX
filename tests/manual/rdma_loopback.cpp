@@ -10,183 +10,27 @@
  *
  * Without --gpu both sides use host memory, which is what runs anywhere. With
  * it, memory comes from the GPU, which needs a card that supports GDR. */
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
+#include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <string>
 #include <thread>
 #include <vector>
 
 #include "core/factory.h"
 #include "core/region_impl.h"
+#include "harness.h"
 #include "hux/engine.h"
 #include "transport/cc/controller.h"
 #include "transport/rdma/rdma_provider.h"
 
-#ifdef HUX_LOOPBACK_CUDA
-#include <cuda_runtime.h>
-
-#include "device/cuda_backend.h"
-#endif
-#ifdef HUX_LOOPBACK_ROCM
-#include <hip/hip_runtime.h>
-
-#include "device/rocm_backend.h"
-#endif
-#ifdef HUX_LOOPBACK_NEUWARE
-#include <cnrt.h>
-
-#include "device/neuware_backend.h"
-#endif
-
 using namespace hux;
+using namespace hux::manual;
 
 namespace {
 
 constexpr uint16_t kMetaPort = 18515;
+
 constexpr uint64_t kBytes = 1u << 20;
-
-bool send_blob(int fd, void const* p, uint32_t n) {
-  uint32_t len = htonl(n);
-  if (::send(fd, &len, 4, 0) != 4) return false;
-  auto const* b = static_cast<uint8_t const*>(p);
-  uint32_t left = n;
-  while (left > 0) {
-    ssize_t k = ::send(fd, b, left, 0);
-    if (k <= 0) return false;
-    b += k;
-    left -= static_cast<uint32_t>(k);
-  }
-  return true;
-}
-
-bool recv_blob(int fd, std::vector<uint8_t>* out) {
-  uint32_t len = 0;
-  if (::recv(fd, &len, 4, MSG_WAITALL) != 4) return false;
-  len = ntohl(len);
-  out->assign(len, 0);
-  uint32_t got = 0;
-  while (got < len) {
-    ssize_t k = ::recv(fd, out->data() + got, len - got, 0);
-    if (k <= 0) return false;
-    got += static_cast<uint32_t>(k);
-  }
-  return true;
-}
-
-struct Buffer {
-  void* ptr = nullptr;
-  bool on_gpu = false;
-
-  void fill(uint8_t seed) {
-    std::vector<uint8_t> host(kBytes);
-    for (uint64_t i = 0; i < kBytes; ++i)
-      host[i] = static_cast<uint8_t>(i * 31 + seed);
-    store(host.data());
-  }
-  void store(void const* src) {
-#ifdef HUX_LOOPBACK_CUDA
-    if (on_gpu) {
-      cudaMemcpy(ptr, src, kBytes, cudaMemcpyHostToDevice);
-      return;
-    }
-#endif
-#ifdef HUX_LOOPBACK_ROCM
-    if (on_gpu) {
-      hipMemcpy(ptr, src, kBytes, hipMemcpyHostToDevice);
-      return;
-    }
-#endif
-#ifdef HUX_LOOPBACK_NEUWARE
-    if (on_gpu) {
-      cnrtMemcpy(ptr, const_cast<void*>(src), kBytes, cnrtMemcpyHostToDev);
-      return;
-    }
-#endif
-    std::memcpy(ptr, src, kBytes);
-  }
-  void load(void* dst) const {
-#ifdef HUX_LOOPBACK_CUDA
-    if (on_gpu) {
-      cudaMemcpy(dst, ptr, kBytes, cudaMemcpyDeviceToHost);
-      return;
-    }
-#endif
-#ifdef HUX_LOOPBACK_ROCM
-    if (on_gpu) {
-      hipMemcpy(dst, ptr, kBytes, hipMemcpyDeviceToHost);
-      return;
-    }
-#endif
-#ifdef HUX_LOOPBACK_NEUWARE
-    if (on_gpu) {
-      cnrtMemcpy(dst, ptr, kBytes, cnrtMemcpyDevToHost);
-      return;
-    }
-#endif
-    std::memcpy(dst, ptr, kBytes);
-  }
-};
-
-Buffer make_buffer(int gpu) {
-  Buffer b;
-#ifdef HUX_LOOPBACK_CUDA
-  if (gpu >= 0) {
-    cudaSetDevice(gpu);
-    if (cudaMalloc(&b.ptr, kBytes) != cudaSuccess) {
-      std::printf("cudaMalloc failed\n");
-      std::exit(1);
-    }
-    b.on_gpu = true;
-    return b;
-  }
-#elif defined(HUX_LOOPBACK_ROCM)
-  if (gpu >= 0) {
-    hipSetDevice(gpu);
-    if (hipMalloc(&b.ptr, kBytes) != hipSuccess) {
-      std::printf("hipMalloc failed\n");
-      std::exit(1);
-    }
-    b.on_gpu = true;
-    return b;
-  }
-#elif defined(HUX_LOOPBACK_NEUWARE)
-  if (gpu >= 0) {
-    cnrtSetDevice(gpu);
-    /* Plain cnrtMalloc: cnMallocPeerAble memory is refused by ibv_reg_mr at
-     * every size on this driver. */
-    if (cnrtMalloc(&b.ptr, kBytes) != cnrtSuccess) {
-      std::printf("cnrtMalloc failed\n");
-      std::exit(1);
-    }
-    b.on_gpu = true;
-    return b;
-  }
-#else
-  (void)gpu;
-#endif
-  b.ptr = std::aligned_alloc(4096, kBytes);
-  return b;
-}
-
-bool verify(Buffer const& b, uint8_t seed) {
-  std::vector<uint8_t> got(kBytes);
-  b.load(got.data());
-  for (uint64_t i = 0; i < kBytes; ++i) {
-    uint8_t want = static_cast<uint8_t>(i * 31 + seed);
-    if (got[i] != want) {
-      std::printf("   mismatch at %llu: got %u want %u\n",
-                  (unsigned long long)i, got[i], want);
-      return false;
-    }
-  }
-  return true;
-}
 
 int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc,
                std::string const& local_ip) {
@@ -213,7 +57,11 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc,
     return 1;
   }
 
-  Buffer buf = make_buffer(gpu);
+  Buffer buf;
+  if (!buf.make(gpu, kBytes)) {
+    std::printf("no usable memory\n");
+    return 1;
+  }
   buf.fill(0x11); /* the client will read this, and later overwrite it */
 
   /* Registered through the engine so both ends agree on the region id: a
@@ -242,7 +90,7 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc,
   ::bind(srv, reinterpret_cast<sockaddr*>(&a), sizeof(a));
   ::listen(srv, 1);
   std::printf("[server] waiting on :%u (%s memory)\n", kMetaPort,
-              buf.on_gpu ? "device" : "host");
+              buf.on_device ? "device" : "host");
   int fd = ::accept(srv, nullptr, nullptr);
 
   send_blob(fd, meta.data(), static_cast<uint32_t>(meta.size()));
@@ -286,7 +134,7 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc,
   }
 
   std::printf("[server] verifying what the client wrote: %s\n",
-              verify(buf, 0x22) ? "OK" : "MISMATCH");
+              buf.verify(0x22) ? "OK" : "MISMATCH");
   send_blob(fd, "z", 1);
   ::close(fd);
   ::close(srv);
@@ -357,7 +205,11 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
     return 1;
   }
 
-  Buffer buf = make_buffer(gpu);
+  Buffer buf;
+  if (!buf.make(gpu, kBytes)) {
+    std::printf("no usable memory\n");
+    return 1;
+  }
   buf.fill(0x00);
 
   MemoryRegionPtr local;
@@ -379,19 +231,11 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
     return 1;
   }
   std::printf("[client] connected (%s memory, %u queue pairs)\n",
-              buf.on_gpu ? "device" : "host", peer->caps().qp_count);
+              buf.on_device ? "device" : "host", peer->caps().qp_count);
   std::printf("[client] %s\n", prov->describe().c_str());
 
   auto drive = [&](RequestPtr const& req) {
-    std::vector<RequestPtr> done;
-    for (int i = 0; i < 200000; ++i) {
-      engine->poll_completions(32, &done);
-      bool fin = false;
-      req->test(&fin);
-      if (fin) return req->wait(5000);
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
-    }
-    return Status::kTimeout;
+    return hux::manual::drive(engine.get(), req);
   };
 
   RegionView lv, rv;
@@ -408,7 +252,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
   s = drive(rd);
   std::printf("   status %s, reached target_ready=%d\n", to_string(s),
               rd->reached(Stage::kTargetReady));
-  bool read_ok = s == Status::kOk && verify(buf, 0x11);
+  bool read_ok = s == Status::kOk && buf.verify(0x11);
   std::printf("   data verified: %s\n", read_ok ? "OK" : "FAILED");
 
   std::printf("\n=== write: client memory -> server memory ===\n");
@@ -426,7 +270,7 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
   /* GPU produces, then the NIC may read. The dependency has to hold back the
    * transfer without holding back the calling thread -- both halves matter,
    * and a wrong answer on either is invisible without timing it. */
-  if (buf.on_gpu) {
+  if (buf.on_device) {
     std::printf("\n=== GPU dependency: produce, then transfer ===\n");
     std::shared_ptr<DeviceBackend> dev;
     if (CudaBackend::create(gpu, &dev) == Status::kOk) {
