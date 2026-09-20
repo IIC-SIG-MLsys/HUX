@@ -233,6 +233,17 @@ class RdmaConnection : public ProviderConnection {
                  std::vector<RdmaEndpointInfo> remote);
   ~RdmaConnection();
 
+  /* Whether the peer is still on the other end. The control channel is the
+   * only place this shows: a closed socket reads as end of file, which is a
+   * different thing from having nothing to read right now, and the two used
+   * to be treated alike. */
+  bool alive() const override {
+    return !peer_closed_.load(std::memory_order_acquire);
+  }
+  void mark_peer_closed() {
+    peer_closed_.store(true, std::memory_order_release);
+  }
+
   uint32_t qp_count() const override {
     return static_cast<uint32_t>(qps_.size());
   }
@@ -274,6 +285,7 @@ class RdmaConnection : public ProviderConnection {
   /* The bootstrap socket is kept as the control channel rather than closed
    * after the handshake. It is independent of the RDMA path, so control
    * traffic keeps moving when the data path is congested or broken. */
+  std::atomic<bool> peer_closed_{false};
   int ctrl_fd = -1;
   std::mutex send_mu_;     /* serializes header and payload together */
   std::vector<uint8_t> rx; /* partial message carried between polls */

@@ -1085,7 +1085,16 @@ Status RdmaProvider::poll_control(uint32_t max_items,
     uint8_t buf[4096];
     while (true) {
       ssize_t n = ::recv(c->ctrl_fd, buf, sizeof(buf), 0);
-      if (n <= 0) break;
+      if (n == 0) {
+        /* End of file: the peer closed. Distinct from -1, which only means
+         * nothing has arrived yet, and treating the two alike is why a peer
+         * that exited was never noticed here. Whatever already arrived is
+         * still parsed below -- its last message may be the one that
+         * explains the departure. */
+        c->mark_peer_closed();
+        break;
+      }
+      if (n < 0) break; /* EAGAIN: nothing more right now */
       c->rx.insert(c->rx.end(), buf, buf + n);
       if (n < static_cast<ssize_t>(sizeof(buf))) break;
     }

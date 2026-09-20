@@ -294,7 +294,8 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc,
 }
 
 int run_client(std::string const& ip, int gpu, uint32_t qps,
-               CongestionControllerPtr cc, std::string const& local_ip) {
+               CongestionControllerPtr cc, std::string const& local_ip,
+               int watch_peer_s) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in a{};
   a.sin_family = AF_INET;
@@ -597,6 +598,28 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
   /* The zero-copy claim, as a number rather than an assertion. A transfer in
    * place leaves payload_bytes_copied at zero; a path that staged through an
    * intermediate buffer would report what it moved. */
+  /* With --watch-peer N, sit and poll for N seconds so a peer that exits can
+   * be noticed. The point is that nothing else happens in the meantime: the
+   * connection simply goes, and the engine has to report it without a
+   * transfer to fail against. */
+  if (watch_peer_s > 0) {
+    std::printf("\n=== watching the peer for %d s ===\n", watch_peer_s);
+    std::fflush(stdout);
+    bool seen = false;
+    for (int i = 0; i < watch_peer_s * 10 && !seen; ++i) {
+      std::vector<RequestPtr> drained;
+      engine->poll_completions(8, &drained);
+      if (!peer->connected()) {
+        std::printf("   peer reported gone after %.1f s\n", i / 10.0);
+        seen = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!seen) std::printf("   peer still reported as connected\n");
+    std::fflush(stdout);
+  }
+
   std::printf("\n=== repeated queries agree ===\n");
   bool d1 = false, d2 = false;
   wr->test(&d1);
@@ -644,6 +667,10 @@ int main(int argc, char** argv) {
   /* Across hosts each side names its own RoCE address; on one host the
    * default keeps everything on loopback. */
   std::string local_ip = "127.0.0.1";
+  int watch_peer_s = 0;
+  for (int i = 1; i < argc - 1; ++i)
+    if (std::strcmp(argv[i], "--watch-peer") == 0)
+      watch_peer_s = std::atoi(argv[i + 1]);
   for (int i = 1; i < argc - 1; ++i)
     if (std::strcmp(argv[i], "--local") == 0) local_ip = argv[i + 1];
 
@@ -653,5 +680,5 @@ int main(int argc, char** argv) {
     std::printf("client needs an ip\n");
     return 2;
   }
-  return run_client(argv[2], gpu, qps, cc, local_ip);
+  return run_client(argv[2], gpu, qps, cc, local_ip, watch_peer_s);
 }

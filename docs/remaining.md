@@ -23,17 +23,19 @@ after 48 minutes.
 
 ## Not blocked, just not done
 
-**FAIL-01, peer restart and reconnect.** A peer that exits is detected and
-refused on the IPC path, `ProviderConnection::alive()` reports it, and the
-engine acts on it: every progress turn retires peers whose connection has
-gone, fails what was in flight to them with `kPeerDisconnected`, and marks
-writes as possibly having reached the target, because after a disconnect
-there is no way to find out. What is left is the RDMA provider, which still
-does not distinguish a closed control channel from an empty one -- `recv`
-returning 0 and -1 are both treated as "nothing to read" -- so on that
-transport the engine is never told. Reconnection itself is a separate
-question and may not be worth having: `remove_peer` plus `add_peer` already
-rebuilds the path, and the only thing it adds is keeping the same PeerId.
+**FAIL-01, peer restart and reconnect.** Departure is handled on both
+transports now. A provider reports it through `ProviderConnection::alive()`
+-- the IPC path when its socket closes, the RDMA path when its control
+channel reads end of file, which it used to treat the same as having nothing
+to read. Every progress turn retires peers whose connection has gone, fails
+what was in flight with `kPeerDisconnected`, and marks writes as possibly
+having reached the target, because after a disconnect there is no way to find
+out. Measured on real RDMA: a client notices a departed peer 0.2 s after it
+exits, which is the polling interval.
+
+Reconnection itself is what remains, and it may not be worth having:
+`remove_peer` plus `add_peer` already rebuilds the path, and the only thing
+reconnection adds is keeping the same PeerId across it.
 
 **CC-02, an adaptive controller that meets a target.** TIMELY is implemented
 and runs over a real fabric, where its window closes on measured delay. What
