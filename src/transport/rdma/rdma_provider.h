@@ -46,12 +46,14 @@ struct RdmaConfig {
   /* Queue pairs per connection. More of them raises the number of requests in
    * flight, not the number of network paths -- the two are often confused.
    *
-   * Four by default, from a sweep across two machines on RoCE: one queue pair
-   * put a 1 MiB write at 212 us, four at 98, and eight at 98 as well. On a
-   * loopback the same sweep shows nothing at all, which is why this was set
-   * to one for as long as loopback was the only measurement available. One
-   * stays supported, and is the baseline every measurement compares against. */
-  uint32_t qp_per_conn = 4;
+   * One by default, because more has never been measured to help. A sweep
+   * across two machines appeared to show four being twice as fast, and that
+   * was an artefact of running every one-queue-pair configuration before
+   * every four-queue-pair one: the first group paid a cold start the second
+   * did not. Re-measured in alternating order, six runs landed between 97.8
+   * and 98.2 us regardless -- and that agrees with the loopback result this
+   * default was briefly changed away from. */
+  uint32_t qp_per_conn = 1;
   /* Signal one work request in every N. Completions are the only way posted
    * entries are reclaimed, so a period that leaves none signalled would fill
    * the queue and stall it permanently. */
