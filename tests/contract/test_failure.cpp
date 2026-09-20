@@ -209,3 +209,93 @@ HUX_TEST(an_invalidation_for_another_generation_is_ignored) {
 
   CHECK_EQ(f.remote->valid(), true);
 }
+
+HUX_TEST(a_departed_peer_fails_what_was_in_flight_to_it) {
+  /* A peer that exits between transfers leaves nothing to fail on its own:
+   * the request was already submitted and its completions are simply never
+   * coming. Without the engine noticing the connection has gone, it waits
+   * for ever. */
+  MockConfig cfg;
+  cfg.never_complete = true;
+  auto provider = std::make_shared<MockProvider>(cfg);
+  EngineConfig ecfg;
+  ecfg.progress = ProgressMode::kExplicit;
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(ecfg, nullptr, provider, &engine), Status::kOk);
+
+  std::vector<uint8_t> buf(8192, 0);
+  MemoryRegionPtr local;
+  CHECK_STATUS(engine->register_memory(buf.data(), buf.size(),
+                                       AccessFlags::kRemoteRead, &local),
+               Status::kOk);
+  std::vector<uint8_t> desc;
+  CHECK_STATUS(local->export_descriptor(&desc), Status::kOk);
+
+  std::vector<uint8_t> meta;
+  CHECK_STATUS(engine->local_metadata(&meta), Status::kOk);
+  PeerPtr peer;
+  CHECK_STATUS(engine->add_peer(meta, &peer), Status::kOk);
+  RemoteRegionPtr remote;
+  CHECK_STATUS(peer->import_region(desc, &remote), Status::kOk);
+
+  RegionView lv, rv;
+  CHECK_STATUS(local->view(0, 4096, &lv), Status::kOk);
+  CHECK_STATUS(remote->view(0, 4096, &rv), Status::kOk);
+
+  RequestPtr req;
+  CHECK_STATUS(engine->read(peer.get(), lv, rv, {}, &req), Status::kOk);
+  bool done = false;
+  req->test(&done);
+  CHECK(!done);
+  CHECK(peer->connected());
+
+  /* The peer goes. Nothing about the request changes by itself. */
+  provider->retire_connections();
+  std::vector<RequestPtr> finished;
+  engine->poll_completions(8, &finished);
+
+  req->test(&done);
+  CHECK(done);
+  CHECK_STATUS(req->error().status, Status::kPeerDisconnected);
+  CHECK(!peer->connected());
+}
+
+HUX_TEST(a_departed_peer_says_a_write_may_have_landed) {
+  /* Whether a write already posted reached the peer cannot be known after a
+   * disconnect, and a target owner has to be told that rather than left to
+   * assume either way. */
+  MockConfig cfg;
+  cfg.never_complete = true;
+  auto provider = std::make_shared<MockProvider>(cfg);
+  EngineConfig ecfg;
+  ecfg.progress = ProgressMode::kExplicit;
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(ecfg, nullptr, provider, &engine), Status::kOk);
+
+  std::vector<uint8_t> buf(8192, 0);
+  MemoryRegionPtr local;
+  CHECK_STATUS(engine->register_memory(buf.data(), buf.size(),
+                                       AccessFlags::kRemoteWrite, &local),
+               Status::kOk);
+  std::vector<uint8_t> desc;
+  CHECK_STATUS(local->export_descriptor(&desc), Status::kOk);
+  std::vector<uint8_t> meta;
+  CHECK_STATUS(engine->local_metadata(&meta), Status::kOk);
+  PeerPtr peer;
+  CHECK_STATUS(engine->add_peer(meta, &peer), Status::kOk);
+  RemoteRegionPtr remote;
+  CHECK_STATUS(peer->import_region(desc, &remote), Status::kOk);
+
+  RegionView lv, rv;
+  CHECK_STATUS(local->view(0, 4096, &lv), Status::kOk);
+  CHECK_STATUS(remote->view(0, 4096, &rv), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(engine->write(peer.get(), lv, rv, {}, &req), Status::kOk);
+
+  provider->retire_connections();
+  std::vector<RequestPtr> finished;
+  engine->poll_completions(8, &finished);
+
+  CHECK_STATUS(req->error().status, Status::kPeerDisconnected);
+  CHECK(req->error().may_have_modified_target);
+}

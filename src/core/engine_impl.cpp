@@ -954,10 +954,68 @@ Status EngineImpl::poll_ready_events(uint32_t max_items,
   return Status::kOk;
 }
 
+void EngineImpl::reap_departed_peers() {
+  std::vector<std::shared_ptr<PeerImpl>> gone;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto& kv : peers_) {
+      auto& p = kv.second;
+      if (!p->connected()) continue;
+      ProviderConnection* c = p->conn();
+      /* Only a provider can see its channel close, and it says so here. */
+      if (c != nullptr && !c->alive()) gone.push_back(p);
+    }
+  }
+  if (gone.empty()) return;
+
+  for (auto& p : gone) {
+    /* The epoch moves first, so nothing new is admitted onto a connection
+     * that is no longer there. */
+    p->bump_epoch();
+
+    std::vector<RequestImplPtr> stranded;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      for (auto it = inflight_.begin(); it != inflight_.end();) {
+        if (it->second->connection() == p->conn_ptr()) {
+          stranded.push_back(it->second);
+          it = inflight_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+
+    for (auto& req : stranded) {
+      ErrorInfo e;
+      e.status = Status::kPeerDisconnected;
+      e.provider = p->provider() != nullptr ? p->provider()->caps().name : "";
+      e.peer_id = p->id();
+      /* A write already posted may or may not have reached the peer, and
+       * after a disconnect there is no way to find out. Saying so is the
+       * whole point of the flag. */
+      e.may_have_modified_target = req->kind() == SubOp::Kind::kWrite;
+      e.detail = "peer disconnected while the request was in flight";
+      req->seal_accepted();
+      req->fail(e);
+      {
+        std::lock_guard<std::mutex> g(mu_);
+        completed_.push_back(req);
+      }
+      std::lock_guard<std::mutex> g(stats_mu_);
+      ++stats_.requests_failed;
+    }
+  }
+}
+
 Status EngineImpl::progress() {
   /* One scheduling pass first, so a request that has become ready is offered
    * in this same call rather than a later one. */
   drain_pending();
+
+  /* Before anything is polled: a connection that has gone cannot produce the
+   * completions the requests on it are waiting for. */
+  reap_departed_peers();
 
   /* Every transport in turn. A peer next door and a peer on another machine
    * are reached over different ones, and a control message left unread on

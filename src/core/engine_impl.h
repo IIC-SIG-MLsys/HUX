@@ -155,6 +155,11 @@ class EngineImpl : public Engine {
   std::shared_ptr<MemoryRegionImpl> find_region(RegionId id) const;
   std::shared_ptr<RemoteRegionImpl> find_remote(RegionId id) const;
   void progress_loop();
+  /* Notices peers whose connection has gone and settles what was in flight to
+   * them. A peer that exits between transfers leaves nothing to fail on its
+   * own, so without this a request submitted afterwards waits for completions
+   * that are never coming. */
+  void reap_departed_peers();
 
   /* Chooses the provider for a peer from where that peer is. Returns null
    * when nothing here can reach it, which is a refusal, not a fallback: a

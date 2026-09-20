@@ -7,6 +7,7 @@
 #ifndef HUX_TRANSPORT_MOCK_PROVIDER_H
 #define HUX_TRANSPORT_MOCK_PROVIDER_H
 
+#include <atomic>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -42,17 +43,28 @@ struct MockConfig {
 
 class MockConnection : public ProviderConnection {
  public:
-  explicit MockConnection(MockConfig const& c) : cfg_(c) {}
+  MockConnection(MockConfig const& c, std::shared_ptr<std::atomic<bool>> live)
+      : cfg_(c), live_(std::move(live)) {}
   uint32_t qp_count() const override { return cfg_.qp_count; }
   uint32_t submit_capacity() const override { return cfg_.submit_capacity; }
+  /* Shared with the provider, so a test can retire the connection the way a
+   * peer exiting would. */
+  bool alive() const override {
+    return live_ == nullptr || live_->load(std::memory_order_acquire);
+  }
 
  private:
   MockConfig cfg_;
+  std::shared_ptr<std::atomic<bool>> live_;
 };
 
 class MockProvider : public TransportProvider {
  public:
   explicit MockProvider(MockConfig cfg = {}) : cfg_(cfg), rng_(12345) {}
+
+  /* Retires every connection this provider handed out, the way a peer
+   * exiting does. The engine has no other way to learn it. */
+  void retire_connections() { live_->store(false, std::memory_order_release); }
 
   ProviderStats stats() const override {
     std::lock_guard<std::mutex> g(mu_);
@@ -98,7 +110,7 @@ class MockProvider : public TransportProvider {
 
   Status connect(std::vector<uint8_t> const&,
                  ProviderConnectionPtr* out) override {
-    *out = std::make_shared<MockConnection>(cfg_);
+    *out = std::make_shared<MockConnection>(cfg_, live_);
     return Status::kOk;
   }
   Status disconnect(ProviderConnectionPtr) override { return Status::kOk; }
@@ -177,6 +189,10 @@ class MockProvider : public TransportProvider {
   };
 
   mutable std::mutex mu_;
+  /* Shared with every connection handed out, so retire_connections() can
+   * retire them all at once. */
+  std::shared_ptr<std::atomic<bool>> live_ =
+      std::make_shared<std::atomic<bool>>(true);
   MockConfig cfg_;
   std::mt19937 rng_;
   std::map<uint64_t, Reg> regions_;
