@@ -23,16 +23,17 @@ after 48 minutes.
 
 ## Not blocked, just not done
 
-**FAIL-01, peer restart and reconnect.** A peer that exits is now detected
-and refused on the IPC path, and `ProviderConnection::alive()` exists for a
-provider to report it. Two pieces are missing: the RDMA provider does not
-distinguish a closed control channel from an empty one (`recv` returning 0
-and -1 are both treated as "nothing to read"), and the engine does not yet
-act on `alive()` — so in-flight requests to a departed peer are not failed
-and `Peer::connected()` stays true. Reconnection itself is a separate
+**FAIL-01, peer restart and reconnect.** A peer that exits is detected and
+refused on the IPC path, `ProviderConnection::alive()` reports it, and the
+engine acts on it: every progress turn retires peers whose connection has
+gone, fails what was in flight to them with `kPeerDisconnected`, and marks
+writes as possibly having reached the target, because after a disconnect
+there is no way to find out. What is left is the RDMA provider, which still
+does not distinguish a closed control channel from an empty one -- `recv`
+returning 0 and -1 are both treated as "nothing to read" -- so on that
+transport the engine is never told. Reconnection itself is a separate
 question and may not be worth having: `remove_peer` plus `add_peer` already
-rebuilds the path, and the only thing reconnection adds is keeping the same
-PeerId.
+rebuilds the path, and the only thing it adds is keeping the same PeerId.
 
 **CC-02, an adaptive controller that meets a target.** TIMELY is implemented
 and runs over a real fabric, where its window closes on measured delay. What
