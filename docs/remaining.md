@@ -38,10 +38,18 @@ Reconnection itself is what remains, and it may not be worth having:
 reconnection adds is keeping the same PeerId across it.
 
 **CC-02, an adaptive controller that meets a target.** TIMELY is implemented
-and runs over a real fabric, where its window closes on measured delay. What
-is missing is the comparison that makes it a result: the same workload
-against off and a fixed window, with recovery behaviour, on a path where
-congestion actually occurs. An idle two-machine fabric cannot produce that.
+and runs over a real fabric. The comparison against off and a fixed window
+was attempted under four concurrent flows and could not separate them: see
+[tuning.md](tuning.md). The obstacle is that the benchmark issues one
+transfer per flow and waits, so four flows reach 36.8 Gb/s on a 100GE link
+and never create the congestion a controller exists for. Fairness is already
+1.00x with control off, since RC transport provides it.
+
+This needs a saturating load before it can be judged -- several transfers in
+flight per flow, which is part of BENCH-01, or incast from more machines
+than the pair available here. Until then the honest status is that the
+controllers are implemented and untested against each other, not that any of
+them meets a target.
 
 **TST-02, the integration matrix.** Many of its cells are covered
 individually — several queue pairs, both directions, device and host memory,
