@@ -193,6 +193,42 @@ HUX_TEST(ipc_withdrawal_stops_the_peer_using_the_region) {
   CHECK(p.dev->closed > 0);
 }
 
+HUX_TEST(ipc_refuses_once_the_peer_is_gone) {
+  /* A mapping outlives the process that exported it. When that process dies
+   * its allocation is freed, and the mapping left here points at memory the
+   * driver is free to hand to somebody else -- so a write that still
+   * "succeeds" is writing into whatever took its place. Submission has to
+   * fail once the peer is gone, and the mapping has to be dropped. */
+  Pair p;
+  CHECK(p.setup());
+
+  uint64_t alk = 0, ark = 0;
+  CHECK_STATUS(p.a->register_region(p.abuf.data(), p.abuf.size(), DeviceId{},
+                                    AccessFlags::kRemoteWrite, &alk, &ark),
+               Status::kOk);
+
+  SubOp op;
+  op.kind = SubOp::Kind::kWrite;
+  op.request = 1;
+  op.sub_id = 1;
+  op.local_addr = p.bbuf.data();
+  op.remote_addr = reinterpret_cast<uintptr_t>(p.abuf.data());
+  op.remote_key = ark;
+  op.length = 64;
+  CHECK_EQ(p.b->submit(p.cb.get(), {op}).accepted, 1u);
+  std::vector<CompletionEvent> evs;
+  p.b->poll(8, &evs);
+  CHECK_EQ(evs.size(), size_t{1});
+
+  /* The exporting side goes away, as a process exiting would close it. */
+  p.a->disconnect(p.ca);
+
+  auto r = p.b->submit(p.cb.get(), {op});
+  CHECK_EQ(r.accepted, 0u);
+  CHECK_STATUS(r.status, Status::kPeerDisconnected);
+  CHECK(p.dev->closed > 0);
+}
+
 HUX_TEST(ipc_withdrawal_times_out_rather_than_hanging) {
   /* A peer that has stopped polling never confirms. Waiting for ever would
    * hang the caller inside a deregistration; reporting a timeout says plainly

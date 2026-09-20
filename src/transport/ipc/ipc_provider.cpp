@@ -185,7 +185,8 @@ std::string IpcProvider::describe() const {
   o << "{"
     << "\"provider\":\"ipc\","
     << "\"socket\":\"" << socket_name_ << "\","
-    << "\"connected\":" << (sock_ >= 0 ? 1 : 0) << ','
+    << "\"connected\":" << (sock_ >= 0 && !peer_gone_ ? 1 : 0) << ','
+    << "\"peer_gone\":" << (peer_gone_ ? 1 : 0) << ','
     << "\"peer_process\":" << peer_identity_.process << ','
     << "\"exported_regions\":" << exported_.size() << ','
     << "\"imported_regions\":" << imported_.size() << ','
@@ -427,8 +428,25 @@ Status IpcProvider::deregister_region(uint64_t local_key) {
   return Status::kTimeout;
 }
 
+void IpcProvider::peer_is_gone_locked() {
+  if (peer_gone_) return;
+  peer_gone_ = true;
+  for (auto& kv : imported_) {
+    if (kv.second.mapped != nullptr) {
+      dev_->close_ipc(kv.second.mapped);
+      kv.second.mapped = nullptr;
+    }
+  }
+  imported_.clear();
+  if (sock_ >= 0) {
+    ::close(sock_);
+    sock_ = -1;
+  }
+}
+
 Status IpcProvider::pump(int fd) {
   if (fd < 0) return Status::kPeerDisconnected;
+  bool closed = false;
   for (;;) {
     uint8_t buf[4096];
     ssize_t k = ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
@@ -437,8 +455,10 @@ Status IpcProvider::pump(int fd) {
       inbox_.insert(inbox_.end(), buf, buf + k);
       continue;
     }
-    if (k == 0) return Status::kPeerDisconnected;
-    break; /* EAGAIN: nothing more has arrived */
+    /* Whatever already arrived is still parsed below: the peer's last frame
+     * before it went away may be the withdrawal that explains why. */
+    if (k == 0) closed = true;
+    break; /* EAGAIN, or the peer closed */
   }
 
   std::lock_guard<std::mutex> g(mu_);
@@ -487,6 +507,10 @@ Status IpcProvider::pump(int fd) {
     }
     inbox_.erase(inbox_.begin(), inbox_.begin() + 6 + len);
   }
+  if (closed) {
+    peer_is_gone_locked();
+    return Status::kPeerDisconnected;
+  }
   return Status::kOk;
 }
 
@@ -522,6 +546,13 @@ SubmitResult IpcProvider::submit(ProviderConnection* conn,
   pump(fd);
 
   std::lock_guard<std::mutex> g(mu_);
+  /* Refused rather than attempted. The mapping may still be addressable
+   * after the peer exits, so a copy into it would report success while
+   * writing into memory that is no longer the peer's. */
+  if (peer_gone_ || sock_ < 0) {
+    r.status = Status::kPeerDisconnected;
+    return r;
+  }
   for (auto const& op : ops) {
     Imported* im = nullptr;
     Status s = ensure_mapped(op.remote_key, &im);
@@ -590,7 +621,11 @@ Status IpcProvider::send_control(ProviderConnection* conn, uint16_t type,
   put_u16(&body, type);
   body.insert(body.end(), payload.begin(), payload.end());
   std::lock_guard<std::mutex> g(mu_);
-  return send_frame(sock_, kFrameControl, body);
+  if (peer_gone_) return Status::kPeerDisconnected;
+  /* A send that fails means the same thing a closed read does. */
+  Status s = send_frame(sock_, kFrameControl, body);
+  if (s == Status::kPeerDisconnected) peer_is_gone_locked();
+  return s;
 }
 
 Status IpcProvider::poll_control(uint32_t max_items,

@@ -96,6 +96,15 @@ class IpcProvider : public TransportProvider {
   };
 
   Status handshake(int fd);
+  /* The peer is gone: drop every mapping and refuse further work. Called
+   * with the lock held.
+   *
+   * Dropping the mappings is the point. A mapping outlives the process that
+   * exported it, and once that process dies its allocation is freed -- so
+   * what is left here points at memory the driver may already have given to
+   * something else. Continuing to write into it would succeed, which is the
+   * worst of the available outcomes. */
+  void peer_is_gone_locked();
   /* Reads whatever has arrived without blocking. Frames the peer sent are
    * dispatched here; data completions are not, because a copy has finished by
    * the time submit returns. */
@@ -113,6 +122,7 @@ class IpcProvider : public TransportProvider {
   int sock_ = -1; /* one peer per provider, as the RDMA side has one per conn */
   std::string socket_name_;
   std::vector<uint8_t> inbox_; /* partial frame carried between pumps */
+  bool peer_gone_ = false;
 
   ProviderStats stats_;
   std::deque<CompletionEvent> completions_;
