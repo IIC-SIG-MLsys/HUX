@@ -142,6 +142,12 @@ from the library even though CI never runs them:
 
 A pipeline that could only run these would check nothing on most changes.
 
+## State
+
+[docs/support-matrix.md](docs/support-matrix.md) is what has been measured and
+on what. [docs/remaining.md](docs/remaining.md) is what is left, and what each
+piece is blocked on — mostly machines rather than work.
+
 ## Before committing
 
 ```bash
