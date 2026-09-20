@@ -33,6 +33,25 @@
 #include "transport/cc/controller.h"
 #include "transport/rdma/rdma_provider.h"
 
+/* Device memory, when a backend was built in. Without one this benchmark
+ * measures host memory, which is a different thing from what a GPU
+ * application transfers and must not be reported as if it were the same. */
+#ifdef HUX_BENCH_CUDA
+#include <cuda_runtime.h>
+
+#include "device/cuda_backend.h"
+#endif
+#ifdef HUX_BENCH_ROCM
+#include <hip/hip_runtime.h>
+
+#include "device/rocm_backend.h"
+#endif
+#ifdef HUX_BENCH_NEUWARE
+#include <cnrt.h>
+
+#include "device/neuware_backend.h"
+#endif
+
 using namespace hux;
 using Clock = std::chrono::steady_clock;
 
@@ -51,6 +70,8 @@ struct Options {
   /* 0 leaves the engine's default. Sweeping it is how a caller finds out
    * whether tuning is worth doing at all. */
   uint64_t chunk = 0;
+  /* Negative keeps host memory; otherwise the device whose memory moves. */
+  int gpu = -1;
   std::vector<uint64_t> sizes = {4096, 65536, 1u << 20, 8u << 20};
   int iters = 50;
   int warmup = 5;
@@ -91,6 +112,42 @@ CongestionControllerPtr make_cc(std::string const& spec) {
   return make_cc_off();
 }
 
+/* Host or device memory, so the same benchmark can measure what an
+ * application would actually move. */
+struct Pool {
+  std::shared_ptr<DeviceBackend> dev;
+  std::vector<uint8_t> host;
+  void* ptr = nullptr;
+  uint64_t bytes = 0;
+
+  bool make(int gpu, uint64_t n) {
+    bytes = n;
+    if (gpu < 0) {
+      host.assign(n, 0x5a);
+      ptr = host.data();
+      return true;
+    }
+#if defined(HUX_BENCH_CUDA)
+    if (CudaBackend::create(gpu, &dev) != Status::kOk) return false;
+    if (cudaSetDevice(gpu) != cudaSuccess || cudaMalloc(&ptr, n) != cudaSuccess)
+      return false;
+#elif defined(HUX_BENCH_ROCM)
+    if (RocmBackend::create(gpu, &dev) != Status::kOk) return false;
+    if (hipSetDevice(gpu) != hipSuccess || hipMalloc(&ptr, n) != hipSuccess)
+      return false;
+#elif defined(HUX_BENCH_NEUWARE)
+    if (NeuwareBackend::create(gpu, &dev) != Status::kOk) return false;
+    if (cnrtSetDevice(gpu) != cnrtSuccess || cnrtMalloc(&ptr, n) != cnrtSuccess)
+      return false;
+#else
+    (void)gpu;
+    std::printf("built without a device backend; --gpu is unavailable\n");
+    return false;
+#endif
+    return dev != nullptr;
+  }
+};
+
 struct Summary {
   double median_us = 0;
   double p10_us = 0;
@@ -128,14 +185,19 @@ int run_server(Options const& o) {
   EngineConfig ecfg;
   ecfg.progress = ProgressMode::kExplicit;
   if (o.chunk > 0) ecfg.chunk_bytes = o.chunk;
-  std::unique_ptr<Engine> engine;
-  if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) return 1;
-
   uint64_t const biggest =
       *std::max_element(o.sizes.begin(), o.sizes.end());
-  std::vector<uint8_t> pool(biggest, 0x5a);
+  Pool pool;
+  if (!pool.make(o.gpu, biggest)) {
+    std::printf("allocation failed\n");
+    return 1;
+  }
+
+  std::unique_ptr<Engine> engine;
+  if (make_engine(ecfg, pool.dev, prov, &engine) != Status::kOk) return 1;
+
   MemoryRegionPtr region;
-  if (engine->register_memory(pool.data(), pool.size(),
+  if (engine->register_memory(pool.ptr, pool.bytes,
                               AccessFlags::kRemoteRead |
                                   AccessFlags::kRemoteWrite,
                               &region) != Status::kOk) {
@@ -157,7 +219,7 @@ int run_server(Options const& o) {
   ::bind(srv, reinterpret_cast<sockaddr*>(&a), sizeof(a));
   ::listen(srv, 1);
   std::printf("[server] ready on :%u, %llu MiB registered\n", kMetaPort,
-              (unsigned long long)(pool.size() >> 20));
+              (unsigned long long)(pool.bytes >> 20));
   int fd = ::accept(srv, nullptr, nullptr);
 
   send_blob(fd, meta.data(), static_cast<uint32_t>(meta.size()));
@@ -212,13 +274,18 @@ int run_client(std::string const& ip, Options const& o) {
   EngineConfig ecfg;
   ecfg.progress = ProgressMode::kExplicit;
   if (o.chunk > 0) ecfg.chunk_bytes = o.chunk;
-  std::unique_ptr<Engine> engine;
-  if (make_engine(ecfg, nullptr, prov, &engine) != Status::kOk) return 1;
-
   uint64_t const biggest = *std::max_element(o.sizes.begin(), o.sizes.end());
-  std::vector<uint8_t> pool(biggest, 0);
+  Pool pool;
+  if (!pool.make(o.gpu, biggest)) {
+    std::printf("allocation failed\n");
+    return 1;
+  }
+
+  std::unique_ptr<Engine> engine;
+  if (make_engine(ecfg, pool.dev, prov, &engine) != Status::kOk) return 1;
+
   MemoryRegionPtr local;
-  if (engine->register_memory(pool.data(), pool.size(),
+  if (engine->register_memory(pool.ptr, pool.bytes,
                               AccessFlags::kLocalRead | AccessFlags::kLocalWrite,
                               &local) != Status::kOk)
     return 1;
@@ -258,7 +325,7 @@ int run_client(std::string const& ip, Options const& o) {
      * 0 Gb/s, which reads as a measurement rather than as a size that was
      * never attempted -- and the usual cause is the two sides having been
      * started with different --sizes, which nothing else would reveal. */
-    if (bytes > pool.size()) {
+    if (bytes > pool.bytes) {
       std::printf("%-10llu %-8s  skipped: larger than this side's buffer\n",
                   (unsigned long long)bytes, "-");
       continue;
@@ -313,7 +380,8 @@ int run_client(std::string const& ip, Options const& o) {
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
-                " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]\n",
+                " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
+                " [--gpu N]\n",
                 argv[0]);
     return 2;
   }
@@ -324,6 +392,8 @@ int main(int argc, char** argv) {
     else if (k == "--local") o.local_ip = argv[i + 1];
     else if (k == "--chunk")
       o.chunk = std::strtoull(argv[i + 1], nullptr, 10);
+    else if (k == "--gpu")
+      o.gpu = std::atoi(argv[i + 1]);
     else if (k == "--cc") o.cc = argv[i + 1];
     else if (k == "--iters") o.iters = std::atoi(argv[i + 1]);
     else if (k == "--sizes") {

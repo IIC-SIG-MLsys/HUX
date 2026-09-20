@@ -32,55 +32,73 @@ non-existent 2.2x got measured on this same hardware a day earlier.
 
 ## Results
 
-Median of three passes; the individual runs are in parentheses.
+Device memory on both sides. Median of three passes, alternating which
+library runs first; the individual runs are in parentheses.
 
 | size | library | median | throughput | runs |
 | --- | --- | --- | --- | --- |
-| 1 MiB | HMC uhm | 310.0 us | 27.1 Gb/s | 317, 310, 305 |
-| | **HUX** | **97.6 us** | **85.9 Gb/s** | 98, 98, 98 |
-| 4 MiB | HMC uhm | 809.0 us | 41.5 Gb/s | 809, 810, 801 |
-| | **HUX** | **373.1 us** | **89.9 Gb/s** | 372, 373, 374 |
-| 16 MiB | HMC uhm | 2483.0 us | 54.1 Gb/s | 2465, 2504, 2483 |
-| | **HUX** | **1487.6 us** | **90.2 Gb/s** | 1489, 1487, 1488 |
-| 64 MiB | HMC uhm | 9417.0 us | 57.0 Gb/s | 9468, 9417, 9381 |
-| | **HUX** | **5986.5 us** | **89.7 Gb/s** | 5984, 5988, 5986 |
+| 1 MiB | HMC uhm | 310.0 us | 27.1 Gb/s | 310, 319, 300 |
+| | **HUX** | **136.4 us** | **61.5 Gb/s** | 137, 136, 136 |
+| 4 MiB | HMC uhm | 814.0 us | 41.2 Gb/s | 814, 819, 804 |
+| | **HUX** | **515.8 us** | **65.1 Gb/s** | 520, 516, 516 |
+| 16 MiB | HMC uhm | 2484.0 us | 54.0 Gb/s | 2484, 2481, 2489 |
+| | **HUX** | **2048.1 us** | **65.5 Gb/s** | 2054, 2045, 2048 |
+| 64 MiB | HMC uhm | 9469.0 us | 56.7 Gb/s | 9469, 9425, 9513 |
+| | **HUX** | **8246.0 us** | **65.1 Gb/s** | 8278, 8234, 8246 |
 
-3.18x at 1 MiB, narrowing to 1.57x at 64 MiB.
+2.27x at 1 MiB, narrowing to 1.15x at 64 MiB.
+
+### An earlier version of this page was not a fair comparison
+
+It reported 3.18x to 1.57x. Those numbers came from HUX moving **host**
+memory while HMC moved device memory, because the benchmark had no device
+backend at all -- it allocated a `std::vector` and registered that. Host
+memory is faster on this fabric: 85.9 against 61.5 Gb/s at 1 MiB. The
+benchmark takes `--gpu` now and the table above has both sides in device
+memory, which is what a GPU application transfers.
+
+Kept here rather than quietly corrected, because the mistake is the kind
+that flatters whoever makes it.
 
 ## What the shape says
 
-The multiples are less informative than the curves. HUX holds about 90 Gb/s
-from 1 MiB upward — near the 100GE line rate, and flat. HMC climbs: 27, then
-41, then 54, then 57 Gb/s. A library whose throughput rises with transfer
-size is paying a fixed cost per transfer, and the size of that cost can be
-read off directly: at 1 MiB, HMC's own best rate would predict 147 us, and it
-takes 310. Something around 160 us is spent on each transfer regardless of
-how much data it carries.
+HUX holds about 65 Gb/s from 1 MiB upward, flat. HMC climbs: 27, 41, 54,
+56.7. A throughput that rises with transfer size is paying a fixed cost per
+transfer, and its size can be read straight off the small end -- at 1 MiB
+HMC's own best rate predicts 148 us and it takes 310, so roughly 160 us goes
+somewhere that does not depend on how much data is moved.
 
-Two candidates are visible in its code, and this measurement does not
-separate them: the staging copy into `ConnBuffer`, and the control-message
-round trip (`comm->ctrlSend`) that follows each chunk. The copy is device to
-device and should be cheap; a TCP round trip on this pair is of the right
-order. Stated as an observation with a candidate explanation, not as a
+Two candidates are visible in its code and this measurement does not separate
+them: the staging copy into `ConnBuffer`, and the control-message round trip
+(`comm->ctrlSend`) after each chunk. A TCP round trip on this pair is of the
+right order. Stated as an observation with a candidate explanation, not as a
 finding.
 
-The architectural difference behind it is real either way. HMC transfers
-*through* a `ConnBuffer` — allocated with `allocatePeerableBuffer`, so device
-memory, and a real allocation the application does not get to use. HUX
-registers the application's own memory and the NIC reads it in place;
-`payload_bytes_copied` is 0 for this path, and that counter is checkable
-where a claim in a README is not.
+By 64 MiB the two are within 15% of each other, both approaching what this
+fabric gives for device memory. The architectural difference is still real --
+HMC transfers *through* a `ConnBuffer`, a device allocation the application
+does not get to use, while HUX registers the application's own memory and the
+NIC reads it in place, with `payload_bytes_copied` at 0 to check it -- but on
+a large transfer that costs bandwidth rather than latency, and the fabric is
+the limit either way.
+
+### What device memory costs here
+
+Worth recording because it is not the library's doing: the same HUX transfer
+moves host memory at 85.9-90.2 Gb/s and device memory at 61.5-65.5 Gb/s. Both
+sides of that are in-place transfers with no payload copies; the difference
+is what the adapters do when the memory belongs to a GPU.
 
 ## Where HUX does not win
 
-`read` is reported above and is **not** part of the comparison, because HMC's
-uhm mode only pushes. It is in the table because leaving it out would flatter
-this library: at 16 and 64 MiB a HUX read is slower than an HMC write (2853
-vs 2483 us, 10217 vs 9417 us).
+`read` is reported in the table and is **not** part of the comparison,
+because HMC's uhm mode only pushes. It is there because leaving it out would
+flatter this library: at 16 and 64 MiB a HUX read is slower than an HMC write
+(3108 vs 2484 us, 12414 vs 9469 us).
 
-That is the fabric rather than the library — a read makes the Hygon host's
+That is the fabric rather than the library -- a read makes the Hygon host's
 adapter read its own memory, and PCIe read bandwidth is roughly half of write
-— and HMC would pay the same on a read if it did them. But it has not been
+-- and HMC would pay the same on a read if it did them. It has not been
 measured on HMC, so it is not claimed.
 
 ## UCCL: its same-host path does not run on these GPUs

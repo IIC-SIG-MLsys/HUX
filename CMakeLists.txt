@@ -65,11 +65,7 @@ if(HUX_ENABLE_RDMA)
   target_compile_options(hux_transport_rdma PRIVATE -Wall -Wextra)
   message(STATUS "HUX: RDMA provider enabled (${IBVERBS_LIBRARY})")
 
-  # Needs two machines, so it is built but never run by ctest. Built here
-  # rather than compiled by hand, so it cannot drift from the library.
-  add_executable(hux-bench benchmarks/hux_bench.cpp)
-  target_link_libraries(hux-bench PRIVATE hux_transport_rdma)
-  target_compile_options(hux-bench PRIVATE -Wall -Wextra)
+
 endif()
 
 if(HUX_ENABLE_UCX)
@@ -214,6 +210,25 @@ endif()
 
 if(HUX_BUILD_TESTS)
   enable_testing()
+# Needs two machines, so it is built but never run by ctest. Defined here,
+# after every device backend, because it asks whether their targets exist --
+# and a target that has not been declared yet simply is not there.
+if(TARGET hux_transport_rdma)
+  # Needs two machines, so it is built but never run by ctest. Built here
+  # rather than compiled by hand, so it cannot drift from the library.
+  add_executable(hux-bench benchmarks/hux_bench.cpp)
+  target_link_libraries(hux-bench PRIVATE hux_transport_rdma)
+  target_compile_options(hux-bench PRIVATE -Wall -Wextra)
+  # So it can transfer device memory, which is what a GPU application moves.
+  foreach(vendor cuda rocm neuware)
+    string(TOUPPER ${vendor} VENDOR_UP)
+    if(TARGET hux_device_${vendor})
+      target_compile_definitions(hux-bench PRIVATE HUX_BENCH_${VENDOR_UP})
+      target_link_libraries(hux-bench PRIVATE hux_device_${vendor})
+    endif()
+  endforeach()
+endif()
+
   add_subdirectory(tests)
 endif()
 
