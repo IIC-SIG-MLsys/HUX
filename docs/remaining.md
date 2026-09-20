@@ -51,11 +51,14 @@ than the pair available here. Until then the honest status is that the
 controllers are implemented and untested against each other, not that any of
 them meets a target.
 
-**TST-02, the integration matrix.** Many of its cells are covered
-individually — several queue pairs, both directions, device and host memory,
-registration reuse, notification back-pressure, failure paths. What does not
-exist is the matrix: those dimensions crossed, with several peers and several
-threads at once.
+**TST-02, the integration matrix.** Most dimensions are covered
+individually: several queue pairs, both directions, host and device memory,
+registration reuse, notification back-pressure, failure paths, six threads
+issuing mixed sizes at once, and several peers served concurrently with the
+bytes checked per peer. What is missing is the part that needs hardware this
+pair does not have -- incast, and one request striped across several NICs --
+and the long-running crossings of those dimensions rather than one at a
+time.
 
 **BENCH-01.** `hux-bench` measures latency and bandwidth at fixed sizes
 across two machines. Trace replay, mixed long and short requests, several

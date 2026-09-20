@@ -212,3 +212,90 @@ HUX_TEST(many_registrations_do_not_accumulate) {
   CHECK(st.registration_cache_size <= cfg.registration_cache_entries);
   CHECK(provider->live_registrations() <= cfg.registration_cache_entries);
 }
+
+HUX_TEST(several_peers_at_once_do_not_get_each_others_data) {
+  /* One engine serving several peers concurrently is the shape a server
+   * takes, and nothing had covered it: every other test uses one peer, or
+   * several in sequence. What could go wrong is silent -- a request landing
+   * in the right-sized region belonging to the wrong peer reports success
+   * and corrupts somebody else's memory. */
+  constexpr int kPeers = 3;
+  constexpr uint64_t kSpan = 64 << 10;
+
+  EngineConfig cfg;
+  cfg.progress = ProgressMode::kThread;
+  MockConfig mc;
+  mc.move_data = true; /* so the bytes can be checked, not just the counters */
+
+  auto provider = std::make_shared<MockProvider>(mc);
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(cfg, nullptr, provider, &engine), Status::kOk);
+
+  /* A distinct source and destination per peer, each filled with a value
+   * only that peer should ever produce. */
+  std::vector<std::vector<uint8_t>> src(kPeers), dst(kPeers);
+  std::vector<MemoryRegionPtr> src_reg(kPeers), dst_reg(kPeers);
+  std::vector<PeerPtr> peers(kPeers);
+  std::vector<RemoteRegionPtr> remotes(kPeers);
+
+  for (int i = 0; i < kPeers; ++i) {
+    src[i].assign(kSpan, static_cast<uint8_t>(0xA0 + i));
+    dst[i].assign(kSpan, 0);
+    CHECK_STATUS(engine->register_memory(src[i].data(), kSpan,
+                                         AccessFlags::kRemoteRead, &src_reg[i]),
+                 Status::kOk);
+    CHECK_STATUS(engine->register_memory(dst[i].data(), kSpan,
+                                         AccessFlags::kLocalWrite, &dst_reg[i]),
+                 Status::kOk);
+    std::vector<uint8_t> meta, desc;
+    CHECK_STATUS(engine->local_metadata(&meta), Status::kOk);
+    CHECK_STATUS(engine->add_peer(meta, &peers[i]), Status::kOk);
+    CHECK_STATUS(src_reg[i]->export_descriptor(&desc), Status::kOk);
+    CHECK_STATUS(peers[i]->import_region(desc, &remotes[i]), Status::kOk);
+  }
+  /* Distinct peers, not the same one handed back three times. */
+  CHECK(peers[0]->id() != peers[1]->id() && peers[1]->id() != peers[2]->id());
+
+  constexpr int kPerPeer = 30;
+  std::atomic<int> submitted{0};
+  std::vector<std::thread> threads;
+  std::vector<std::vector<RequestPtr>> issued(kPeers);
+  std::mutex mu;
+
+  for (int i = 0; i < kPeers; ++i) {
+    threads.emplace_back([&, i] {
+      for (int n = 0; n < kPerPeer; ++n) {
+        RegionView lv, rv;
+        if (dst_reg[i]->view(0, kSpan, &lv) != Status::kOk) continue;
+        if (remotes[i]->view(0, kSpan, &rv) != Status::kOk) continue;
+        RequestPtr r;
+        if (engine->read(peers[i].get(), lv, rv, {}, &r) != Status::kOk)
+          continue;
+        ++submitted;
+        std::lock_guard<std::mutex> g(mu);
+        issued[i].push_back(std::move(r));
+      }
+    });
+  }
+  for (auto& t : threads) t.join();
+
+  for (int i = 0; i < kPeers; ++i)
+    for (auto& r : issued[i]) CHECK_STATUS(r->wait(10000), Status::kOk);
+
+  /* Each destination holds its own peer's value and nobody else's. */
+  for (int i = 0; i < kPeers; ++i) {
+    uint8_t const mine = static_cast<uint8_t>(0xA0 + i);
+    bool clean = true;
+    for (uint64_t b = 0; b < kSpan; ++b)
+      if (dst[i][b] != mine) {
+        clean = false;
+        break;
+      }
+    CHECK(clean);
+  }
+  CHECK_EQ(submitted.load(), kPeers * kPerPeer);
+
+  EngineStats const st = engine->stats();
+  CHECK_EQ(st.requests_succeeded, static_cast<uint64_t>(kPeers * kPerPeer));
+  CHECK_EQ(st.requests_failed, uint64_t{0});
+}
