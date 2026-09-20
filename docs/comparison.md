@@ -83,9 +83,33 @@ adapter read its own memory, and PCIe read bandwidth is roughly half of write
 — and HMC would pay the same on a read if it did them. But it has not been
 measured on HMC, so it is not claimed.
 
-## Not done
+## UCCL: its same-host path does not run on these GPUs
 
-UCCL. It is not installed on either of these two machines, and its benchmark
-needs torch; the Hygon host runs an old DTK where it may not build at all.
-The workable path is a different pair — two NVIDIA hosts, where UCCL is
-native — and that has not been set up.
+Attempted on the NVIDIA host, where UCCL is native and already built. Its IPC
+path did not run, for a reason that is not a configuration mistake:
+
+```
+GPU error engine.cc:1465: peer access is not supported between these two devices
+```
+
+UCCL's `connect_local` takes a *remote GPU index* and moves between two
+devices, so it needs CUDA peer access. NVIDIA disables that on GeForce parts,
+and these are RTX 4090s -- the same class of restriction as their lack of
+GPUDirect. Pointing both ends at one GPU instead does not help: `accept_local`
+then waits forever, its implementation being a `while (true)` poll over
+shared-memory rings with no timeout and no error path.
+
+HUX's same-host path does not need peer access. It maps the peer's allocation
+with `cudaIpcOpenMemHandle` and copies across the mapping, which is why it
+runs between two processes on a single 4090 -- 300000 verified rounds of it.
+
+That is a difference in what the two can do rather than a measurement, and it
+is claimed only for this class of GPU. Where peer access is enabled, UCCL's
+path would presumably work and would deserve a real comparison.
+
+## Still to do
+
+A cross-machine comparison against UCCL over RDMA, which is its main path.
+That needs two NVIDIA hosts; the second one available here is fully loaded --
+every GPU busy, load average 104 on 64 cores -- so it is waiting on the
+machine rather than on the work.
