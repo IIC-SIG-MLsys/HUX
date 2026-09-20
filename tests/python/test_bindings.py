@@ -212,6 +212,38 @@ def test_a_retired_region_refuses_rather_than_crashes():
         check(True, "exporting a retired region raises")
 
 
+def test_batch_registration_keeps_the_order():
+    eng, _ = setup()
+    bufs = [bytearray(4096), bytearray(8192), bytearray(2048)]
+    regs = eng.register_memory_batch(bufs)
+    check(len(regs) == 3, "one result per buffer")
+    check(all(r is not None for r in regs), "all three registered")
+    # The handles are independent: retiring one leaves the others usable.
+    eng.deregister_memory(regs[0])
+    check(regs[1].descriptor() is not None, "the others still export")
+
+
+def test_a_notification_comes_back_with_its_payload():
+    """Sending succeeds as soon as the bytes leave, which says nothing about
+    the peer having them. What the request waits on is the acknowledgement."""
+    eng, _ = setup()
+    peer = eng.add_peer(eng.local_metadata())
+    req = eng.notify(peer, b"hello from python")
+    eng.progress()
+    notes = eng.poll_notifications()
+    check(len(notes) == 1, "one notification arrived")
+    check(notes[0]["payload"] == b"hello from python", "payload survived")
+    check(isinstance(notes[0]["id"], int), "it carries an id")
+
+
+def test_removing_a_peer_disconnects_it():
+    eng, _ = setup()
+    peer = eng.add_peer(eng.local_metadata())
+    check(peer.connected, "connected to begin with")
+    eng.remove_peer(peer)
+    check(not peer.connected, "not connected afterwards")
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -223,6 +255,9 @@ def main():
         test_peer_says_which_path_it_got,
         test_deregistering_lets_the_registration_go,
         test_a_retired_region_refuses_rather_than_crashes,
+        test_batch_registration_keeps_the_order,
+        test_a_notification_comes_back_with_its_payload,
+        test_removing_a_peer_disconnects_it,
     ]:
         print(f"{fn.__name__}:")
         fn()

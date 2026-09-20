@@ -62,6 +62,17 @@ uint16_t g_port = 18516;
  * argued about. */
 bool g_sync_after_fill = false;
 
+/* Unconditional, for the diagnostic path below. */
+void device_barrier_always() {
+#if defined(HUX_LOOPBACK_CUDA)
+  cudaDeviceSynchronize();
+#elif defined(HUX_LOOPBACK_ROCM)
+  hipDeviceSynchronize();
+#elif defined(HUX_LOOPBACK_NEUWARE)
+  cnrtSyncDevice();
+#endif
+}
+
 void device_barrier() {
   if (!g_sync_after_fill) return;
 #if defined(HUX_LOOPBACK_CUDA)
@@ -117,6 +128,12 @@ struct Buffer {
     uint8_t got = 0;
     uint8_t want = 0;
     bool looks_like_stale = false; /* still the other pattern */
+    /* The same bytes, read a second time without touching anything. This is
+     * what separates the two explanations: if they are right now, nothing
+     * was lost and the copy had simply not landed when it reported that it
+     * had; if they are still wrong, the data never arrived at all. */
+    uint64_t count_on_reread = 0;
+    uint64_t count_after_sync = 0;
   };
   Damage inspect(uint8_t seed, uint8_t previous) const {
     Damage d;
@@ -137,6 +154,19 @@ struct Buffer {
       if (scratch[i] == before[i]) ++stale;
     }
     d.looks_like_stale = d.count > 0 && stale == d.count;
+    if (d.count == 0) return d;
+
+    reread.resize(kBytes);
+    dev->copy(reread.data(), ptr, kBytes);
+    for (uint64_t i = 0; i < kBytes; ++i)
+      if (reread[i] != want[i]) ++d.count_on_reread;
+
+    /* And once more behind a full device barrier, which settles whether any
+     * work was still outstanding. */
+    device_barrier_always();
+    dev->copy(reread.data(), ptr, kBytes);
+    for (uint64_t i = 0; i < kBytes; ++i)
+      if (reread[i] != want[i]) ++d.count_after_sync;
     return d;
   }
   /* Where the first wrong byte is, or -1. A soak run reporting only that
@@ -157,6 +187,7 @@ struct Buffer {
 
   mutable std::map<uint8_t, std::vector<uint8_t>> patterns;
   mutable std::vector<uint8_t> scratch;
+  mutable std::vector<uint8_t> reread;
 };
 
 bool make_buffer(int gpu, Buffer* out) {
@@ -535,6 +566,14 @@ int run_client(int gpu, uint64_t loops) {
                                    "-- the read never covered it"
                                  : "not the previous contents -- something "
                                    "else landed there");
+          std::printf(
+              "     re-read immediately: %llu still wrong;"
+              " after a device barrier: %llu still wrong  -> %s\n",
+              (unsigned long long)d.count_on_reread,
+              (unsigned long long)d.count_after_sync,
+              d.count_after_sync == 0
+                  ? "the bytes arrive late; nothing was lost"
+                  : "the bytes never arrive; the copy really is short");
           std::fflush(stdout);
         }
       }

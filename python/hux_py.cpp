@@ -106,6 +106,7 @@ class PyPeer {
  public:
   explicit PyPeer(PeerPtr p) : peer_(std::move(p)) {}
   Peer* get() const { return peer_.get(); }
+  PeerPtr shared() const { return peer_; }
   uint64_t id() const { return peer_->id(); }
   uint32_t epoch() const { return peer_->epoch(); }
   bool connected() const { return peer_->connected(); }
@@ -290,6 +291,130 @@ class PyEngine {
 
   std::string describe() const { return engine_->describe(); }
 
+  void remove_peer(std::shared_ptr<PyPeer> peer) {
+    if (peer == nullptr) return;
+    PeerPtr p = peer->shared();
+    nb::gil_scoped_release release;
+    engine_->remove_peer(std::move(p));
+  }
+
+  /* One turn of the progress engine, for the explicit mode. Releasing the
+   * GIL matters here: this is where submission, completion and control
+   * traffic actually happen, and holding it would stop every other Python
+   * thread for the duration. */
+  void progress() {
+    nb::gil_scoped_release release;
+    engine_->progress();
+  }
+
+  /* An application message to a peer, independent of any transfer. The
+   * request it returns completes when the peer acknowledges it, not when the
+   * bytes leave -- which is the only version of "delivered" worth waiting
+   * on. */
+  std::shared_ptr<PyRequest> notify(PyPeer& peer, nb::bytes const& payload) {
+    std::vector<uint8_t> p(payload.c_str(), payload.c_str() + payload.size());
+    RequestPtr req;
+    {
+      nb::gil_scoped_release release;
+      raise_on_error(engine_->notify(peer.get(), p, &req), "notify");
+    }
+    return std::make_shared<PyRequest>(std::move(req));
+  }
+
+  nb::list poll_notifications(uint32_t max_items) {
+    std::vector<Notification> notes;
+    {
+      nb::gil_scoped_release release;
+      engine_->poll_notifications(max_items, &notes);
+    }
+    nb::list out;
+    for (auto const& n : notes) {
+      nb::dict d;
+      d["peer"] = n.peer;
+      d["id"] = n.id;
+      d["related_request"] = n.related_request;
+      d["payload"] = nb::bytes(
+          reinterpret_cast<char const*>(n.payload.data()), n.payload.size());
+      out.append(d);
+    }
+    return out;
+  }
+
+  /* What a peer wrote here, and exactly which bytes. A target owner needs
+   * the span before it can schedule anything that consumes the data. */
+  nb::list poll_ready_events(uint32_t max_items) {
+    std::vector<ReadyEventPtr> events;
+    {
+      nb::gil_scoped_release release;
+      engine_->poll_ready_events(max_items, &events);
+    }
+    nb::list out;
+    for (auto const& e : events) {
+      if (e == nullptr) continue;
+      nb::dict d;
+      d["request"] = e->request();
+      d["peer"] = e->peer();
+      d["region"] = e->region();
+      d["generation"] = e->generation();
+      d["offset"] = e->span().offset;
+      d["length"] = e->span().length;
+      out.append(d);
+    }
+    return out;
+  }
+
+  /* The same registration, for many buffers in one call. A failure on one
+   * item does not lose the others: the list has a Region where it worked and
+   * None where it did not, in the order given. */
+  nb::list register_memory_batch(nb::sequence objs, bool remote_read = true,
+                                 bool remote_write = true) {
+    std::vector<Py_buffer> views;
+    std::vector<void*> addrs;
+    std::vector<uint64_t> lengths;
+    for (auto item : objs) {
+      Py_buffer v;
+      nb::object o = nb::borrow(item);
+      if (PyObject_GetBuffer(o.ptr(), &v, PyBUF_SIMPLE | PyBUF_WRITABLE) != 0) {
+        PyErr_Clear();
+        if (PyObject_GetBuffer(o.ptr(), &v, PyBUF_SIMPLE) != 0) {
+          for (auto& held : views) PyBuffer_Release(&held);
+          throw std::invalid_argument(
+              "an object does not support the buffer protocol");
+        }
+      }
+      views.push_back(v);
+      addrs.push_back(v.buf);
+      lengths.push_back(static_cast<uint64_t>(v.len));
+    }
+
+    AccessFlags access = AccessFlags::kLocalRead | AccessFlags::kLocalWrite;
+    if (remote_read) access = access | AccessFlags::kRemoteRead;
+    if (remote_write) access = access | AccessFlags::kRemoteWrite;
+
+    std::vector<RegistrationResult> results;
+    Status s = engine_->register_memory_batch(addrs, lengths, access, &results);
+    if (s != Status::kOk || results.size() != views.size()) {
+      for (auto& held : views) PyBuffer_Release(&held);
+      raise_on_error(s == Status::kOk ? Status::kInternal : s,
+                     "register_memory_batch");
+    }
+
+    nb::list out;
+    for (size_t i = 0; i < results.size(); ++i) {
+      if (results[i].status != Status::kOk || results[i].region == nullptr) {
+        /* Released here: nothing will hold this buffer, and leaving it
+         * exported would pin the caller's object for the life of the
+         * process. */
+        PyBuffer_Release(&views[i]);
+        out.append(nb::none());
+        continue;
+      }
+      out.append(
+          nb::cast(std::make_shared<PyRegion>(results[i].region, views[i])));
+    }
+    return out;
+  }
+
   /* Stops new transfers against this region and lets the engine go of it.
    * The registration itself survives while anything still references it --
    * another handle, or the reuse cache -- which is what
@@ -449,6 +574,20 @@ NB_MODULE(hux, m) {
                    &PyRequest::may_have_modified_target);
 
   nb::class_<PyEngine>(m, "Engine")
+      .def("register_memory_batch", &PyEngine::register_memory_batch,
+           nb::arg("buffers"), nb::arg("remote_read") = true,
+           nb::arg("remote_write") = true,
+           "Register several buffers; None where one failed.")
+      .def("remove_peer", &PyEngine::remove_peer, nb::arg("peer"))
+      .def("progress", &PyEngine::progress,
+           "One turn of the progress engine, for the explicit mode.")
+      .def("notify", &PyEngine::notify, nb::arg("peer"), nb::arg("payload"),
+           "Send an application message; completes on the peer's"
+           " acknowledgement.")
+      .def("poll_notifications", &PyEngine::poll_notifications,
+           nb::arg("max_items") = 32)
+      .def("poll_ready_events", &PyEngine::poll_ready_events,
+           nb::arg("max_items") = 32)
       .def("register_memory", &PyEngine::register_memory, nb::arg("buffer"),
            nb::arg("remote_read") = true, nb::arg("remote_write") = true,
            "Registers an object supporting the buffer protocol. The engine "
