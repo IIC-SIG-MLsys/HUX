@@ -236,6 +236,30 @@ Status CudaBackend::copy(void* dst, void const* src, uint64_t bytes) {
     clear_sticky_error();
     return Status::kDeviceError;
   }
+  /* And then wait, because cudaMemcpy on its own does not mean the bytes have
+   * landed: device-to-device does no host-side synchronization, and a
+   * pageable host source returns once the staging copy is done. Measured:
+   * without this, a peer told "the data is ready" reads a buffer that is
+   * still partly the previous contents, roughly once in 30000 rounds. */
+  return settle();
+}
+
+Status CudaBackend::copy_nowait(void* dst, void const* src, uint64_t bytes) {
+  if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
+  if (bytes == 0) return Status::kOk;
+  if (cudaMemcpy(dst, src, static_cast<size_t>(bytes), cudaMemcpyDefault) !=
+      cudaSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
+  return Status::kOk;
+}
+
+Status CudaBackend::settle() {
+  if (cudaStreamSynchronize(nullptr) != cudaSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
   return Status::kOk;
 }
 

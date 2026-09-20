@@ -116,8 +116,15 @@ int dial_abstract(std::string const& name) {
  * lets a caller build a backlog it cannot see. */
 class IpcConnection : public ProviderConnection {
  public:
+  explicit IpcConnection(IpcProvider* owner) : owner_(owner) {}
   uint32_t qp_count() const override { return 1; }
   uint32_t submit_capacity() const override { return 1024; }
+  bool alive() const override {
+    return owner_ != nullptr && owner_->peer_alive();
+  }
+
+ private:
+  IpcProvider* owner_;
 };
 
 }  // namespace
@@ -190,7 +197,28 @@ std::string IpcProvider::describe() const {
     << "\"peer_process\":" << peer_identity_.process << ','
     << "\"exported_regions\":" << exported_.size() << ','
     << "\"imported_regions\":" << imported_.size() << ','
-    << "\"mappings_held\":" << mapped << "}";
+    << "\"mappings_held\":" << mapped << ',';
+  /* Addresses, because a mapping that resolved to the wrong allocation looks
+   * exactly like a transfer that moved nothing. */
+  o << "\"exported\":[";
+  bool first = true;
+  for (auto const& kv : exported_) {
+    if (!first) o << ',';
+    first = false;
+    o << "{\"key\":" << kv.first
+      << ",\"addr\":" << reinterpret_cast<uintptr_t>(kv.second.addr)
+      << ",\"length\":" << kv.second.length << '}';
+  }
+  o << "],\"imported\":[";
+  first = true;
+  for (auto const& kv : imported_) {
+    if (!first) o << ',';
+    first = false;
+    o << "{\"key\":" << kv.first << ",\"peer_addr\":" << kv.second.peer_addr
+      << ",\"mapped\":" << reinterpret_cast<uintptr_t>(kv.second.mapped)
+      << ",\"length\":" << kv.second.length << '}';
+  }
+  o << "]}";
   return o.str();
 }
 
@@ -260,7 +288,7 @@ Status IpcProvider::connect(std::vector<uint8_t> const& peer_metadata,
     return s;
   }
   sock_ = fd;
-  auto conn = std::make_shared<IpcConnection>();
+  auto conn = std::make_shared<IpcConnection>(this);
   conn_ = conn.get();
   publish_all(fd);
   *out = std::move(conn);
@@ -288,7 +316,7 @@ Status IpcProvider::accept(int64_t timeout_ms, ProviderConnectionPtr* out) {
         return s;
       }
       sock_ = fd;
-      auto conn = std::make_shared<IpcConnection>();
+      auto conn = std::make_shared<IpcConnection>(this);
       conn_ = conn.get();
       publish_all(fd);
       *out = std::move(conn);
@@ -553,6 +581,12 @@ SubmitResult IpcProvider::submit(ProviderConnection* conn,
     r.status = Status::kPeerDisconnected;
     return r;
   }
+
+  /* Completions are held back until the batch has settled. A completion
+   * means the bytes are in place, and the copies below do not wait
+   * individually -- one wait for the batch costs one synchronization rather
+   * than one per sub-operation, which was four times the latency here. */
+  std::vector<CompletionEvent> landed;
   for (auto const& op : ops) {
     Imported* im = nullptr;
     Status s = ensure_mapped(op.remote_key, &im);
@@ -576,7 +610,15 @@ SubmitResult IpcProvider::submit(ProviderConnection* conn,
     void* remote = static_cast<char*>(im->mapped) + offset;
     void* dst = op.kind == SubOp::Kind::kRead ? op.local_addr : remote;
     void const* src = op.kind == SubOp::Kind::kRead ? remote : op.local_addr;
-    Status cs = dev_->copy(dst, src, op.length);
+    /* A mapping that resolved to this process's own memory would make the
+     * copy a no-op, and a transfer that moved nothing is indistinguishable
+     * from one that never ran. Caught here rather than left to look like
+     * data loss. */
+    if (dst == src) {
+      r.status = Status::kInternal;
+      break;
+    }
+    Status cs = dev_->copy_nowait(dst, src, op.length);
 
     CompletionEvent ev;
     ev.request = op.request;
@@ -587,12 +629,28 @@ SubmitResult IpcProvider::submit(ProviderConnection* conn,
      * failing, which the target owner has to be told. */
     ev.may_have_modified_target =
         cs != Status::kOk && op.kind == SubOp::Kind::kWrite;
-    completions_.push_back(ev);
+    landed.push_back(ev);
     ++stats_.subops_posted;
     stats_.payload_bytes += op.length;
     /* Counted, because the mapping removes the network, not the copy. */
     if (cs == Status::kOk) stats_.payload_bytes_copied += op.length;
     ++r.accepted;
+  }
+
+  if (!landed.empty()) {
+    Status ss = dev_->settle();
+    if (ss != Status::kOk) {
+      /* Nothing in this batch can be claimed to have landed. A write may
+       * have partly reached the peer, which the target owner has to know. */
+      for (auto& ev : landed) {
+        if (ev.status != Status::kOk) continue;
+        ev.status = ss;
+        ev.bytes = 0;
+        ev.may_have_modified_target = true;
+      }
+      r.status = ss;
+    }
+    for (auto const& ev : landed) completions_.push_back(ev);
   }
   return r;
 }
@@ -654,6 +712,11 @@ Status IpcProvider::poll_peer_arrivals(uint32_t,
 }
 
 Status IpcProvider::flush(ProviderConnection*) { return Status::kOk; }
+
+bool IpcProvider::peer_alive() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return !peer_gone_ && sock_ >= 0;
+}
 
 Status IpcProvider::drain(ProviderConnection*, int64_t) {
   /* The copy has finished by the time submit returns, so there is nothing in

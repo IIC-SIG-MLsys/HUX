@@ -311,6 +311,16 @@ int run_server(int gpu) {
   for (;;) {
     if (!recv_blob(fd, &ack)) break;
     if (!ack.empty() && ack[0] == 'k') break;
+    if (!ack.empty() && ack[0] == 'd') {
+      /* The peer read something it did not expect and is asking what is
+       * actually in this buffer. Answering costs a read-back here, but it
+       * happens only after a fault and it settles where the data went:
+       * either the refill on this side never landed, or it landed and the
+       * transfer lost it. */
+      char answer = buf.verify(0x11) ? '1' : (buf.verify(0x22) ? '2' : '?');
+      send_blob(fd, &answer, 1);
+      continue;
+    }
     ++rounds;
     if (!buf.verify(0x22)) ++bad;
     buf.fill(0x11);
@@ -543,6 +553,7 @@ int run_client(int gpu, uint64_t loops) {
       /* Only now: the peer has verified what was written and put the read
        * pattern back. */
       t = tick();
+      EngineStats const before = engine->stats();
       Status rs = engine->read(peer.get(), lv, rv, {}, &r1);
       if (rs == Status::kOk) rs = drive(r1);
       if (rs != Status::kOk) {
@@ -550,12 +561,26 @@ int run_client(int gpu, uint64_t loops) {
         report("read", i, rs, -1);
       }
       us_read += since(t);
+      EngineStats const after = engine->stats();
       t = tick();
       int64_t const at = buf.first_mismatch(0x11);
       if (at >= 0) {
         ++bad_bytes;
         report("bytes", i, Status::kOk, at);
         if (bad_bytes <= 3) {
+          /* How much this one read actually asked the provider to move. A
+           * short copy and a missing sub-operation look identical in the
+           * data and completely different here. */
+          std::printf(
+              "     this read: sub-ops posted %llu completed %llu failed %llu,"
+              " payload %llu B (expected %llu B in %llu sub-ops)\n",
+              (unsigned long long)(after.subops_posted - before.subops_posted),
+              (unsigned long long)(after.subops_completed -
+                                   before.subops_completed),
+              (unsigned long long)(after.subops_failed - before.subops_failed),
+              (unsigned long long)(after.payload_bytes - before.payload_bytes),
+              (unsigned long long)kBytes,
+              (unsigned long long)(kBytes / (1u << 20)));
           auto const d = buf.inspect(0x11, 0x22);
           std::printf(
               "     damage: %llu bytes in [%lld,%lld], got 0x%02x want 0x%02x,"
@@ -574,6 +599,35 @@ int run_client(int gpu, uint64_t loops) {
               d.count_after_sync == 0
                   ? "the bytes arrive late; nothing was lost"
                   : "the bytes never arrive; the copy really is short");
+          /* And the same read again, unchanged. If it is right this time,
+           * the transfer is what went wrong; if it is wrong the same way,
+           * something about the addresses or the mapping is. */
+          /* Before re-reading anything: ask the peer what it actually has.
+           * A re-read changes this side's buffer, not the peer's, so this
+           * has to come first. */
+          send_blob(fd, "d", 1);
+          std::vector<uint8_t> answer;
+          if (recv_blob(fd, &answer) && !answer.empty()) {
+            std::printf(
+                "     the peer says its own buffer holds: %s\n",
+                answer[0] == '1'
+                    ? "0x11 -- the refill landed, so the transfer lost it"
+                : answer[0] == '2'
+                    ? "0x22 -- its refill never landed; nothing was lost here"
+                    : "neither pattern -- partially refilled");
+          }
+          std::printf("     local buffer at %llu, provider says %s\n",
+                      (unsigned long long)reinterpret_cast<uintptr_t>(buf.ptr),
+                      prov->describe().c_str());
+          RequestPtr retry;
+          Status rs2 = engine->read(peer.get(), lv, rv, {}, &retry);
+          if (rs2 == Status::kOk) rs2 = drive(retry);
+          int64_t const again = buf.first_mismatch(0x11);
+          std::printf("     re-issued the identical read: %s%s\n",
+                      rs2 != Status::kOk ? "submit/wait failed: " : "",
+                      rs2 != Status::kOk ? to_string(rs2)
+                      : again < 0        ? "correct this time"
+                                         : "wrong in the same way");
           std::fflush(stdout);
         }
       }

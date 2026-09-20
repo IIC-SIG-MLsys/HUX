@@ -99,47 +99,42 @@ which port was wrong. `ip route get <peer>` names the right one.
 | Registration reuse | mock and RDMA |
 | Python bindings | mock |
 
-## Known defect, under investigation
+## A defect the soak run found, and what it turned out to be
 
-**The same-host path loses the tail of a read, rarely, and reports success.**
-Seen four times in 300000 rounds of a soak run on one RTX 4090, 4 MiB each
-way with every round verified. The damage is always a run of bytes ending at
-the end of the buffer -- once the whole second half, once 45440 bytes -- and
-what is there is always exactly what this side wrote the round before, so the
-read did not cover the range rather than covering it with wrong data. The
-request reports success.
+**Found:** the same-host path lost part of a read and reported success, four
+times in 300000 rounds, and the damage was always bytes holding exactly what
+this side had written the round before.
 
-Two candidate explanations, and the second is the one being tested:
+**It was not lost data.** Three experiments in sequence: re-reading the bytes
+and then re-reading behind a device barrier showed they never arrive, which
+ruled out a timing artefact on this side; the sub-operation counters showed
+all four posted, completed and accounted for the full payload, which ruled
+out a dropped chunk; and finally asking the peer what its own buffer held
+answered `neither pattern -- partially refilled`. The peer was announcing
+data that had not landed yet. Nothing was ever lost in transfer.
 
-1. Sub-operations are lost between the scheduler and the provider. Against
-   it: 45440 bytes is not a multiple of anything the engine chunks by, and
-   the sub-operation counters balance.
-2. The peer's refill has not become visible across the process boundary when
-   it says it has. A synchronous copy is supposed to make that impossible,
-   which is exactly why it is worth testing rather than assuming.
+**The hole was in the contract.** `DeviceBackend::copy` returning was taken
+by everything above it to mean the bytes were in place -- a provider reports
+the sub-operation complete, the engine reports the request complete, a peer
+told so reads immediately. The vendor calls do not promise that:
+device-to-device performs no host-side synchronization, and a pageable host
+source returns once the staging copy is done. An independent probe outside
+this library confirmed the distinction: the same pattern with an explicit
+`cudaMemcpyHostToDevice` never reproduced in 200 rounds at 64 MiB, while
+`cudaMemcpyDefault` did.
 
-Two soak arms were run, identical except that one does an explicit device
-barrier after refilling. Stopped early, so this is a direction and not a
-result:
+`copy` now waits, and says so in its own documentation. `copy_nowait` plus
+`settle` exists for a caller that controls every reader until it settles;
+the IPC path uses it to pay one synchronization for a batch of
+sub-operations instead of one each, and holds the completions back until the
+batch has landed.
 
-| arm | rounds | byte faults |
-| --- | --- | --- |
-| as written | 420000 | 13 |
-| explicit barrier after refill | 120000 | 0 |
-
-At the rate the first arm shows, the second would have been expected to see
-about four. Seeing none is worth following, but the two arms ran on different
-GPUs, started at different times, and the first one ran through a period of
-other activity on the host -- and its fault rate rose when that activity did,
-which is itself consistent with a race. The barrier arm needs to reach a
-comparable number of rounds, on the same GPU, before any of this is more than
-a hypothesis with one supporting observation.
-
-Until it is settled, the same-host path should not be relied on where a
-silent partial read would matter. The network path has not shown it.
-
-To resume: `hux_soak/run.sh` and `hux_soak/run_sync.sh`, which differ only in
-`--sync` (and in GPU and port, so the two cannot touch each other).
+**What it costs.** A single 4 MiB read goes from 330 us to 1297 us on this
+host, because waiting for a copy to land on a GPU shared with another
+process means waiting for that process's turn. The 330 us was never real.
+End to end the soak run went from 7.3 to 8.5 ms per round, 16% slower, since
+the rest of a round dominates. 20000 rounds with no fault where the previous
+build failed at round 7.
 
 ## Not verified
 

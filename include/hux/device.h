@@ -103,13 +103,39 @@ class DeviceBackend {
    * a mapping of another process's memory. It is a copy and is counted as
    * one: the IPC path maps rather than transfers, so the bytes still have to
    * be moved by somebody, and a path that hid this would look zero-copy while
-   * spending the same bandwidth. */
+   * spending the same bandwidth.
+   *
+   * Returns only once the bytes are in place, and that is the whole contract.
+   * Vendor copy calls do not all promise this -- device-to-device performs no
+   * host-side synchronization, and a pageable host source returns once the
+   * staging copy is done rather than once the transfer has landed -- so an
+   * implementation has to add the wait rather than inherit it. Everything
+   * above treats the return as "done": a provider reports the sub-operation
+   * complete, the engine reports the request complete, and a peer told the
+   * data is ready reads it immediately. */
   virtual Status copy(void* dst, void const* src, uint64_t bytes) {
     (void)dst;
     (void)src;
     (void)bytes;
     return Status::kUnsupported;
   }
+
+  /* The same copy without the wait, to be followed by settle().
+   *
+   * Only for a caller that controls every reader of those bytes until it
+   * settles -- which the IPC path does, because it holds the completions
+   * back until then. It exists because waiting once for a batch costs one
+   * synchronization instead of one per sub-operation, and on a shared device
+   * that difference was measured at four times the latency.
+   *
+   * The default simply waits, so a backend that has not implemented it is
+   * slower and never wrong. */
+  virtual Status copy_nowait(void* dst, void const* src, uint64_t bytes) {
+    return copy(dst, src, bytes);
+  }
+
+  /* Waits for everything started with copy_nowait to be in place. */
+  virtual Status settle() { return Status::kOk; }
 
   /* Names an allocation for another process on this host. Default is a
    * refusal, so a backend that has not implemented it cannot be mistaken for

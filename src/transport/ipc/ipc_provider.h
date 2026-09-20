@@ -77,6 +77,9 @@ class IpcProvider : public TransportProvider {
   Status flush(ProviderConnection* conn) override;
   Status drain(ProviderConnection* conn, int64_t timeout_ms) override;
 
+  /* For this provider's connection object, which reports it upward. */
+  bool peer_alive() const;
+
  private:
   /* A region of ours, published to the peer so it can map it. */
   struct Exported {

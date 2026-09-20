@@ -32,6 +32,8 @@ class CudaBackend : public DeviceBackend {
                       uint64_t bytes) override;
 
   Status copy(void* dst, void const* src, uint64_t bytes) override;
+  Status copy_nowait(void* dst, void const* src, uint64_t bytes) override;
+  Status settle() override;
   Status export_ipc(void* addr, uint64_t length, IpcHandle* out) override;
   Status import_ipc(IpcHandle const& handle, void** out) override;
   Status close_ipc(void* mapped) override;

@@ -191,7 +191,22 @@ Status NeuwareBackend::copy(void* dst, void const* src, uint64_t bytes) {
   if (cnrtMemcpy(dst, const_cast<void*>(src), static_cast<size_t>(bytes),
                  cnrtMemcpyNoDirection) != cnrtSuccess)
     return Status::kDeviceError;
+  /* See the CUDA backend: the copy call alone does not mean the bytes have
+   * landed, and everything above this treats the return as if it did. */
+  return settle();
+}
+
+Status NeuwareBackend::copy_nowait(void* dst, void const* src, uint64_t bytes) {
+  if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
+  if (bytes == 0) return Status::kOk;
+  if (cnrtMemcpy(dst, const_cast<void*>(src), static_cast<size_t>(bytes),
+                 cnrtMemcpyNoDirection) != cnrtSuccess)
+    return Status::kDeviceError;
   return Status::kOk;
+}
+
+Status NeuwareBackend::settle() {
+  return cnrtSyncDevice() == cnrtSuccess ? Status::kOk : Status::kDeviceError;
 }
 
 Status NeuwareBackend::export_ipc(void* addr, uint64_t length, IpcHandle* out) {

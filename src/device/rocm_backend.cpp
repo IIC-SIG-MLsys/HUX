@@ -232,6 +232,27 @@ Status RocmBackend::copy(void* dst, void const* src, uint64_t bytes) {
     clear_sticky_error();
     return Status::kDeviceError;
   }
+  /* See the CUDA backend: the copy call alone does not mean the bytes have
+   * landed, and everything above this treats the return as if it did. */
+  return settle();
+}
+
+Status RocmBackend::copy_nowait(void* dst, void const* src, uint64_t bytes) {
+  if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
+  if (bytes == 0) return Status::kOk;
+  if (hipMemcpy(dst, src, static_cast<size_t>(bytes), hipMemcpyDefault) !=
+      hipSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
+  return Status::kOk;
+}
+
+Status RocmBackend::settle() {
+  if (hipStreamSynchronize(nullptr) != hipSuccess) {
+    clear_sticky_error();
+    return Status::kDeviceError;
+  }
   return Status::kOk;
 }
 

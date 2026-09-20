@@ -123,6 +123,14 @@ class ProviderConnection {
   virtual uint32_t qp_count() const = 0;
   /* Room left for WRs; core admits against this to avoid filling the SQ. */
   virtual uint32_t submit_capacity() const = 0;
+  /* Whether the peer is still there.
+   *
+   * The engine cannot learn this from a transfer failing, because a peer
+   * that exits between transfers leaves nothing to fail: the next request is
+   * simply submitted into a connection nobody is on the other end of. So the
+   * provider, which is the only layer that can see the channel close, says
+   * so here and the engine checks it on every progress turn. */
+  virtual bool alive() const { return true; }
 };
 
 using ProviderConnectionPtr = std::shared_ptr<ProviderConnection>;
