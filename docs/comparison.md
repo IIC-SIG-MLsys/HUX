@@ -131,12 +131,25 @@ A cross-machine comparison against UCCL over RDMA, which is its main path.
 What that needs was checked rather than assumed, because an earlier note here
 said it needed a particular pair of cards and that was wrong.
 
-It does not need peer access, which is what stopped the same-host comparison:
-two machines reach each other through their adapters, not through the PCIe
-fabric. It does not need a free GPU either, only room for a buffer on one --
-the endpoint takes a device index to pick the nearest adapter, and both hosts
-have several gigabytes spare on their first card. Both have `nvidia_peermem`
-loaded, so device memory can be registered with the adapter on either side.
+It does not need peer access, which is what stopped the same-host
+comparison: two machines reach each other through their adapters, not through
+the PCIe fabric.
+
+It does need a particular card, and an earlier version of this section said
+otherwise on the grounds that `nvidia_peermem` was loaded on both hosts. That
+module is necessary and not sufficient. Probed directly here, with the module
+loaded, on the same host and the same adapter:
+
+| card | `ibv_reg_mr` on device memory, 4 KiB / 1 MiB / 64 MiB |
+| --- | --- |
+| RTX 4090 | `EFAULT` at every size |
+| A40 | succeeds at every size |
+
+GPUDirect is withheld from the consumer line whatever is installed, which
+`docs/support-matrix.md` already recorded from a separate measurement. A
+comparison over device memory therefore needs the A40 on each host, not any
+spare GPU. A comparison over host memory needs no such thing, and is worth
+running on its own terms -- but the pair of hosts is the same either way.
 
 What it does need is two NVIDIA hosts on the RoCE fabric, and there are
 exactly two: the ones at .243 and .250 on 192.168.2.0/24. The other NVIDIA
