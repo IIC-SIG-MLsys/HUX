@@ -378,6 +378,12 @@ Status EngineImpl::local_metadata(std::vector<uint8_t>* out) const {
     out->push_back(v & 0xff);
     out->push_back((v >> 8) & 0xff);
   };
+  /* Named so the reader can identify this layout instead of inferring it.
+   * See Engine::kMetadataMagic. */
+  put_u16(kMetadataMagic & 0xffff);
+  put_u16((kMetadataMagic >> 16) & 0xffff);
+  put_u16(kMetadataMajor);
+  put_u16(kMetadataMinor);
   put_u16(static_cast<uint16_t>(metas.size()));
   for (auto const& m : metas) {
     put_u16(static_cast<uint16_t>(m.first.size()));
@@ -412,21 +418,37 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
   Identity peer_id;
   Locality locality = Locality::kRemote;
   std::vector<uint8_t> provider_meta = metadata;
-  /* What the peer offers, by provider name. Empty for metadata from a
-   * single-provider peer, which carries one unnamed blob. */
+  /* What the peer offers, by provider name. Empty when the blob is one
+   * provider's dialling information rather than an engine's metadata, which
+   * is how the manual tools point a client at an address by hand. */
   std::vector<std::pair<std::string, std::vector<uint8_t>>> offered;
-  if (decode_identity(metadata, 0, &peer_id) == Status::kOk) {
+
+  auto const u16_at = [&metadata](size_t i) {
+    return static_cast<uint16_t>(metadata[i] |
+                                 (uint16_t(metadata[i + 1]) << 8));
+  };
+  /* Identity, magic, major, minor: the shortest thing that can be an
+   * engine's metadata. Anything shorter, or without the magic, is taken as a
+   * provider blob. */
+  bool const is_envelope =
+      metadata.size() >= kIdentityBytes + 8 &&
+      (uint32_t(u16_at(kIdentityBytes)) |
+       (uint32_t(u16_at(kIdentityBytes + 2)) << 16)) == kMetadataMagic;
+  /* Refused rather than read as far as it goes. A major change moves fields
+   * this end would otherwise read out of a neighbour's bytes. */
+  if (is_envelope && u16_at(kIdentityBytes + 4) != kMetadataMajor)
+    return Status::kUnsupported;
+
+  if (is_envelope && decode_identity(metadata, 0, &peer_id) == Status::kOk) {
     Identity mine = local_identity();
     mine.engine = engine_id_;
     locality = locality_of(mine, peer_id);
     provider_meta.assign(metadata.begin() + kIdentityBytes, metadata.end());
 
-    size_t at = kIdentityBytes;
-    auto const u16 = [&metadata](size_t i) {
-      return static_cast<uint16_t>(metadata[i] |
-                                   (uint16_t(metadata[i + 1]) << 8));
-    };
-    if (metadata.size() >= at + 2) {
+    /* Past the identity, the magic and the version. */
+    size_t at = kIdentityBytes + 8;
+    auto const& u16 = u16_at;
+    {
       uint16_t const count = u16(at);
       at += 2;
       bool ok = true;
@@ -456,10 +478,11 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
                                                  metadata.begin() + at + mlen));
         at += mlen;
       }
-      /* Accepted only if it parses exactly. A trailing byte means this is not
-       * the layout it looked like, and guessing would dial the wrong
-       * transport with the wrong bytes. */
-      if (ok && at == metadata.size()) offered = std::move(parsed);
+      /* The magic says this is the layout, so a blob that does not parse
+       * exactly is malformed rather than something else that happens to
+       * start the same way. */
+      if (!ok || at != metadata.size()) return Status::kInvalidArgument;
+      offered = std::move(parsed);
     }
   }
 

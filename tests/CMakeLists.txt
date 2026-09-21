@@ -24,6 +24,7 @@ add_test(NAME contract COMMAND hux_contract_tests)
 if(TARGET hux_transport_rdma)
   add_executable(hux_rdma_tests
     test_main.cpp
+    contract/test_metadata_envelope.cpp
     contract/test_wire_version.cpp
     contract/test_congestion.cpp)
   target_include_directories(hux_rdma_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

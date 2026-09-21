@@ -114,6 +114,19 @@ class Engine {
   virtual Status release_cached_registrations(uint32_t* released) = 0;
 
   /* Peers. Re-adding a valid identity reuses the existing connection. */
+
+  /* The blob from `local_metadata` starts with this, so `add_peer` can tell
+   * an engine's metadata from a single provider's dialling blob by looking
+   * rather than by trying a parse and seeing whether it fits. Length-prefixed
+   * structures can parse by coincidence, and the layouts differ enough that
+   * guessing wrong dials the wrong transport with the wrong bytes.
+   *
+   * A different major is refused. A newer minor is accepted: minor changes
+   * only append fields that an older reader stops before. */
+  static constexpr uint32_t kMetadataMagic = 0x58554821; /* "!HUX" */
+  static constexpr uint16_t kMetadataMajor = 1;
+  static constexpr uint16_t kMetadataMinor = 0;
+
   virtual Status local_metadata(std::vector<uint8_t>* out) const = 0;
   virtual Status add_peer(std::vector<uint8_t> const& metadata,
                           PeerPtr* out) = 0;

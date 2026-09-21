@@ -1,7 +1,7 @@
 # What is left, and what each piece needs
 
 Against the 26 required tasks in the roadmap (the six ENV items are
-conditional and not counted). Seventeen are done. This is the rest, with what
+conditional and not counted). Eighteen are done. This is the rest, with what
 each one is actually blocked on, because most of them are not blocked on
 writing code.
 
@@ -62,8 +62,11 @@ time.
 across two machines. Trace replay, mixed long and short requests, several
 peers, a producing and consuming kernel, and the ablations are not there.
 
-**MIG-01.** `docs/migration.md` covers the mapping from the old interfaces.
-Worked examples and a compatibility statement are not written.
+**MIG-01. Done.** [migration.md](migration.md) has the object and call
+mapping, four worked examples against the real HMC signatures -- a one-off
+write, a batch, waiting for a particular stage, and telling the peer -- and a
+compatibility statement covering the four version numbers and what each
+refuses. The HUX half of every example compiles against the headers.
 
 **PY-01.** Complete except for stream and event adapters, which need a device
 backend exposed to Python — nothing in the bindings currently touches a GPU.
