@@ -14,6 +14,7 @@
  *   ./hux-bench client <ip> [--qp N] [--cc SPEC] [--sizes a,b,c] [--iters N]
  */
 #include <arpa/inet.h>
+#include <sys/resource.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -171,6 +172,20 @@ struct Pool {
   }
 };
 
+/* Processor time charged to this process, user and system together and
+ * across all its threads. Divided by the bytes moved it answers what a
+ * transport costs to run, which wall-clock throughput does not: reaching
+ * line rate on one core and reaching it on four are not the same result,
+ * and a busy-polling progress loop is exactly how the difference hides. */
+double cpu_seconds() {
+  rusage ru{};
+  if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
+  auto const secs = [](timeval const& t) {
+    return t.tv_sec + t.tv_usec / 1e6;
+  };
+  return secs(ru.ru_utime) + secs(ru.ru_stime);
+}
+
 struct Summary {
   double median_us = 0;
   double p10_us = 0;
@@ -324,8 +339,9 @@ int run_client(std::string const& ip, Options const& o) {
   if (peer->import_region(desc, &remote) != Status::kOk) return 1;
 
   std::printf("\n%s\n\n", engine->describe().c_str());
-  std::printf("%-10s %-8s %10s %10s %10s %10s %10s\n", "size", "op",
-              "median_us", "p10_us", "p90_us", "Gb/s", "rate_Gb/s");
+  std::printf("%-10s %-8s %10s %10s %10s %10s %10s %7s %10s\n", "size", "op",
+              "median_us", "p10_us", "p90_us", "Gb/s", "rate_Gb/s", "cores",
+              "cpu_s/GiB");
 
   auto one_transfer = [&](uint64_t bytes, bool write) -> double {
     RegionView lv, rv;
@@ -357,6 +373,9 @@ int run_client(std::string const& ip, Options const& o) {
    *
    * Returns the wall time as well, since with requests overlapping the
    * median no longer implies the rate. */
+  /* Set by every schedule run, read by whoever reports it. */
+  double last_cpu_seconds = 0, last_wall_seconds = 0;
+
   using Runs = std::map<uint64_t, std::vector<double>>;
   auto run_schedule = [&](std::vector<uint64_t> const& schedule, bool write,
                           int depth) -> std::pair<Runs, double> {
@@ -380,6 +399,7 @@ int run_client(std::string const& ip, Options const& o) {
     };
     std::vector<Live> live;
     size_t submitted = 0, finished = 0;
+    double const cpu0 = cpu_seconds();
     auto const start = Clock::now();
 
     while (finished < schedule.size()) {
@@ -416,6 +436,8 @@ int run_client(std::string const& ip, Options const& o) {
     }
     double const wall =
         std::chrono::duration<double>(Clock::now() - start).count();
+    last_cpu_seconds = cpu_seconds() - cpu0;
+    last_wall_seconds = wall;
     return {samples, wall};
   };
 
@@ -473,8 +495,12 @@ int run_client(std::string const& ip, Options const& o) {
                     (unsigned long long)b, alone[b].median_us, m.median_us,
                     alone[b].p99_us, m.p99_us);
       }
-      std::printf("mixed stream rate: %.2f Gb/s\n",
-                  mixed_wall > 0 ? total * 8.0 / (mixed_wall * 1e9) : 0.0);
+      std::printf("mixed stream rate: %.2f Gb/s, %.2f cores, %.3f cpu_s/GiB\n",
+                  mixed_wall > 0 ? total * 8.0 / (mixed_wall * 1e9) : 0.0,
+                  last_wall_seconds > 0 ? last_cpu_seconds / last_wall_seconds
+                                        : 0.0,
+                  total > 0 ? last_cpu_seconds / (total / double(1 << 30))
+                            : 0.0);
     }
   }
 
@@ -513,11 +539,28 @@ int run_client(std::string const& ip, Options const& o) {
        * describes nothing. */
       double const rate =
           wall > 0 ? samples.size() * bytes * 8.0 / (wall * 1e9) : 0.0;
-      std::printf("%-10llu %-8s %10.1f %10.1f %10.1f %10.2f %10.2f\n",
-                  (unsigned long long)bytes, write ? "write" : "read",
-                  sum.median_us, sum.p10_us, sum.p90_us, sum.gbps, rate);
+      /* cores: processor time over wall time, so 1.00 is one core busy for
+       * the whole run. cpu_s/GiB is the portable form, since it does not
+       * change with how fast the link happens to be. */
+      double const gib = samples.size() * bytes / double(1 << 30);
+      double const cores =
+          last_wall_seconds > 0 ? last_cpu_seconds / last_wall_seconds : 0.0;
+      std::printf(
+          "%-10llu %-8s %10.1f %10.1f %10.1f %10.2f %10.2f %7.2f %10.3f\n",
+          (unsigned long long)bytes, write ? "write" : "read", sum.median_us,
+          sum.p10_us, sum.p90_us, sum.gbps, rate, cores,
+          gib > 0 ? last_cpu_seconds / gib : 0.0);
     }
   }
+
+  /* Said plainly, because the two CPU columns are easy to read as something
+   * they are not. */
+  std::printf(
+      "\ncores is processor time over wall time: this engine polls for"
+      " completions, so\nabout 1.00 is the design rather than an overhead"
+      " to remove -- a core traded for\nlatency. cpu_s/GiB therefore falls"
+      " as the link gets faster, and comparing it\nbetween two runs at"
+      " different rates compares the rates.\n");
 
   /* Printed again at the end, because a controller's state is the result of
    * the run, not of the configuration it started with. */

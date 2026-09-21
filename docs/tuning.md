@@ -116,3 +116,21 @@ makes it **write**, and PCIe read bandwidth is roughly half of write —
 a read has to wait for completions where a write is posted. The adapters are
 PCIe Gen4 x8 and Gen3 x16 respectively, both around 126 Gb/s in theory, so
 the link width is not the limit.
+
+## What a transfer costs in processor time
+
+`hux-bench` reports two CPU figures beside each size: `cores`, which is
+processor time over wall time, and `cpu_s/GiB`.
+
+On a single flow at any size, `cores` is 1.00. That is the design and not an
+overhead waiting to be removed: both progress modes poll a completion queue,
+which trades a core for latency, and an engine that blocked instead would
+give the core back and pay an interrupt on every completion. What the figure
+establishes is the price -- one core per engine driving one peer, whether it
+is moving 65 KiB or 4 MiB.
+
+`cpu_s/GiB` follows from that rather than adding to it. A polling loop's cost
+is a function of time, so the cost per byte falls as the link gets faster:
+0.50 cpu_s/GiB on a 17 Gb/s path is the same engine as 0.09 on a 91 Gb/s one.
+It is comparable between two transports measured on the same path at the same
+rate, and meaningless between two rates.
