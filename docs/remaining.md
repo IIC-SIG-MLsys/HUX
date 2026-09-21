@@ -1,7 +1,7 @@
 # What is left, and what each piece needs
 
 Against the 26 required tasks in the roadmap (the six ENV items are
-conditional and not counted). Eighteen are done. This is the rest, with what
+conditional and not counted). Nineteen are done. This is the rest, with what
 each one is actually blocked on, because most of them are not blocked on
 writing code.
 
