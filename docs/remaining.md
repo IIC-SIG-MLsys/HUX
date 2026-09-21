@@ -1,14 +1,15 @@
 # What is left, and what each piece needs
 
 The roadmap numbers 23 required tasks, plus six conditional ENV items that
-are not counted here. Seven of the 23 are outstanding and listed below, so
-sixteen are done.
+are not counted here. Six of the 23 are outstanding and listed below, so
+seventeen are done.
 
 An earlier version of this page said nineteen of twenty-six, which was wrong
 in both halves by the same three -- the denominator was never counted from
 the roadmap and the numerator was carried along with it. Counted from the
 list: API-01, BACK-01, CC-01, COR-01, CTL-01, DEV-01, FAIL-01, MEM-01,
-MEM-02, MIG-01, NET-01, NET-02, NTF-01, SCH-01, TOP-01, TST-01.
+MEM-02, MIG-01, NET-01, NET-02, NTF-01, PY-01, SCH-01, TOP-01,
+TST-01.
 
 What is left is below, with what each one is actually blocked on, because
 most of them are not blocked on writing code.
@@ -88,8 +89,17 @@ write, a batch, waiting for a particular stage, and telling the peer -- and a
 compatibility statement covering the four version numbers and what each
 refuses. The HUX half of every example compiles against the headers.
 
-**PY-01.** Complete except for stream and event adapters, which need a device
-backend exposed to Python — nothing in the bindings currently touches a GPU.
+**PY-01. Done.** Complete, stream and event adapters included. A build with
+a device backend exposes `import_stream`, `record_event` and
+`stream_wait_event`, and every submission takes `after=[...]`, so a transfer
+can be ordered against the caller's own GPU work rather than a device-wide
+synchronise. The adapter takes a native handle as an integer, which is how
+frameworks expose one, so nothing here depends on torch.
+
+Verified against a real CUDA stream created outside the library, on both
+kinds of build: with a backend the adapters work and gate a transfer, and
+without one they raise instead of dereferencing the backend that is not
+there.
 
 ## Recommended for removal rather than implementation
 

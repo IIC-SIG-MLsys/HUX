@@ -67,15 +67,20 @@ Under construction. Application-owned memory now transfers in place over real
 RDMA, host to host and device to device, verified byte for byte in both
 directions with no buffer owned by the library anywhere on the path.
 
-In place: the public API, the completion contract, the provider contract, a
-single-QP RDMA provider, device dependencies, the write-side ready handoff,
-an engine-level control channel, acknowledged notifications, copy accounting,
-multiple queue pairs with per-queue accounting, three congestion control
-configurations, byte-quantum scheduling between requests, registration reuse,
-peer and region invalidation, Python bindings, NIC topology discovery, a mock
-backend,
-device backends for all five targets above, and a test suite that runs without
-hardware. Not yet: Python bindings, multiple NICs, and paths other than RDMA.
+In place: the public API, the completion contract, the provider contract, an
+RDMA provider with several queue pairs and per-queue accounting, a same-host
+IPC path, a same-process path, a UCX provider, selection between them by
+where the peer is, device dependencies, the write-side ready handoff, an
+engine-level control channel, acknowledged notifications, copy accounting,
+three congestion control configurations, byte-quantum scheduling between
+requests, registration reuse, peer and region invalidation, Python bindings
+including stream and event adapters, NIC topology discovery, a mock backend,
+device backends for all five targets above, and a test suite that runs
+without hardware.
+
+Not yet: one transfer striped across several NICs, incast, and the
+day-long endurance run. What each of those is waiting on is in
+[docs/remaining.md](docs/remaining.md).
 
 Control traffic runs on its own channel rather than sharing the data path's
 budget, so a stalled transfer cannot starve the message that would explain
@@ -103,6 +108,25 @@ cmake -S . -B build -DHUX_BUILD_PYTHON=ON
 cmake --build build -j
 PYTHONPATH=build python -c "import hux; print(hux.make_mock_engine().describe())"
 ```
+
+Add a device backend to those bindings, and a transfer can be ordered against
+the caller's own GPU work instead of a device-wide synchronise:
+
+```bash
+cmake -S . -B build -DHUX_BUILD_PYTHON=ON -DHUX_ENABLE_CUDA=ON
+```
+
+```python
+eng = hux.make_rdma_engine("10.0.0.1", gpu=0)
+stream = eng.import_stream(torch.cuda.current_stream().cuda_stream)
+after_my_kernel = eng.record_event(stream)
+req = eng.write(peer, local, remote, after=[after_my_kernel])
+```
+
+The adapter takes the native handle as an integer, which is how every
+framework exposes one; `hux.device_backend_available()` says whether the
+build has a backend at all, and which vendor is fixed at build time because
+their runtimes do not co-install.
 
 Backends are opt-in and off by default:
 

@@ -196,6 +196,16 @@ if(HUX_BUILD_PYTHON)
     target_link_libraries(hux_python PRIVATE hux_transport_rdma)
     target_compile_definitions(hux_python PRIVATE HUX_PY_RDMA)
   endif()
+  # A device backend, so the bindings can adapt an application's stream and
+  # order a transfer against its events. Without one nothing in Python
+  # touches a GPU and the adapters have nothing to adapt.
+  foreach(vendor cuda rocm neuware musa)
+    string(TOUPPER ${vendor} VENDOR_UP)
+    if(TARGET hux_device_${vendor})
+      target_compile_definitions(hux_python PRIVATE HUX_PY_${VENDOR_UP})
+      target_link_libraries(hux_python PRIVATE hux_device_${vendor})
+    endif()
+  endforeach()
   if(HUX_BUILD_TESTS)
     enable_testing()
     add_test(NAME python_bindings

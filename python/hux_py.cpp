@@ -29,7 +29,18 @@
 
 #include "core/factory.h"
 #include "hux/engine.h"
+#include "hux/device.h"
 #include "transport/mock/mock_provider.h"
+
+#if defined(HUX_PY_CUDA)
+#include "device/cuda_backend.h"
+#elif defined(HUX_PY_ROCM)
+#include "device/rocm_backend.h"
+#elif defined(HUX_PY_NEUWARE)
+#include "device/neuware_backend.h"
+#elif defined(HUX_PY_MUSA)
+#include "device/musa_backend.h"
+#endif
 
 #ifdef HUX_PY_RDMA
 #include "transport/cc/controller.h"
@@ -183,9 +194,42 @@ class PyRequest {
   RequestPtr req_;
 };
 
+/* An execution queue the application already owns. Adapted, not created:
+ * a transfer has to be ordered against the stream the caller's kernels run
+ * on, and a stream this library made would not be that one.
+ *
+ * Constructed from the integer a framework exposes -- torch's
+ * `torch.cuda.Stream.cuda_stream`, for instance -- because there is no
+ * portable stream object to pass, and every framework hands out the native
+ * handle as an address. */
+class PyStream {
+ public:
+  explicit PyStream(DeviceStreamPtr s) : stream_(std::move(s)) {}
+  DeviceStream* get() const { return stream_.get(); }
+
+ private:
+  DeviceStreamPtr stream_;
+};
+
+/* A point in a stream. Passing one to a transfer says the adapter may not
+ * touch the buffers until the work before it has finished, which is what
+ * makes a transfer safe to issue while a kernel is still writing its
+ * source. */
+class PyEvent {
+ public:
+  explicit PyEvent(DeviceEventPtr e) : event_(std::move(e)) {}
+  DeviceEvent* get() const { return event_.get(); }
+  DeviceEventPtr shared() const { return event_; }
+
+ private:
+  DeviceEventPtr event_;
+};
+
 class PyEngine {
  public:
-  explicit PyEngine(std::unique_ptr<Engine> e) : engine_(std::move(e)) {}
+  explicit PyEngine(std::unique_ptr<Engine> e,
+                    std::shared_ptr<DeviceBackend> dev = nullptr)
+      : engine_(std::move(e)), device_(std::move(dev)) {}
 
   /* Takes anything supporting the buffer protocol -- numpy arrays, torch
    * tensors, bytearrays. The buffer must be contiguous: a strided view has
@@ -232,39 +276,42 @@ class PyEngine {
     return std::make_shared<PyPeer>(std::move(p));
   }
 
-  std::shared_ptr<PyRequest> read(PyPeer& peer, PyRegion& local,
-                                  PyRemoteRegion& remote, uint64_t local_offset,
-                                  uint64_t remote_offset, uint64_t length) {
+  std::shared_ptr<PyRequest> read(
+      PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
+      uint64_t local_offset, uint64_t remote_offset, uint64_t length,
+      std::vector<std::shared_ptr<PyEvent>> const& after) {
     return submit(peer, local, remote, local_offset, remote_offset, length,
-                  false);
+                  false, after);
   }
 
-  std::shared_ptr<PyRequest> write(PyPeer& peer, PyRegion& local,
-                                   PyRemoteRegion& remote,
-                                   uint64_t local_offset,
-                                   uint64_t remote_offset, uint64_t length) {
+  std::shared_ptr<PyRequest> write(
+      PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
+      uint64_t local_offset, uint64_t remote_offset, uint64_t length,
+      std::vector<std::shared_ptr<PyEvent>> const& after) {
     return submit(peer, local, remote, local_offset, remote_offset, length,
-                  true);
+                  true, after);
   }
 
   /* One call, many segments: the point of a batch is that the crossing into
    * C++ happens once, not once per segment. */
-  std::shared_ptr<PyRequest> readv(PyPeer& peer, PyRegion& local,
-                                   PyRemoteRegion& remote,
-                                   std::vector<uint64_t> const& local_offsets,
-                                   std::vector<uint64_t> const& remote_offsets,
-                                   std::vector<uint64_t> const& lengths) {
+  std::shared_ptr<PyRequest> readv(
+      PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
+      std::vector<uint64_t> const& local_offsets,
+      std::vector<uint64_t> const& remote_offsets,
+      std::vector<uint64_t> const& lengths,
+      std::vector<std::shared_ptr<PyEvent>> const& after) {
     return submitv(peer, local, remote, local_offsets, remote_offsets, lengths,
-                   false);
+                   false, after);
   }
 
-  std::shared_ptr<PyRequest> writev(PyPeer& peer, PyRegion& local,
-                                    PyRemoteRegion& remote,
-                                    std::vector<uint64_t> const& local_offsets,
-                                    std::vector<uint64_t> const& remote_offsets,
-                                    std::vector<uint64_t> const& lengths) {
+  std::shared_ptr<PyRequest> writev(
+      PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
+      std::vector<uint64_t> const& local_offsets,
+      std::vector<uint64_t> const& remote_offsets,
+      std::vector<uint64_t> const& lengths,
+      std::vector<std::shared_ptr<PyEvent>> const& after) {
     return submitv(peer, local, remote, local_offsets, remote_offsets, lengths,
-                   true);
+                   true, after);
   }
 
   /* Returns how many requests finished. Completions are collected here rather
@@ -290,6 +337,39 @@ class PyEngine {
   }
 
   std::string describe() const { return engine_->describe(); }
+
+  /* Adapt the caller's stream. The argument is the native handle as an
+   * integer, which is how every framework exposes it. */
+  std::shared_ptr<PyStream> import_stream(uintptr_t native) {
+    if (device_ == nullptr)
+      throw std::runtime_error("no device backend in this build");
+    DeviceStreamPtr s;
+    raise_on_error(
+        device_->import_stream(reinterpret_cast<void*>(native), &s),
+        "import_stream");
+    return std::make_shared<PyStream>(std::move(s));
+  }
+
+  /* A point in that stream, to hand to a transfer as something it must wait
+   * for. */
+  std::shared_ptr<PyEvent> record_event(PyStream& stream) {
+    if (device_ == nullptr)
+      throw std::runtime_error("no device backend in this build");
+    DeviceEventPtr e;
+    raise_on_error(engine_->record_event(stream.get(), &e), "record_event");
+    return std::make_shared<PyEvent>(std::move(e));
+  }
+
+  /* The other direction: the caller's later kernels wait for something the
+   * transfer produced, without synchronising the whole device. */
+  void stream_wait_event(PyStream& stream, PyEvent& event) {
+    if (device_ == nullptr)
+      throw std::runtime_error("no device backend in this build");
+    raise_on_error(device_->stream_wait_event(stream.get(), event.get()),
+                   "stream_wait_event");
+  }
+
+  bool has_device() const { return device_ != nullptr; }
 
   void remove_peer(std::shared_ptr<PyPeer> peer) {
     if (peer == nullptr) return;
@@ -460,19 +540,27 @@ class PyEngine {
   }
 
  private:
-  std::shared_ptr<PyRequest> submit(PyPeer& peer, PyRegion& local,
-                                    PyRemoteRegion& remote,
-                                    uint64_t local_offset,
-                                    uint64_t remote_offset, uint64_t length,
-                                    bool is_write) {
+  static TransferOptions options_from(
+      std::vector<std::shared_ptr<PyEvent>> const& after) {
+    TransferOptions o;
+    for (auto const& e : after)
+      if (e != nullptr) o.after.push_back(e->shared());
+    return o;
+  }
+
+  std::shared_ptr<PyRequest> submit(
+      PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
+      uint64_t local_offset, uint64_t remote_offset, uint64_t length,
+      bool is_write, std::vector<std::shared_ptr<PyEvent>> const& after) {
     RegionView lv, rv;
     raise_on_error(local.region()->view(local_offset, length, &lv), "local view");
     raise_on_error(remote.remote()->view(remote_offset, length, &rv),
                    "remote view");
+    TransferOptions const opts = options_from(after);
     RequestPtr r;
     Status s = is_write
-                   ? engine_->write(peer.get(), lv, rv, {}, &r)
-                   : engine_->read(peer.get(), lv, rv, {}, &r);
+                   ? engine_->write(peer.get(), lv, rv, opts, &r)
+                   : engine_->read(peer.get(), lv, rv, opts, &r);
     raise_on_error(s, is_write ? "write" : "read");
     return std::make_shared<PyRequest>(std::move(r));
   }
@@ -482,7 +570,9 @@ class PyEngine {
                                      std::vector<uint64_t> const& lo,
                                      std::vector<uint64_t> const& ro,
                                      std::vector<uint64_t> const& len,
-                                     bool is_write) {
+                                     bool is_write,
+                                     std::vector<std::shared_ptr<PyEvent>> const&
+                                         after) {
     if (lo.size() != ro.size() || lo.size() != len.size())
       throw std::invalid_argument(
           "local_offsets, remote_offsets and lengths must have equal length");
@@ -492,32 +582,65 @@ class PyEngine {
       raise_on_error(remote.remote()->view(ro[i], len[i], &rvs[i]),
                      "remote view");
     }
+    TransferOptions const opts = options_from(after);
     RequestPtr r;
-    Status s = is_write ? engine_->writev(peer.get(), lvs, rvs, {}, &r)
-                        : engine_->readv(peer.get(), lvs, rvs, {}, &r);
+    Status s = is_write ? engine_->writev(peer.get(), lvs, rvs, opts, &r)
+                        : engine_->readv(peer.get(), lvs, rvs, opts, &r);
     raise_on_error(s, is_write ? "writev" : "readv");
     return std::make_shared<PyRequest>(std::move(r));
   }
 
   std::unique_ptr<Engine> engine_;
+  /* Outlives the engine's use of it: the engine holds a raw pointer. */
+  std::shared_ptr<DeviceBackend> device_;
 };
 
-std::shared_ptr<PyEngine> make_mock_engine(bool move_data) {
+/* Whichever backend was compiled in. Only one can be, because the vendor
+ * runtimes are not co-installable in one process, so this is a choice made
+ * at build time rather than at run time. */
+Status make_device_backend(int index, std::shared_ptr<DeviceBackend>* out) {
+#if defined(HUX_PY_CUDA)
+  return CudaBackend::create(index, out);
+#elif defined(HUX_PY_ROCM)
+  return RocmBackend::create(index, out);
+#elif defined(HUX_PY_NEUWARE)
+  return NeuwareBackend::create(index, out);
+#elif defined(HUX_PY_MUSA)
+  return MusaBackend::create(index, out);
+#else
+  (void)index;
+  (void)out;
+  return Status::kUnsupported;
+#endif
+}
+
+bool device_backend_available() {
+#if defined(HUX_PY_CUDA) || defined(HUX_PY_ROCM) || defined(HUX_PY_NEUWARE) || \
+    defined(HUX_PY_MUSA)
+  return true;
+#else
+  return false;
+#endif
+}
+
+std::shared_ptr<PyEngine> make_mock_engine(bool move_data, int gpu) {
   EngineConfig cfg;
   cfg.progress = ProgressMode::kExplicit;
   MockConfig mc;
   mc.move_data = move_data;
   auto provider = std::make_shared<MockProvider>(mc);
+  std::shared_ptr<DeviceBackend> dev;
+  if (gpu >= 0) raise_on_error(make_device_backend(gpu, &dev), "device");
   std::unique_ptr<Engine> e;
-  raise_on_error(make_engine(cfg, nullptr, provider, &e), "make_engine");
-  return std::make_shared<PyEngine>(std::move(e));
+  raise_on_error(make_engine(cfg, dev, provider, &e), "make_engine");
+  return std::make_shared<PyEngine>(std::move(e), std::move(dev));
 }
 
 #ifdef HUX_PY_RDMA
 std::shared_ptr<PyEngine> make_rdma_engine(std::string const& advertise_ip,
                                            uint32_t qp_per_conn,
                                            std::string const& cc_spec,
-                                           uint64_t chunk_bytes) {
+                                           uint64_t chunk_bytes, int gpu) {
   RdmaConfig rc;
   rc.advertise_ip = advertise_ip;
   rc.qp_per_conn = qp_per_conn;
@@ -534,9 +657,11 @@ std::shared_ptr<PyEngine> make_rdma_engine(std::string const& advertise_ip,
   EngineConfig cfg;
   cfg.progress = ProgressMode::kExplicit;
   if (chunk_bytes > 0) cfg.chunk_bytes = chunk_bytes;
+  std::shared_ptr<DeviceBackend> dev;
+  if (gpu >= 0) raise_on_error(make_device_backend(gpu, &dev), "device");
   std::unique_ptr<Engine> e;
-  raise_on_error(make_engine(cfg, nullptr, provider, &e), "make_engine");
-  return std::make_shared<PyEngine>(std::move(e));
+  raise_on_error(make_engine(cfg, dev, provider, &e), "make_engine");
+  return std::make_shared<PyEngine>(std::move(e), std::move(dev));
 }
 #endif
 
@@ -573,6 +698,11 @@ NB_MODULE(hux, m) {
       .def_prop_ro("may_have_modified_target",
                    &PyRequest::may_have_modified_target);
 
+  /* Opaque on purpose: both are handles to something the vendor runtime
+   * owns, and there is nothing useful for Python to read out of them. */
+  nb::class_<PyStream>(m, "Stream");
+  nb::class_<PyEvent>(m, "Event");
+
   nb::class_<PyEngine>(m, "Engine")
       .def("register_memory_batch", &PyEngine::register_memory_batch,
            nb::arg("buffers"), nb::arg("remote_read") = true,
@@ -596,16 +726,33 @@ NB_MODULE(hux, m) {
       .def("add_peer", &PyEngine::add_peer, nb::arg("metadata"))
       .def("read", &PyEngine::read, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offset") = 0,
-           nb::arg("remote_offset") = 0, nb::arg("length") = 0)
+           nb::arg("remote_offset") = 0, nb::arg("length") = 0,
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
       .def("write", &PyEngine::write, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offset") = 0,
-           nb::arg("remote_offset") = 0, nb::arg("length") = 0)
+           nb::arg("remote_offset") = 0, nb::arg("length") = 0,
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
       .def("readv", &PyEngine::readv, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offsets"),
-           nb::arg("remote_offsets"), nb::arg("lengths"))
+           nb::arg("remote_offsets"), nb::arg("lengths"),
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
       .def("writev", &PyEngine::writev, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offsets"),
-           nb::arg("remote_offsets"), nb::arg("lengths"))
+           nb::arg("remote_offsets"), nb::arg("lengths"),
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
+      .def("import_stream", &PyEngine::import_stream, nb::arg("native_handle"),
+           "Adapt an execution queue the application already owns, given as"
+           " the native handle -- torch.cuda.Stream.cuda_stream, for"
+           " instance.")
+      .def("record_event", &PyEngine::record_event, nb::arg("stream"),
+           "A point in that stream, to pass to a transfer as `after`.")
+      .def("stream_wait_event", &PyEngine::stream_wait_event,
+           nb::arg("stream"), nb::arg("event"),
+           "Make later work on the stream wait for the event, rather than"
+           " synchronising the whole device.")
+      .def("has_device", &PyEngine::has_device,
+           "Whether this engine was built with a device backend; the stream"
+           " and event calls need one.")
       .def("poll", &PyEngine::poll, nb::arg("max_items") = 32)
       .def("close", &PyEngine::close, nb::arg("timeout_ms") = 5000)
       .def("describe", &PyEngine::describe)
@@ -618,10 +765,14 @@ NB_MODULE(hux, m) {
       .def("stats", &PyEngine::stats);
 
   m.def("make_mock_engine", &make_mock_engine, nb::arg("move_data") = true,
+        nb::arg("gpu") = -1,
         "An engine over the mock backend, for testing without hardware.");
 #ifdef HUX_PY_RDMA
   m.def("make_rdma_engine", &make_rdma_engine, nb::arg("advertise_ip"),
         nb::arg("qp_per_conn") = 1, nb::arg("cc") = "off",
-        nb::arg("chunk_bytes") = 0);
+        nb::arg("chunk_bytes") = 0, nb::arg("gpu") = -1);
 #endif
+  m.def("device_backend_available", &device_backend_available,
+        "Whether this build has a device backend at all. Which vendor is"
+        " fixed at build time, because their runtimes do not co-install.");
 }

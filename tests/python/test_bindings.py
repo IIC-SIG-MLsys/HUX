@@ -244,6 +244,97 @@ def test_removing_a_peer_disconnects_it():
     check(not peer.connected, "not connected afterwards")
 
 
+def _cuda_stream():
+    """A stream from outside this library, the way a framework hands one over.
+
+    ctypes rather than torch, so the test needs no framework installed: what
+    is being checked is that a native handle crosses the boundary, and where
+    the integer came from is exactly what the adapter is not supposed to
+    care about.
+    """
+    import ctypes
+
+    try:
+        cudart = ctypes.CDLL("libcudart.so")
+    except OSError:
+        return None, None
+    handle = ctypes.c_void_p()
+    if cudart.cudaSetDevice(0) != 0:
+        return None, None
+    if cudart.cudaStreamCreate(ctypes.byref(handle)) != 0:
+        return None, None
+    return cudart, handle.value
+
+
+def test_a_stream_the_caller_owns_can_be_adapted():
+    if not hux.device_backend_available():
+        print("  skip  built without a device backend")
+        return
+    cudart, native = _cuda_stream()
+    if native is None:
+        print("  skip  no usable device on this machine")
+        return
+
+    eng = hux.make_mock_engine(gpu=0)
+    check(eng.has_device(), "the engine has a device backend")
+    stream = eng.import_stream(native)
+    check(stream is not None, "a native handle becomes a stream")
+    event = eng.record_event(stream)
+    check(event is not None, "a point in it becomes an event")
+    eng.stream_wait_event(stream, event)
+    check(True, "and later work can be made to wait for it")
+
+
+def test_a_transfer_can_be_ordered_after_an_event():
+    """The point of the adapter: issue a transfer whose source a kernel is
+    still writing, and have the adapter wait rather than the caller."""
+    if not hux.device_backend_available():
+        print("  skip  built without a device backend")
+        return
+    cudart, native = _cuda_stream()
+    if native is None:
+        print("  skip  no usable device on this machine")
+        return
+
+    eng = hux.make_mock_engine(gpu=0)
+    stream = eng.import_stream(native)
+    event = eng.record_event(stream)
+
+    buf = bytearray(4096)
+    reg = eng.register_memory(buf)
+    peer = eng.add_peer(eng.local_metadata())
+    remote = peer.import_region(reg.descriptor())
+
+    req = eng.write(peer, reg, remote, 0, 0, 4096, after=[event])
+    for _ in range(200):
+        eng.poll()
+        if req.state in ("succeeded", "failed", "cancelled"):
+            break
+    check(req.state == "succeeded", "a transfer gated on an event completes")
+
+    batched = eng.writev(peer, reg, remote, [0], [0], [4096], after=[event])
+    for _ in range(200):
+        eng.poll()
+        if batched.state in ("succeeded", "failed", "cancelled"):
+            break
+    check(batched.state == "succeeded", "and so does a batch")
+
+
+def test_the_stream_calls_refuse_without_a_backend():
+    """Rather than crashing, which is what dereferencing the absent backend
+    would do."""
+    if hux.device_backend_available():
+        print("  skip  this build has a backend")
+        return
+    eng = hux.make_mock_engine()
+    check(not eng.has_device(), "the engine says it has no device")
+    try:
+        eng.import_stream(0)
+        check(False, "import_stream raises")
+    except RuntimeError:
+        check(True, "import_stream raises")
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -258,6 +349,9 @@ def main():
         test_batch_registration_keeps_the_order,
         test_a_notification_comes_back_with_its_payload,
         test_removing_a_peer_disconnects_it,
+        test_a_stream_the_caller_owns_can_be_adapted,
+        test_a_transfer_can_be_ordered_after_an_event,
+        test_the_stream_calls_refuse_without_a_backend,
     ]:
         print(f"{fn.__name__}:")
         fn()

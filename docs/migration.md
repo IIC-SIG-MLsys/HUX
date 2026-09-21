@@ -80,11 +80,13 @@ remote address -- it posts a buffer and waits -- so code built on it is
 restructured rather than translated, and the descriptor has to reach the
 sender by some means the application provides.
 
-This is a gap rather than a decision against the shape: UCCL disabled its own
-two-sided entry points and the one-sided form is where the field has gone,
-but HMC's are real, used by its own example applications and wrapped by its
-Python layer. Anything depending on them has to be rewritten around an
-exchange, or wait for the operation to be added here.
+Not adding them is a decision, taken 2026-09-21. UCCL disabled its own
+two-sided entry points and the one-sided form is where the field has gone;
+adding them here would mean designing completion semantics, buffer matching
+and flow control that nothing else in this library needs. HMC's are real --
+used by its own example applications and wrapped by its Python layer -- so
+code depending on them has to be restructured around a descriptor exchange
+rather than ported. That cost is understood and accepted.
 
 **`ConnBuffer`**, deliberately. Staging every transfer through a buffer the
 library owns is the cost this library exists to remove; `register_memory`
