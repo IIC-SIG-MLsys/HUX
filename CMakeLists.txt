@@ -237,6 +237,15 @@ if(TARGET hux_transport_rdma)
       target_link_libraries(hux-bench PRIVATE hux_device_${vendor})
     endif()
   endforeach()
+  if(HUX_BUILD_TESTS)
+    enable_testing()
+    # The unit tests cannot catch a broken hux-bench, which is a program
+    # rather than a target they run. It skips where no adapter is active.
+    add_test(NAME loopback_smoke
+             COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tests/loopback_smoke.sh"
+                     "$<TARGET_FILE:hux-bench>")
+    set_tests_properties(loopback_smoke PROPERTIES TIMEOUT 240)
+  endif()
 endif()
 
   add_subdirectory(tests)

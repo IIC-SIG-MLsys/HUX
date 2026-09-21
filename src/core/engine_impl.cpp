@@ -34,10 +34,20 @@ Status PeerImpl::import_region(std::vector<uint8_t> const& descriptor,
    * its regions the same way. A peer that restarted is a different engine
    * and its predecessor's descriptors are refused here, where the reason is
    * "this is not yours" -- rather than several calls later, as a key the
-   * hardware does not recognise. */
-  if (d.origin.host != remote_identity_.host ||
-      d.origin.process != remote_identity_.process ||
-      d.origin.engine != remote_identity_.engine)
+   * hardware does not recognise.
+   *
+   * A peer dialled from a bare provider blob has no identity, because that
+   * blob does not carry one: it is how the manual tools point a client at an
+   * address typed on the command line. There is nothing to compare against,
+   * so the check does not apply, and saying that here is better than letting
+   * an all-zero identity fail every import. Anything that went through
+   * `local_metadata` does carry an identity and is checked. */
+  bool const peer_identified = remote_identity_.host != 0 ||
+                               remote_identity_.process != 0 ||
+                               remote_identity_.engine != 0;
+  if (peer_identified && (d.origin.host != remote_identity_.host ||
+                          d.origin.process != remote_identity_.process ||
+                          d.origin.engine != remote_identity_.engine))
     return Status::kStaleGeneration;
 
   /* The peer exported a key per transport; take the one minted by the

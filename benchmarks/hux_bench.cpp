@@ -246,8 +246,15 @@ int run_server(Options const& o) {
   }
   std::vector<uint8_t> desc;
   region->export_descriptor(&desc);
+  /* The engine's metadata, not the provider's dialling blob. The blob works
+   * -- add_peer accepts one -- but it carries no identity, so the client
+   * cannot check that the region descriptor it is handed came from this
+   * engine. Going through the engine is what the real callers do. */
   std::vector<uint8_t> meta;
-  prov->local_metadata(&meta);
+  if (engine->local_metadata(&meta) != Status::kOk) {
+    std::printf("local_metadata failed\n");
+    return 1;
+  }
 
   int srv = ::socket(AF_INET, SOCK_STREAM, 0);
   int one = 1;
@@ -295,12 +302,6 @@ int run_client(std::string const& ip, Options const& o) {
   recv_blob(fd, &meta);
   recv_blob(fd, &desc);
 
-  /* The server advertises 0.0.0.0; dial the address it was actually reached
-   * on. */
-  std::vector<uint8_t> fixed(meta.begin(), meta.begin() + 4);
-  fixed.push_back(static_cast<uint8_t>(ip.size() & 0xff));
-  fixed.push_back(static_cast<uint8_t>(ip.size() >> 8));
-  fixed.insert(fixed.end(), ip.begin(), ip.end());
 
   RdmaConfig cfg;
   /* This side's own address, not the peer's: it selects the local port and
@@ -331,12 +332,21 @@ int run_client(std::string const& ip, Options const& o) {
     return 1;
 
   PeerPtr peer;
-  if (engine->add_peer(fixed, &peer) != Status::kOk) {
-    std::printf("add_peer failed\n");
+  Status const added = engine->add_peer(meta, &peer);
+  if (added != Status::kOk) {
+    /* The usual cause is the server having advertised 0.0.0.0, which is
+     * what it does without --local: there is no address in its metadata to
+     * dial. Naming it beats the silent exit this used to be. */
+    std::printf("add_peer failed: %s. Start the server with --local <ip>.\n",
+                to_string(added));
     return 1;
   }
   RemoteRegionPtr remote;
-  if (peer->import_region(desc, &remote) != Status::kOk) return 1;
+  Status const imported = peer->import_region(desc, &remote);
+  if (imported != Status::kOk) {
+    std::printf("import_region failed: %s\n", to_string(imported));
+    return 1;
+  }
 
   std::printf("\n%s\n\n", engine->describe().c_str());
   std::printf("%-10s %-8s %10s %10s %10s %10s %10s %7s %10s\n", "size", "op",
