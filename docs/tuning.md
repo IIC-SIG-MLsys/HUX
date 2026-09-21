@@ -197,3 +197,33 @@ the contiguous arm's best result equalled the scattered arm's typical one,
 which is what a disturbance looks like and not what a slower path looks
 like. Fifteen times the work made the cold start land on the other arm
 instead, which settles it.
+
+
+## The two adapters on this host are not equal, and the reason is not the network
+
+Both are 100 Gb/s Ethernet and both reach the same peer, but not at the same
+rate. Three passes each in alternating order, 2000 transfers of 4 MiB:
+
+| adapter | advertise as | write | the three |
+| --- | --- | --- | --- |
+| `mlx5_3` | 192.168.2.235 | 51.38 Gb/s | 51.45, 51.38, 51.08 |
+| `mlx5_0` | 192.168.2.243 | 24.00 Gb/s | 24.02, 23.79, 24.00 |
+
+A factor of 2.14, repeatable to within 1%. It is not the link: `ethtool`
+reports 100000 Mb/s on both. It is the slot.
+
+| adapter | PCIe | of a possible | NUMA | that allows | measured |
+| --- | --- | --- | --- | --- | --- |
+| `mlx5_0` | Gen3 x4 | x16 | node 0 | 31.5 Gb/s | 24.0 |
+| `mlx5_3` | Gen3 x8 | x16 | node 1 | 63.0 Gb/s | 51.4 |
+
+Both cards negotiated well below what they are capable of, and each lands at
+about 80% of what its lanes allow. The network is not the constraint on
+either one -- a 100 Gb/s port behind four Gen3 lanes cannot exceed 31.5.
+
+Two things follow. A benchmark that does not say which address it advertised
+has not said which adapter it measured, and a number from this host is
+meaningless without it. And the adapters sit on different roots and different
+NUMA nodes, so what one costs the other is a question worth asking rather
+than assuming -- which is the ceiling check for NET-03 in
+[remaining.md](remaining.md), not a reason to go and implement it.

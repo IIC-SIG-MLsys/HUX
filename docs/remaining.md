@@ -16,11 +16,24 @@ most of them are not blocked on writing code.
 
 ## Blocked on hardware or machine time
 
-**NET-03, several NICs carrying one transfer.** Not started. Selection by
-proximity works and is measured; striping one request across NICs is not
-implemented. It needs a host with two NICs that are both up — on the machine
-used here `mlx5_1` and `mlx5_2` are both DOWN and only `mlx5_0` is active, so
-this cannot be written honestly, let alone measured.
+**NET-03, several NICs carrying one transfer.** Not started, and not
+blocked either -- an earlier version of this entry said it was, on the
+grounds that only `mlx5_0` was active here. That was read off the first
+three adapters. `mlx5_1` and `mlx5_2` are indeed down; `mlx5_3` is up, and
+so this host has two. The peer at 192.168.2.252 has two as well.
+
+Checked rather than assumed, since the claim had already been wrong once: a
+transfer runs over each of this host's adapters independently, chosen by the
+address the provider is told to advertise -- `--local 192.168.2.243` comes
+out on `mlx5_0` and `--local 192.168.2.235` on `mlx5_3`, both reaching the
+same peer.
+
+So the hardware is there and the work is the work. It is not small.
+Registration, keys and queue pairs are all per device today; striping one
+request means a protection domain per adapter, a key per adapter in the
+descriptor, and a decision about which adapter each sub-operation goes to.
+The per-provider key list in a descriptor is the shape that would extend to
+it.
 
 **Incast, part of TST-02.** Needs three or more machines pushing at one
 target at the same time, and by local convention that kind of run happens
