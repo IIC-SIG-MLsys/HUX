@@ -87,6 +87,12 @@ struct Options {
    * with several peers is the shape a client actually takes, and it is a
    * shape nothing else here measures. */
   int peers = 1;
+  /* Rounds of the producer-consumer check. Zero skips it. */
+  int produce = 0;
+  /* How much work to put on the stream before recording the event. Tuned so
+   * the producer has not finished when the transfer is issued; too little
+   * and both arms pass because there was no race to lose. */
+  int produce_repeats = 400;
   std::vector<uint64_t> sizes = {4096, 65536, 1u << 20, 8u << 20};
   int iters = 50;
   int warmup = 5;
@@ -201,6 +207,60 @@ struct Pool {
     return dev->copy(out->data(), ptr, n) == Status::kOk;
   }
 };
+
+/* Work enqueued on the caller's own stream, standing in for the kernel that
+ * produced the data about to be sent. Repeated writes rather than one,
+ * because a single fill of a few megabytes finishes faster than the host
+ * takes to issue the transfer, and a race that never happens proves nothing
+ * about the ordering meant to prevent it.
+ *
+ * A fill rather than a kernel of our own: this benchmark would otherwise
+ * need device code compiled per vendor, and what is under test is whether
+ * the transfer waits for work on a stream, not what that work computes.
+ *
+ * Returns false where the vendor built in has no asynchronous fill. */
+bool enqueue_producer(Pool const& pool, void* native_stream, uint8_t value,
+                      int repeats) {
+#if defined(HUX_BENCH_CUDA)
+  auto* st = static_cast<cudaStream_t>(native_stream);
+  for (int i = 0; i < repeats; ++i) {
+    uint8_t const v = (i + 1 == repeats) ? value : static_cast<uint8_t>(i);
+    if (cudaMemsetAsync(pool.ptr, v, pool.bytes, st) != cudaSuccess)
+      return false;
+  }
+  return true;
+#elif defined(HUX_BENCH_ROCM)
+  auto* st = static_cast<hipStream_t>(native_stream);
+  for (int i = 0; i < repeats; ++i) {
+    uint8_t const v = (i + 1 == repeats) ? value : static_cast<uint8_t>(i);
+    if (hipMemsetAsync(pool.ptr, v, pool.bytes, st) != hipSuccess) return false;
+  }
+  return true;
+#else
+  (void)pool;
+  (void)native_stream;
+  (void)value;
+  (void)repeats;
+  return false;
+#endif
+}
+
+bool make_native_stream(void** out) {
+#if defined(HUX_BENCH_CUDA)
+  cudaStream_t st = nullptr;
+  if (cudaStreamCreate(&st) != cudaSuccess) return false;
+  *out = st;
+  return true;
+#elif defined(HUX_BENCH_ROCM)
+  hipStream_t st = nullptr;
+  if (hipStreamCreate(&st) != hipSuccess) return false;
+  *out = st;
+  return true;
+#else
+  (void)out;
+  return false;
+#endif
+}
 
 /* The byte a peer on this port stamps its memory with. Never zero, so an
  * untouched destination cannot pass for a peer's data. */
@@ -522,6 +582,100 @@ int run_client(std::string const& ip, Options const& o) {
     return {it == runs.end() ? std::vector<double>{} : it->second, wall};
   };
 
+  if (o.produce > 0) {
+    /* A producer on the caller's stream, then a transfer of what it wrote.
+     *
+     * Both arms are run, and the one without the event is the point: if the
+     * transfer arrives correct whether or not it was told to wait, then the
+     * producer finished too early and this measured nothing. A single arm
+     * reporting "correct" would be indistinguishable from a test too easy
+     * to fail. */
+    void* native = nullptr;
+    if (pool.dev == nullptr || !make_native_stream(&native)) {
+      std::printf("\n--produce needs a device backend and a GPU;"
+                  " skipping\n");
+    } else {
+      DeviceStreamPtr stream;
+      Status const si = pool.dev->import_stream(native, &stream);
+      if (si != Status::kOk) {
+        std::printf("\nimport_stream -> %s; skipping --produce\n",
+                    to_string(si));
+      } else {
+        uint64_t const size = std::min<uint64_t>(o.sizes.front(), pool.bytes);
+        std::printf("\nproducer on the caller's stream, %llu B,"
+                    " %d fills before the event, %d rounds\n",
+                    (unsigned long long)size, o.produce_repeats, o.produce);
+
+        /* Reads the remote back into a second local region, because the
+         * pool itself is what the producer is overwriting. */
+        std::vector<uint8_t> check_host(size, 0);
+        MemoryRegionPtr check_reg;
+        if (engine->register_memory(check_host.data(), size,
+                                    AccessFlags::kLocalWrite,
+                                    &check_reg) != Status::kOk) {
+          std::printf("could not register the verification buffer\n");
+        } else {
+          for (int arm = 0; arm < 2; ++arm) {
+            bool const ordered = arm == 0;
+            int correct = 0, done = 0;
+            double total_us = 0;
+            for (int n = 0; n < o.produce; ++n) {
+              uint8_t const want = static_cast<uint8_t>(0x40 + (n % 64));
+              if (!enqueue_producer(pool, native, want, o.produce_repeats))
+                break;
+              DeviceEventPtr ev;
+              if (engine->record_event(stream.get(), &ev) != Status::kOk) break;
+
+              TransferOptions opts;
+              if (ordered) opts.after.push_back(ev);
+
+              RegionView lv, rv;
+              if (local->view(0, size, &lv) != Status::kOk) break;
+              if (remote->view(0, size, &rv) != Status::kOk) break;
+              auto const t0 = Clock::now();
+              RequestPtr w;
+              if (engine->write(peer.get(), lv, rv, opts, &w) != Status::kOk)
+                break;
+              std::vector<RequestPtr> fin;
+              while (!is_terminal(w->state())) engine->poll_completions(64,
+                                                                        &fin);
+              total_us +=
+                  std::chrono::duration<double, std::micro>(Clock::now() - t0)
+                      .count();
+              if (w->state() != RequestState::kSucceeded) break;
+
+              /* What actually landed on the peer. */
+              RegionView cv;
+              if (check_reg->view(0, size, &cv) != Status::kOk) break;
+              RequestPtr r;
+              if (engine->read(peer.get(), cv, rv, {}, &r) != Status::kOk)
+                break;
+              while (!is_terminal(r->state())) engine->poll_completions(64,
+                                                                        &fin);
+              if (r->state() != RequestState::kSucceeded) break;
+              ++done;
+              bool all = true;
+              for (uint64_t i = 0; i < size; ++i)
+                if (check_host[i] != want) {
+                  all = false;
+                  break;
+                }
+              if (all) ++correct;
+            }
+            std::printf("  %-12s %3d/%3d arrived with what the producer"
+                        " wrote, %8.1f us each\n",
+                        ordered ? "after=[ev]" : "no ordering", correct, done,
+                        done > 0 ? total_us / done : 0.0);
+          }
+          std::printf("  the second line is the control: if it also reads"
+                      " correct, the producer\n  finished before the"
+                      " transfer was issued and this measured nothing --"
+                      "\n  raise --produce-repeats until it does not.\n");
+        }
+      }
+    }
+  }
+
   if (o.peers > 1) {
     /* One engine, several peers, each stamping its memory with a byte of its
      * own. The point is the check at the end: a read from the wrong peer's
@@ -767,7 +921,7 @@ int main(int argc, char** argv) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
                 " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n"
-                "       [--peers N]\n",
+                "       [--peers N] [--produce N] [--produce-repeats N]\n",
                 argv[0]);
     return 2;
   }
@@ -784,6 +938,9 @@ int main(int argc, char** argv) {
       o.inflight = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--peers")
       o.peers = std::max(1, std::atoi(argv[i + 1]));
+    else if (k == "--produce") o.produce = std::max(0, std::atoi(argv[i + 1]));
+    else if (k == "--produce-repeats")
+      o.produce_repeats = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--mix") {
       o.mix.clear();
       char const* p = argv[i + 1];

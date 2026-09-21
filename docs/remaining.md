@@ -114,8 +114,12 @@ peer's region succeeds and returns the right number of bytes, so only the
 contents say anything is wrong. That is the defect found on 2026-09-21, and
 this would have caught it.
 
-Still missing: trace replay, a producing and consuming kernel on the
-critical path, and the ablations.
+`--produce` puts work on the caller's own stream ahead of a transfer and
+checks what arrived, running the arm without the ordering as a control. It
+fails every round, which is what establishes that the ordering does
+something: see [tuning.md](tuning.md).
+
+Still missing: trace replay and the ablations.
 
 **PY-01. Done.** Complete, stream and event adapters included. A build with
 a device backend exposes `import_stream`, `record_event` and

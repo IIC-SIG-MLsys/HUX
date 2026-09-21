@@ -134,3 +134,36 @@ is a function of time, so the cost per byte falls as the link gets faster:
 0.50 cpu_s/GiB on a 17 Gb/s path is the same engine as 0.09 on a 91 Gb/s one.
 It is comparable between two transports measured on the same path at the same
 rate, and meaningless between two rates.
+
+## Ordering a transfer against the caller's own GPU work
+
+A transfer issued while a kernel is still writing its source sends whatever
+is there at the time. `TransferOptions::after` takes events recorded on the
+application's stream, and the adapter waits for them before the adapter
+touches the buffers.
+
+Measured with `hux-bench --produce`, which enqueues repeated fills on a
+stream the caller owns, records an event, writes the buffer to a peer, and
+reads back what actually landed. 4 MiB, 400 fills ahead of the event, 20
+rounds, A40 over RoCE:
+
+| | arrived with what the producer wrote | per round |
+| --- | --- | --- |
+| `after=[ev]` | 20/20 | 2816.7 us |
+| no ordering | 0/20 | 2194.4 us |
+
+**The second row is the measurement.** A single arm reporting 20/20 would be
+indistinguishable from a test whose producer happened to finish first, and
+would prove nothing about the ordering. Failing every round without the
+event is what establishes that the race is real and that the event is what
+prevents it.
+
+The 622 us between them is not overhead. It is the producer's remaining work,
+which the ordered transfer waits for and the unordered one skips by sending
+the wrong bytes.
+
+This needs a card whose device memory the adapter can register. On an RTX
+4090 the server reports `register failed` before any of this runs, for the
+reason in [comparison.md](comparison.md): GPUDirect is withheld from the
+consumer line, so the benchmark falls back to host memory where there is no
+stream to order against.
