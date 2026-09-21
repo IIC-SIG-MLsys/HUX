@@ -27,7 +27,7 @@ A working example is in [`apps/transfer_example.cpp`](../apps/transfer_example.c
 | `putNB(...)` returning `wr_id` | the same `write`, which is asynchronous already |
 | `wait(wr_id)` | `req->wait(timeout_ms)` |
 | `putPipeline(..., chunk, inflight)` | `EngineConfig::chunk_bytes`, handled by the engine |
-| `sendDataTo` / `recvDataFrom` | `write` / `read` with a descriptor exchanged beforehand |
+| `sendDataTo` / `recvDataFrom` | no equivalent -- see below |
 | `ctrlSend` / `ctrlRecv` | `engine->notify()` and `poll_notifications()` |
 
 ## What behaves differently
@@ -72,10 +72,34 @@ permission to use it forever, or on whichever peer is to hand.
 
 ## What is not carried over
 
-`ConnBuffer`, the pipeline entry points, and the collective experiments. The
-collective paths had known correctness problems and no test that would have
-caught them; rebuilding them on this API is possible but has not been done,
-and they are not part of what this library claims to do.
+**Two-sided send and receive.** `sendDataTo` and `recvDataFrom` have no
+equivalent. Everything here is one-sided: the side that will be written to
+exports a descriptor first, and the other side names a place in it. That is
+not the same operation. A two-sided receive needs no descriptor and no
+remote address -- it posts a buffer and waits -- so code built on it is
+restructured rather than translated, and the descriptor has to reach the
+sender by some means the application provides.
+
+This is a gap rather than a decision against the shape: UCCL disabled its own
+two-sided entry points and the one-sided form is where the field has gone,
+but HMC's are real, used by its own example applications and wrapped by its
+Python layer. Anything depending on them has to be rewritten around an
+exchange, or wait for the operation to be added here.
+
+**`ConnBuffer`**, deliberately. Staging every transfer through a buffer the
+library owns is the cost this library exists to remove; `register_memory`
+takes the allocation the application already has.
+
+**The pipeline entry points.** `putPipeline` and `getPipeline` have no
+counterpart because chunking is not a call any more: `EngineConfig::chunk_bytes`
+and the engine's scheduler do it for every transfer, and a single `write` of
+a large region is already pipelined. The capability is there; the entry point
+is not.
+
+**The collective layer.** `alltoall` and the group bootstrap around it. Those
+paths had known correctness problems and no test that would have caught them;
+rebuilding them on this API is possible but has not been done, and they are
+not part of what this library claims to do.
 
 HMC remains available for callers that need it.
 
