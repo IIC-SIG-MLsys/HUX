@@ -128,6 +128,29 @@ path would presumably work and would deserve a real comparison.
 ## Still to do
 
 A cross-machine comparison against UCCL over RDMA, which is its main path.
-That needs two NVIDIA hosts; the second one available here is fully loaded --
-every GPU busy, load average 104 on 64 cores -- so it is waiting on the
-machine rather than on the work.
+What that needs was checked rather than assumed, because an earlier note here
+said it needed a particular pair of cards and that was wrong.
+
+It does not need peer access, which is what stopped the same-host comparison:
+two machines reach each other through their adapters, not through the PCIe
+fabric. It does not need a free GPU either, only room for a buffer on one --
+the endpoint takes a device index to pick the nearest adapter, and both hosts
+have several gigabytes spare on their first card. Both have `nvidia_peermem`
+loaded, so device memory can be registered with the adapter on either side.
+
+What it does need is two NVIDIA hosts on the RoCE fabric, and there are
+exactly two: the ones at .243 and .250 on 192.168.2.0/24. The other NVIDIA
+machines available have no adapter on that fabric at all -- no `ibv_devinfo`
+output, no address on the subnet, no `nvidia_peermem`. So there is no third
+host to substitute.
+
+The second of the two carries a sustained load average of 101, which is the
+blocker. That is not only a matter of leaving it alone: a benchmark whose
+progress thread polls a completion queue measures how often it is scheduled,
+and on a machine that oversubscribed it would report the scheduler rather
+than the transport. Its root filesystem is also full, at 4.6 GB free, so
+building UCCL and HUX there has to go on the data volume.
+
+Neither UCCL nor HUX is installed on it yet. That part is work rather than
+waiting, and it is worth doing in advance so the comparison can run whenever
+the load drops.
