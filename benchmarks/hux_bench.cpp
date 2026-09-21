@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <map>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -78,6 +79,9 @@ struct Options {
   /* Requests kept outstanding. One keeps a flow latency-bound and cannot
    * saturate a link. */
   int inflight = 1;
+  /* Sizes to interleave in one stream, so that a short request has a long
+   * one ahead of it. Empty means each size runs on its own. */
+  std::vector<uint64_t> mix;
   std::vector<uint64_t> sizes = {4096, 65536, 1u << 20, 8u << 20};
   int iters = 50;
   int warmup = 5;
@@ -158,6 +162,7 @@ struct Summary {
   double median_us = 0;
   double p10_us = 0;
   double p90_us = 0;
+  double p99_us = 0;
   double gbps = 0;
 };
 
@@ -172,6 +177,7 @@ Summary summarize(std::vector<double> us, uint64_t bytes) {
   s.median_us = at(0.5);
   s.p10_us = at(0.1);
   s.p90_us = at(0.9);
+  s.p99_us = at(0.99);
   /* Derived from the median, so an outlier cannot inflate it. */
   s.gbps = s.median_us > 0 ? (bytes * 8.0) / (s.median_us * 1e3) : 0;
   return s;
@@ -326,42 +332,57 @@ int run_client(std::string const& ip, Options const& o) {
     return std::chrono::duration<double, std::micro>(t1 - t0).count();
   };
 
-  /* Keeps `depth` requests outstanding rather than one.
+  /* Runs a schedule of sizes with `depth` requests outstanding rather than
+   * one, and reports the latencies separately for each size.
    *
-   * One at a time makes a flow latency-bound: it waits for each transfer
-   * before starting the next, so it cannot fill a link however fast the
-   * link is. That is why four concurrent flows reached only 36.8 Gb/s of a
-   * 100GE fabric, and why a congestion-control comparison run that way had
-   * no congestion to compare against.
+   * Depth does not buy throughput on this fabric -- one outstanding 4 MiB
+   * write already reaches 98% of the link, and 8 or 32 add about 2% while
+   * multiplying latency by the depth. What it buys is a queue, which is the
+   * condition a congestion controller exists for; and a schedule of mixed
+   * sizes is what puts a short request behind a long one, which is the
+   * particular harm it is supposed to prevent.
    *
-   * Returns the per-transfer latencies and the wall time for the lot, since
-   * with requests overlapping the median no longer implies the rate. */
-  auto pipelined = [&](uint64_t bytes, bool write, int depth,
-                       int count) -> std::pair<std::vector<double>, double> {
-    RegionView lv, rv;
-    std::vector<double> samples;
-    if (local->view(0, bytes, &lv) != Status::kOk) return {samples, 0.0};
-    if (remote->view(0, bytes, &rv) != Status::kOk) return {samples, 0.0};
+   * Returns the wall time as well, since with requests overlapping the
+   * median no longer implies the rate. */
+  using Runs = std::map<uint64_t, std::vector<double>>;
+  auto run_schedule = [&](std::vector<uint64_t> const& schedule, bool write,
+                          int depth) -> std::pair<Runs, double> {
+    Runs samples;
+    /* One view per distinct size, prepared before the clock starts so that
+     * building them is not counted as transfer time. */
+    std::map<uint64_t, std::pair<RegionView, RegionView>> views;
+    for (uint64_t bytes : schedule) {
+      if (views.count(bytes) != 0) continue;
+      RegionView lv, rv;
+      if (local->view(0, bytes, &lv) != Status::kOk) return {samples, 0.0};
+      if (remote->view(0, bytes, &rv) != Status::kOk) return {samples, 0.0};
+      views[bytes] = {lv, rv};
+      samples[bytes];
+    }
 
     struct Live {
       RequestPtr req;
       Clock::time_point at;
+      uint64_t bytes;
     };
     std::vector<Live> live;
-    int submitted = 0, finished = 0;
+    size_t submitted = 0, finished = 0;
     auto const start = Clock::now();
 
-    while (finished < count) {
-      while (static_cast<int>(live.size()) < depth && submitted < count) {
+    while (finished < schedule.size()) {
+      while (static_cast<int>(live.size()) < depth &&
+             submitted < schedule.size()) {
+        uint64_t const bytes = schedule[submitted];
+        auto const& v = views[bytes];
         RequestPtr req;
         auto const at = Clock::now();
-        Status s = write ? engine->write(peer.get(), lv, rv, {}, &req)
-                         : engine->read(peer.get(), lv, rv, {}, &req);
+        Status s = write ? engine->write(peer.get(), v.first, v.second, {}, &req)
+                         : engine->read(peer.get(), v.first, v.second, {}, &req);
         /* Would-block is the engine saying its queue is full, which is the
          * normal way a deep pipeline finds the bottom. Not an error: stop
          * adding and let completions make room. */
         if (s != Status::kOk) break;
-        live.push_back({std::move(req), at});
+        live.push_back({std::move(req), at, bytes});
         ++submitted;
       }
       std::vector<RequestPtr> done;
@@ -373,17 +394,76 @@ int run_client(std::string const& ip, Options const& o) {
           continue;
         }
         if (it->req->state() == RequestState::kSucceeded)
-          samples.push_back(
+          samples[it->bytes].push_back(
               std::chrono::duration<double, std::micro>(now - it->at).count());
         ++finished;
         it = live.erase(it);
       }
-      if (live.empty() && submitted >= count) break;
+      if (live.empty() && submitted >= schedule.size()) break;
     }
     double const wall =
         std::chrono::duration<double>(Clock::now() - start).count();
     return {samples, wall};
   };
+
+  auto pipelined = [&](uint64_t bytes, bool write, int depth,
+                       int count) -> std::pair<std::vector<double>, double> {
+    auto const [runs, wall] =
+        run_schedule(std::vector<uint64_t>(count, bytes), write, depth);
+    auto it = runs.find(bytes);
+    return {it == runs.end() ? std::vector<double>{} : it->second, wall};
+  };
+
+  if (!o.mix.empty()) {
+    /* Each size alone first, then all of them interleaved. Without the
+     * alone column there is nothing to compare the mixed one against, and
+     * "a short request took N us behind a long one" says nothing about
+     * whether it was held up. */
+    uint64_t const cap = std::min<uint64_t>(pool.bytes, remote->length());
+    std::vector<uint64_t> sizes;
+    for (uint64_t b : o.mix)
+      if (b <= cap) sizes.push_back(b);
+    if (sizes.size() != o.mix.size())
+      std::printf("\nmix: %zu of %zu sizes fit in both regions\n",
+                  sizes.size(), o.mix.size());
+
+    if (sizes.size() >= 2) {
+      std::printf("\nmixed stream, %d in flight, write\n", o.inflight);
+      std::printf("%-10s %12s %12s %12s %12s\n", "size", "alone_p50",
+                  "mixed_p50", "alone_p99", "mixed_p99");
+
+      std::map<uint64_t, Summary> alone;
+      for (uint64_t b : sizes) {
+        for (int i = 0; i < o.warmup; ++i) one_transfer(b, true);
+        auto const [runs, wall] = run_schedule(
+            std::vector<uint64_t>(o.iters, b), true, o.inflight);
+        (void)wall;
+        alone[b] = summarize(runs.at(b), b);
+      }
+
+      /* Round robin, so the counts per size are equal and every long
+       * request has short ones on both sides of it. */
+      std::vector<uint64_t> schedule;
+      schedule.reserve(o.iters * sizes.size());
+      for (int i = 0; i < o.iters; ++i)
+        for (uint64_t b : sizes) schedule.push_back(b);
+      for (int i = 0; i < o.warmup; ++i)
+        for (uint64_t b : sizes) one_transfer(b, true);
+      auto const [mixed_runs, mixed_wall] =
+          run_schedule(schedule, true, o.inflight);
+
+      uint64_t total = 0;
+      for (uint64_t b : sizes) {
+        Summary const m = summarize(mixed_runs.at(b), b);
+        total += mixed_runs.at(b).size() * b;
+        std::printf("%-10llu %12.1f %12.1f %12.1f %12.1f\n",
+                    (unsigned long long)b, alone[b].median_us, m.median_us,
+                    alone[b].p99_us, m.p99_us);
+      }
+      std::printf("mixed stream rate: %.2f Gb/s\n",
+                  mixed_wall > 0 ? total * 8.0 / (mixed_wall * 1e9) : 0.0);
+    }
+  }
 
   for (uint64_t bytes : o.sizes) {
     /* Said out loud. A size that cannot run used to print as 0.0 us and
@@ -446,7 +526,7 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
-                " [--gpu N] [--port P] [--inflight N]\n",
+                " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n",
                 argv[0]);
     return 2;
   }
@@ -461,6 +541,16 @@ int main(int argc, char** argv) {
       o.gpu = std::atoi(argv[i + 1]);
     else if (k == "--inflight")
       o.inflight = std::max(1, std::atoi(argv[i + 1]));
+    else if (k == "--mix") {
+      o.mix.clear();
+      char const* p = argv[i + 1];
+      while (*p != '\0') {
+        o.mix.push_back(std::strtoull(p, nullptr, 10));
+        char const* c = std::strchr(p, ',');
+        if (c == nullptr) break;
+        p = c + 1;
+      }
+    }
     else if (k == "--port")
       g_meta_port = static_cast<uint16_t>(std::atoi(argv[i + 1]));
     else if (k == "--cc") o.cc = argv[i + 1];
