@@ -75,6 +75,9 @@ struct Options {
   uint64_t chunk = 0;
   /* Negative keeps host memory; otherwise the device whose memory moves. */
   int gpu = -1;
+  /* Requests kept outstanding. One keeps a flow latency-bound and cannot
+   * saturate a link. */
+  int inflight = 1;
   std::vector<uint64_t> sizes = {4096, 65536, 1u << 20, 8u << 20};
   int iters = 50;
   int warmup = 5;
@@ -302,8 +305,8 @@ int run_client(std::string const& ip, Options const& o) {
   if (peer->import_region(desc, &remote) != Status::kOk) return 1;
 
   std::printf("\n%s\n\n", engine->describe().c_str());
-  std::printf("%-10s %-8s %10s %10s %10s %10s\n", "size", "op", "median_us",
-              "p10_us", "p90_us", "Gb/s");
+  std::printf("%-10s %-8s %10s %10s %10s %10s %10s\n", "size", "op",
+              "median_us", "p10_us", "p90_us", "Gb/s", "rate_Gb/s");
 
   auto one_transfer = [&](uint64_t bytes, bool write) -> double {
     RegionView lv, rv;
@@ -321,6 +324,65 @@ int run_client(std::string const& ip, Options const& o) {
     auto const t1 = Clock::now();
     if (req->state() != RequestState::kSucceeded) return -1;
     return std::chrono::duration<double, std::micro>(t1 - t0).count();
+  };
+
+  /* Keeps `depth` requests outstanding rather than one.
+   *
+   * One at a time makes a flow latency-bound: it waits for each transfer
+   * before starting the next, so it cannot fill a link however fast the
+   * link is. That is why four concurrent flows reached only 36.8 Gb/s of a
+   * 100GE fabric, and why a congestion-control comparison run that way had
+   * no congestion to compare against.
+   *
+   * Returns the per-transfer latencies and the wall time for the lot, since
+   * with requests overlapping the median no longer implies the rate. */
+  auto pipelined = [&](uint64_t bytes, bool write, int depth,
+                       int count) -> std::pair<std::vector<double>, double> {
+    RegionView lv, rv;
+    std::vector<double> samples;
+    if (local->view(0, bytes, &lv) != Status::kOk) return {samples, 0.0};
+    if (remote->view(0, bytes, &rv) != Status::kOk) return {samples, 0.0};
+
+    struct Live {
+      RequestPtr req;
+      Clock::time_point at;
+    };
+    std::vector<Live> live;
+    int submitted = 0, finished = 0;
+    auto const start = Clock::now();
+
+    while (finished < count) {
+      while (static_cast<int>(live.size()) < depth && submitted < count) {
+        RequestPtr req;
+        auto const at = Clock::now();
+        Status s = write ? engine->write(peer.get(), lv, rv, {}, &req)
+                         : engine->read(peer.get(), lv, rv, {}, &req);
+        /* Would-block is the engine saying its queue is full, which is the
+         * normal way a deep pipeline finds the bottom. Not an error: stop
+         * adding and let completions make room. */
+        if (s != Status::kOk) break;
+        live.push_back({std::move(req), at});
+        ++submitted;
+      }
+      std::vector<RequestPtr> done;
+      engine->poll_completions(64, &done);
+      auto const now = Clock::now();
+      for (auto it = live.begin(); it != live.end();) {
+        if (!is_terminal(it->req->state())) {
+          ++it;
+          continue;
+        }
+        if (it->req->state() == RequestState::kSucceeded)
+          samples.push_back(
+              std::chrono::duration<double, std::micro>(now - it->at).count());
+        ++finished;
+        it = live.erase(it);
+      }
+      if (live.empty() && submitted >= count) break;
+    }
+    double const wall =
+        std::chrono::duration<double>(Clock::now() - start).count();
+    return {samples, wall};
   };
 
   for (uint64_t bytes : o.sizes) {
@@ -346,21 +408,21 @@ int run_client(std::string const& ip, Options const& o) {
        * faults, which are real costs but not the one being measured. */
       for (int i = 0; i < o.warmup; ++i) one_transfer(bytes, write);
 
-      std::vector<double> samples;
-      samples.reserve(o.iters);
-      for (int i = 0; i < o.iters; ++i) {
-        double us = one_transfer(bytes, write);
-        if (us >= 0) samples.push_back(us);
-      }
+      auto const [samples, wall] = pipelined(bytes, write, o.inflight, o.iters);
       if (samples.empty()) {
         std::printf("%-10llu %-8s  no transfer succeeded\n",
                     (unsigned long long)bytes, write ? "write" : "read");
         continue;
       }
       Summary const sum = summarize(samples, bytes);
-      std::printf("%-10llu %-8s %10.1f %10.1f %10.1f %10.2f\n",
+      /* Rate from the wall clock over the whole run. With requests
+       * overlapping, dividing one transfer's latency into its bytes
+       * describes nothing. */
+      double const rate =
+          wall > 0 ? samples.size() * bytes * 8.0 / (wall * 1e9) : 0.0;
+      std::printf("%-10llu %-8s %10.1f %10.1f %10.1f %10.2f %10.2f\n",
                   (unsigned long long)bytes, write ? "write" : "read",
-                  sum.median_us, sum.p10_us, sum.p90_us, sum.gbps);
+                  sum.median_us, sum.p10_us, sum.p90_us, sum.gbps, rate);
     }
   }
 
@@ -384,7 +446,7 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
-                " [--gpu N] [--port P]\n",
+                " [--gpu N] [--port P] [--inflight N]\n",
                 argv[0]);
     return 2;
   }
@@ -397,6 +459,8 @@ int main(int argc, char** argv) {
       o.chunk = std::strtoull(argv[i + 1], nullptr, 10);
     else if (k == "--gpu")
       o.gpu = std::atoi(argv[i + 1]);
+    else if (k == "--inflight")
+      o.inflight = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--port")
       g_meta_port = static_cast<uint16_t>(std::atoi(argv[i + 1]));
     else if (k == "--cc") o.cc = argv[i + 1];

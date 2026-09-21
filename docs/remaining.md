@@ -37,19 +37,17 @@ Reconnection itself is what remains, and it may not be worth having:
 `remove_peer` plus `add_peer` already rebuilds the path, and the only thing
 reconnection adds is keeping the same PeerId across it.
 
-**CC-02, an adaptive controller that meets a target.** TIMELY is implemented
-and runs over a real fabric. The comparison against off and a fixed window
-was attempted under four concurrent flows and could not separate them: see
-[tuning.md](tuning.md). The obstacle is that the benchmark issues one
-transfer per flow and waits, so four flows reach 36.8 Gb/s on a 100GE link
-and never create the congestion a controller exists for. Fairness is already
-1.00x with control off, since RC transport provides it.
+**CC-02, an adaptive controller that meets a target.** Compared against off
+and a fixed window under four concurrent flows on a saturated link, and they
+cannot be told apart: see [tuning.md](tuning.md). Fairness is 1.00x with
+control off, since RC transport provides it, so there is nothing there to
+improve; latency varies more between passes of one configuration than
+between configurations.
 
-This needs a saturating load before it can be judged -- several transfers in
-flight per flow, which is part of BENCH-01, or incast from more machines
-than the pair available here. Until then the honest status is that the
-controllers are implemented and untested against each other, not that any of
-them meets a target.
+What is not covered is overload rather than saturation -- more offered load
+than the link can carry, which is where a controller earns its place. The
+benchmark can now hold many requests in flight, so this is reachable on this
+pair; incast from more machines is not.
 
 **TST-02, the integration matrix.** Most dimensions are covered
 individually: several queue pairs, both directions, host and device memory,

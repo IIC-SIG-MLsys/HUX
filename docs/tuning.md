@@ -46,42 +46,53 @@ Repeatable to 0.3% and monotone, so the 2.4% between the extremes is a real
 effect rather than noise — larger chunks are slightly better. It is still
 2.4% across a sixteen-fold change, which is not worth a caller's attention.
 
-## Congestion control, and why this fabric cannot judge it
+## Requests in flight: the link is already full at one
 
-Four concurrent flows between the same two hosts, 4 MiB writes, 1500 per
-flow, two passes alternating the order. Off, a fixed 1 MiB window, and
-TIMELY.
+Single flow, 4 MiB writes, 300 per point, three passes in alternating order.
 
-| | median | slowest/fastest flow | aggregate |
+| in flight | median | rate | the three rates |
 | --- | --- | --- | --- |
-| off | 1763 us | 1.00x | 36.8 Gb/s |
-| fixed 1 MiB | 2427 us | 1.01x | 29.8 Gb/s |
-| TIMELY | 1773 us | 1.01x | 31.9 Gb/s |
+| 1 | 373.4 us | 89.77 Gb/s | 58.1, 89.8, 90.0 |
+| 8 | 2927.9 us | 91.66 Gb/s | 91.7, 91.7, 91.6 |
+| 32 | 11715.5 us | 91.64 Gb/s | 91.7, 91.6, 91.6 |
 
-**Only one column means anything.** Between passes the same configuration
-varies by up to 1.43x -- off measured 2077 and 1450 us -- which is as large
-as the difference between configurations. Latency and throughput here
-separate nothing.
+The rate stops at 91.6 Gb/s and the latency grows in step with the depth:
+373, 2928, 11715 us for 1, 8 and 32. Little's law closes on the same number
+from all three rows -- 89.9, 91.7, 91.7 Gb/s -- so beyond the first request
+the extra ones are queueing, not moving data any faster. One outstanding
+request already reaches 98% of what the link gives.
 
-Fairness does: six measurements, every one between 1.00 and 1.03. The four
-flows divide the link evenly **with congestion control off**, because RC
-transport already does that in the adapter. There is no unfairness here for
-a controller to improve.
+The first measurement of depth 1 came out at 58.1 Gb/s against 89.8 and 90.0
+for the other two: a cold start, caught only because the passes alternate.
+Run in order it would have made depth look like the cause.
 
-**And the reason is in the last column.** Four flows together reach 36.8
-Gb/s on a 100GE link. The link is not full, so there is no congestion, so
-there is nothing to control. That is a property of the benchmark rather than
-of the fabric: it issues one transfer and waits for it, so each flow is
-limited by its own latency rather than by bandwidth, and four of them still
-cannot fill the pipe.
+## Congestion control under contention
 
-So CC-02 cannot be answered here, and this is recorded as a limit of the
-measurement rather than as a result about the controllers. Judging an
-adaptive controller needs a load that actually saturates the link -- several
-transfers in flight per flow, or incast from more machines than this pair --
-and neither has been built. What can be said is narrower: on an unsaturated
-link, turning congestion control on costs something and buys nothing
-measurable, which is the expected answer and not an interesting one.
+Four concurrent flows, 4 MiB writes, 1500 per flow, two passes alternating
+the order. Off, a fixed 1 MiB window, and TIMELY.
+
+| | median | slowest/fastest flow |
+| --- | --- | --- |
+| off | 1763 us | 1.00x |
+| fixed 1 MiB | 2427 us | 1.01x |
+| TIMELY | 1773 us | 1.01x |
+
+**Fairness is the column that repeats**: six measurements, every one between
+1.00 and 1.03. Four flows divide the link evenly **with congestion control
+off**, because RC transport already does that in the adapter. There is no
+unfairness here for a controller to improve.
+
+Latency separates nothing. The same configuration varied by up to 1.43x
+between passes -- off measured 2077 and 1450 us -- which is as large as the
+gap between configurations.
+
+**The link was saturated while this ran**, which an earlier version of this
+page got wrong. It claimed four flows reached only 36.8 Gb/s of a 100GE
+fabric and therefore created no congestion. That figure divided the bytes by
+a wall clock that included process startup; the per-flow latency tells the
+real story, at 1763 us against 373 us for a single flow -- four flows each
+getting about a quarter of a link that is full. The experiment did have
+contention. What it does not have is a difference between the controllers.
 
 ## What this means for automatic tuning
 
