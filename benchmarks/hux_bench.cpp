@@ -1191,6 +1191,11 @@ int run_client(std::string const& ip, Options const& o) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  /* Line buffered even into a pipe or a file. A server waits for a client
+   * and is usually stopped by a signal, and a fully buffered stdout loses
+   * everything it had to say when that happens -- which once made a working
+   * adapter look like one that could not start. */
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
   if (argc < 2) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"

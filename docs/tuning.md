@@ -287,3 +287,42 @@ transport. It was the sleep granularity in the waiting loop: sleeping up to
 the deadline overshoots it by however long the sleep was. Spinning the last
 50 us took the floor from 45 us to 0.2, and what remains is small enough that
 the floor row is still needed to see it.
+
+## Striping across machines, and what stopped it
+
+Splitting a transfer needs two usable adapters at *each* end. Between the
+host measured above and the peer at 192.168.2.252, there is only one at the
+far end, and finding that out took longer than it should have.
+
+All four pairings, 200 transfers of 1 MiB each, the server waited for rather
+than slept for:
+
+| from | to | |
+| --- | --- | --- |
+| `.235` | `.252` | 49.97 Gb/s |
+| `.243` | `.252` | 23.62 Gb/s |
+| `.235` | `.251` | connects, no transfer completes |
+| `.243` | `.251` | connects, no transfer completes |
+
+The peer's second adapter reports `PORT_ACTIVE`, accepts a TCP connection,
+completes the endpoint exchange and brings its queue pair to ready. It simply
+cannot carry data: both hosts have two addresses on one subnet, and the
+kernel route decides which interface a reply leaves by, so packets for the
+second adapter go out the first and never come back.
+
+**And that is a gap here, not only in the fabric.** A lane that connects and
+cannot carry anything poisons every transfer through that peer: a request is
+not complete until every lane's share is, so one silent lane hangs all of
+them, with no timeout and nothing said. Striping on loopback worked because
+both adapters are on one host and no route is consulted.
+
+`connect` returning `kOk` currently means the endpoints were exchanged and
+the queue pair reached ready. That is too weak a claim to hand a caller a
+lane on -- the same shape of mistake as a copy that returns before its bytes
+have landed. It should mean the queue pair has carried something.
+
+An earlier version of this section blamed the fabric on the strength of a
+test whose client started three seconds after the server, whether or not the
+server was listening. That test reported `.243` to `.252` as failing, which
+is the pairing measured at 24 Gb/s twice on either side of it. Waiting for
+the server to say it was ready changed three of the four answers.
