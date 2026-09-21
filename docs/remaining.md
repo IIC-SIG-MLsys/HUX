@@ -119,7 +119,13 @@ checks what arrived, running the arm without the ordering as a control. It
 fails every round, which is what establishes that the ordering does
 something: see [tuning.md](tuning.md).
 
-Still missing: trace replay and the ablations.
+`--segments N` sends one transfer as several scattered pieces through the
+vector path, which nothing had exercised. Eight ways costs nothing
+measurable: see [tuning.md](tuning.md).
+
+Still missing: trace replay. The ablations are in tuning.md -- queue pairs,
+chunk size, congestion control, requests in flight, segments -- so what is
+left there is a workload to replay rather than a dimension to sweep.
 
 **PY-01. Done.** Complete, stream and event adapters included. A build with
 a device backend exposes `import_stream`, `record_event` and

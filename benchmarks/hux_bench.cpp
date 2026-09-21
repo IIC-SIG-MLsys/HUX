@@ -87,6 +87,11 @@ struct Options {
    * with several peers is the shape a client actually takes, and it is a
    * shape nothing else here measures. */
   int peers = 1;
+  /* Segments per transfer. Above one the request goes through the vector
+   * path, which is a different code path from a single contiguous transfer
+   * -- it pairs segments by index, submits them together, and has to handle
+   * a partial submit. Nothing in this benchmark exercised it. */
+  int segments = 1;
   /* Rounds of the producer-consumer check. Zero skips it. */
   int produce = 0;
   /* How much work to put on the stream before recording the event. Tuned so
@@ -516,6 +521,13 @@ int run_client(std::string const& ip, Options const& o) {
     /* One view per distinct size, prepared before the clock starts so that
      * building them is not counted as transfer time. */
     std::map<uint64_t, std::pair<RegionView, RegionView>> views;
+    /* And, when asked for, the same bytes as several segments. Scattered
+     * rather than adjacent: consecutive pieces of one range would coalesce
+     * in the adapter and the vector path would be measured doing the work
+     * of a contiguous one. */
+    std::map<uint64_t, std::pair<std::vector<RegionView>,
+                                 std::vector<RegionView>>>
+        segmented;
     for (uint64_t bytes : schedule) {
       if (views.count(bytes) != 0) continue;
       RegionView lv, rv;
@@ -523,7 +535,37 @@ int run_client(std::string const& ip, Options const& o) {
       if (remote->view(0, bytes, &rv) != Status::kOk) return {samples, 0.0};
       views[bytes] = {lv, rv};
       samples[bytes];
+
+      if (o.segments > 1) {
+        uint64_t const n = static_cast<uint64_t>(o.segments);
+        uint64_t const piece = bytes / n;
+        /* A stride wider than a piece, so the segments do not touch. Needs
+         * room for the last one to land inside the region. */
+        uint64_t const stride = std::min<uint64_t>(
+            piece * 2, piece == 0 ? 0 : (pool.bytes - piece) / (n > 1 ? n - 1 : 1));
+        if (piece == 0 || stride < piece) {
+          std::printf("%-10llu  skipped: %d segments do not fit\n",
+                      (unsigned long long)bytes, o.segments);
+          continue;
+        }
+        std::vector<RegionView> ls, rs;
+        bool ok = true;
+        for (uint64_t i = 0; i < n && ok; ++i) {
+          RegionView a, b;
+          if (local->view(i * stride, piece, &a) != Status::kOk ||
+              remote->view(i * stride, piece, &b) != Status::kOk) {
+            ok = false;
+            break;
+          }
+          ls.push_back(a);
+          rs.push_back(b);
+        }
+        if (ok) segmented[bytes] = {std::move(ls), std::move(rs)};
+      }
     }
+    if (o.segments > 1)
+      for (uint64_t bytes : schedule)
+        if (segmented.count(bytes) == 0) return {samples, 0.0};
 
     struct Live {
       RequestPtr req;
@@ -542,8 +584,15 @@ int run_client(std::string const& ip, Options const& o) {
         auto const& v = views[bytes];
         RequestPtr req;
         auto const at = Clock::now();
-        Status s = write ? engine->write(peer.get(), v.first, v.second, {}, &req)
-                         : engine->read(peer.get(), v.first, v.second, {}, &req);
+        Status s;
+        if (o.segments > 1) {
+          auto const& seg = segmented[bytes];
+          s = write ? engine->writev(peer.get(), seg.first, seg.second, {}, &req)
+                    : engine->readv(peer.get(), seg.first, seg.second, {}, &req);
+        } else {
+          s = write ? engine->write(peer.get(), v.first, v.second, {}, &req)
+                    : engine->read(peer.get(), v.first, v.second, {}, &req);
+        }
         /* Would-block is the engine saying its queue is full, which is the
          * normal way a deep pipeline finds the bottom. Not an error: stop
          * adding and let completions make room. */
@@ -921,7 +970,8 @@ int main(int argc, char** argv) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
                 " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n"
-                "       [--peers N] [--produce N] [--produce-repeats N]\n",
+                "       [--peers N] [--segments N] [--produce N]\n"
+                "       [--produce-repeats N]\n",
                 argv[0]);
     return 2;
   }
@@ -938,6 +988,8 @@ int main(int argc, char** argv) {
       o.inflight = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--peers")
       o.peers = std::max(1, std::atoi(argv[i + 1]));
+    else if (k == "--segments")
+      o.segments = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--produce") o.produce = std::max(0, std::atoi(argv[i + 1]));
     else if (k == "--produce-repeats")
       o.produce_repeats = std::max(1, std::atoi(argv[i + 1]));

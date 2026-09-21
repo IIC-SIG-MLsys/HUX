@@ -167,3 +167,33 @@ This needs a card whose device memory the adapter can register. On an RTX
 reason in [comparison.md](comparison.md): GPUDirect is withheld from the
 consumer line, so the benchmark falls back to host memory where there is no
 stream to order against.
+
+## One transfer as several scattered segments
+
+`--segments N` splits each transfer into N pieces at strided offsets and
+sends them with `writev`, which is a different path from a contiguous
+transfer: it pairs segments by index, submits them together, and has to
+handle a partial submit. Nothing measured it before.
+
+1 MiB as one piece against eight of 128 KiB, cross-machine, 6000 transfers
+per point, three passes in alternating order:
+
+| pass | 1 segment | 8 segments |
+| --- | --- | --- |
+| 1 | 34.60 | 44.29 |
+| 2 | 85.99 | 85.77 |
+| 3 | 85.42 | 85.75 |
+
+The first pass is a cold start and it hit both arms. Excluding it, the two
+are within 0.4% of each other: **scattering a transfer eight ways costs
+nothing measurable here.**
+
+The first attempt at this used 400 transfers per point rather than 6000, and
+produced 61.35 / 86.16 / 41.55 for one segment against 85.99 / 86.09 / 86.14
+for eight. By medians that is 8 segments winning by 1.4x, and it is not
+real: 400 transfers of 1 MiB is 37 ms of work at this rate, so a single
+scheduling hiccup is most of the measurement. The clue was in the numbers --
+the contiguous arm's best result equalled the scattered arm's typical one,
+which is what a disturbance looks like and not what a slower path looks
+like. Fifteen times the work made the cold start land on the other arm
+instead, which settles it.
