@@ -72,6 +72,19 @@ struct RdmaConfig {
   /* Address peers should dial back on. A provider cannot pick this itself on
    * a multi-homed host, so the caller states it. */
   std::string advertise_ip = "127.0.0.1";
+  /* Which of this host's adapters this provider is. Zero keeps the name
+   * "rdma"; anything else appends "#N", so an engine holding one provider
+   * per adapter has a distinct name for each -- and a peer matches ours by
+   * that name, which is why it is an ordinal rather than a device name.
+   * Adapters are not called the same thing on two hosts.
+   *
+   * Zero for a single-adapter engine, which is every caller that does not
+   * ask for more, so nothing changes on the wire for them. */
+  uint32_t nic_ordinal = 0;
+  /* This adapter's share when a transfer is split across several. See
+   * ProviderCaps::relative_capacity; the provider cannot measure this for
+   * itself, so the caller states it. */
+  double relative_capacity = 1.0;
 };
 
 /* Wire format of the connection handshake. A major mismatch is refused rather

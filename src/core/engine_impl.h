@@ -22,8 +22,21 @@ class EngineImpl;
 
 class PeerImpl : public Peer {
  public:
-  PeerImpl(PeerId id, Identity remote, ProviderConnectionPtr conn,
-           PeerCaps caps, EngineImpl* engine, TransportProviderPtr provider);
+  /* One way of reaching this peer. A peer on a host with an adapter each
+   * side of it has one of these per adapter, and a transfer can be split
+   * between them -- which is worth doing only because they do not share a
+   * bottleneck, and worth weighting because they are rarely equal. */
+  struct Lane {
+    TransportProviderPtr provider;
+    ProviderConnectionPtr conn;
+    /* Share of a transfer's bytes. Measured rather than assumed: two
+     * adapters on one host here differ by 2.14x, and an even split would be
+     * held to the slower one. */
+    double weight = 1.0;
+  };
+
+  PeerImpl(PeerId id, Identity remote, std::vector<Lane> lanes, PeerCaps caps,
+           EngineImpl* engine);
 
   PeerId id() const override { return id_; }
   Epoch epoch() const override {
@@ -38,13 +51,30 @@ class PeerImpl : public Peer {
   Status import_region_batch(std::vector<std::vector<uint8_t>> const& descs,
                              std::vector<RemoteRegionPtr>* out) override;
 
-  ProviderConnection* conn() const { return conn_.get(); }
-  ProviderConnectionPtr conn_ptr() const { return conn_; }
+  /* The first lane. Control messages travel on it rather than being spread:
+   * an invalidation or a notification is one message, and splitting it
+   * between adapters would only make its ordering harder to reason about. */
+  ProviderConnection* conn() const {
+    return lanes_.empty() ? nullptr : lanes_[0].conn.get();
+  }
+  ProviderConnectionPtr conn_ptr() const {
+    return lanes_.empty() ? nullptr : lanes_[0].conn;
+  }
+  std::vector<Lane> const& lanes() const { return lanes_; }
+  /* A peer is gone when any way of reaching it is: a transfer split across
+   * lanes cannot complete on the strength of the ones still up. */
+  bool any_lane_gone() const {
+    for (auto const& l : lanes_)
+      if (l.conn != nullptr && !l.conn->alive()) return true;
+    return false;
+  }
   /* The provider this peer was reached over. Held per peer rather than per
    * engine: a peer in the next process and a peer on the next machine are
    * reached by different transports, and a request has to go out over the one
    * that can actually reach its peer. */
-  TransportProvider* provider() const { return provider_.get(); }
+  TransportProvider* provider() const {
+    return lanes_.empty() ? nullptr : lanes_[0].provider.get();
+  }
   /* Bumping the epoch keeps old requests off a new connection. */
   void bump_epoch() {
     epoch_.fetch_add(1, std::memory_order_acq_rel);
@@ -56,8 +86,7 @@ class PeerImpl : public Peer {
   /* Who is on the other end, as the metadata said. Held so an imported
    * descriptor can be checked against the peer it is being imported into. */
   Identity const remote_identity_;
-  ProviderConnectionPtr conn_;
-  TransportProviderPtr provider_;
+  std::vector<Lane> lanes_;
   PeerCaps const caps_;
   EngineImpl* const engine_;
   std::atomic<Epoch> epoch_{0};
@@ -124,8 +153,8 @@ class EngineImpl : public Engine {
   /* Splits paired segments into SubOps of at most chunk_bytes. */
   Status build_subops(PeerId peer, std::vector<RegionView> const& local,
                       std::vector<RegionView> const& remote, SubOp::Kind kind,
-                      RequestId req, std::string const& provider,
-                      std::vector<SubOp>* out,
+                      RequestId req, std::vector<PeerImpl::Lane> const& lanes,
+                      std::vector<std::vector<SubOp>>* out,
                       std::vector<MemoryRegionPtr>* held, void** target_addr,
                       uint64_t* target_bytes);
   /* A request whose device dependencies have not been met yet. It is admitted

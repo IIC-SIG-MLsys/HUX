@@ -72,6 +72,12 @@ struct Options {
    * a host with two ports on one subnet will otherwise connect and then fail
    * every transfer. */
   std::string local_ip = "0.0.0.0";
+  /* One address per adapter to use. More than one puts a transport on each
+   * and splits transfers between them; the weights say in what proportion,
+   * and an even split across unequal adapters is worse than using the better
+   * one alone. */
+  std::vector<std::string> local_ips;
+  std::vector<double> weights;
   /* 0 leaves the engine's default. Sweeping it is how a caller finds out
    * whether tuning is worth doing at all. */
   uint64_t chunk = 0;
@@ -317,6 +323,32 @@ bool read_trace(std::string const& path, std::vector<TraceRecord>* out) {
   return !out->empty();
 }
 
+/* One transport per adapter named on the command line. The first keeps the
+ * name "rdma" so a single-adapter run is unchanged; the rest are siblings of
+ * it, which is how the engine knows they are two ways to the same place
+ * rather than two different places. */
+Status make_rdma_providers(Options const& o, RdmaConfig base,
+                           std::vector<TransportProviderPtr>* out,
+                           std::shared_ptr<RdmaProvider>* first) {
+  std::vector<std::string> ips = o.local_ips;
+  if (ips.empty()) ips.push_back(o.local_ip);
+  for (size_t i = 0; i < ips.size(); ++i) {
+    RdmaConfig cfg = base;
+    cfg.advertise_ip = ips[i];
+    cfg.nic_ordinal = static_cast<uint32_t>(i);
+    cfg.relative_capacity = i < o.weights.size() ? o.weights[i] : 1.0;
+    std::shared_ptr<RdmaProvider> p;
+    Status const s = RdmaProvider::create(cfg, &p);
+    if (s != Status::kOk) {
+      std::printf("adapter for %s: %s\n", ips[i].c_str(), to_string(s));
+      return s;
+    }
+    if (i == 0) *first = p;
+    out->push_back(std::move(p));
+  }
+  return Status::kOk;
+}
+
 /* The byte a peer on this port stamps its memory with. Never zero, so an
  * untouched destination cannot pass for a peer's data. */
 uint8_t stamp_for(uint16_t port) {
@@ -364,11 +396,11 @@ Summary summarize(std::vector<double> us, uint64_t bytes) {
 
 int run_server(Options const& o) {
   RdmaConfig cfg;
-  cfg.advertise_ip = o.local_ip;
   cfg.qp_per_conn = o.qp;
   cfg.cc = make_cc(o.cc);
+  std::vector<TransportProviderPtr> provs;
   std::shared_ptr<RdmaProvider> prov;
-  if (RdmaProvider::create(cfg, &prov) != Status::kOk) {
+  if (make_rdma_providers(o, cfg, &provs, &prov) != Status::kOk) {
     std::printf("provider create failed\n");
     return 1;
   }
@@ -385,7 +417,7 @@ int run_server(Options const& o) {
   }
 
   std::unique_ptr<Engine> engine;
-  if (make_engine(ecfg, pool.dev, prov, &engine) != Status::kOk) return 1;
+  if (make_engine(ecfg, pool.dev, provs, &engine) != Status::kOk) return 1;
 
   MemoryRegionPtr region;
   if (engine->register_memory(pool.ptr, pool.bytes,
@@ -428,10 +460,20 @@ int run_server(Options const& o) {
   send_blob(fd, meta.data(), static_cast<uint32_t>(meta.size()));
   send_blob(fd, desc.data(), static_cast<uint32_t>(desc.size()));
 
-  ProviderConnectionPtr conn;
-  if (prov->accept(30000, &conn) != Status::kOk) {
-    std::printf("[server] rdma accept failed\n");
-    return 1;
+  /* One accept per transport, because the client dials every one it can
+   * reach: a server that accepted on the first would leave the others'
+   * handshakes unanswered and the client waiting on them. */
+  std::vector<ProviderConnectionPtr> conns;
+  for (auto& tp : provs) {
+    ProviderConnectionPtr conn;
+    auto* rp = static_cast<RdmaProvider*>(tp.get());
+    Status const s = rp->accept(30000, &conn);
+    if (s != Status::kOk) {
+      std::printf("[server] rdma accept on %s failed: %s\n",
+                  rp->caps().name.c_str(), to_string(s));
+      return 1;
+    }
+    conns.push_back(std::move(conn));
   }
   std::printf("[server] connected; holding memory until the client finishes\n");
 
@@ -482,13 +524,13 @@ int run_client(std::string const& ip, Options const& o) {
 
 
   RdmaConfig cfg;
-  /* This side's own address, not the peer's: it selects the local port and
-   * GID. */
-  cfg.advertise_ip = o.local_ip;
+  /* This side's own addresses, not the peer's: each selects a local port and
+   * GID, and one transport is built per address. */
   cfg.qp_per_conn = o.qp;
   cfg.cc = make_cc(o.cc);
+  std::vector<TransportProviderPtr> provs;
   std::shared_ptr<RdmaProvider> prov;
-  if (RdmaProvider::create(cfg, &prov) != Status::kOk) return 1;
+  if (make_rdma_providers(o, cfg, &provs, &prov) != Status::kOk) return 1;
 
   EngineConfig ecfg;
   ecfg.progress = ProgressMode::kExplicit;
@@ -501,7 +543,7 @@ int run_client(std::string const& ip, Options const& o) {
   }
 
   std::unique_ptr<Engine> engine;
-  if (make_engine(ecfg, pool.dev, prov, &engine) != Status::kOk) return 1;
+  if (make_engine(ecfg, pool.dev, provs, &engine) != Status::kOk) return 1;
 
   MemoryRegionPtr local;
   if (engine->register_memory(pool.ptr, pool.bytes,
@@ -1154,7 +1196,9 @@ int main(int argc, char** argv) {
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
                 " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n"
                 "       [--peers N] [--segments N] [--produce N]\n"
-                "       [--produce-repeats N] [--trace FILE]\n",
+                "       [--produce-repeats N] [--trace FILE]\n"
+                "       --local takes a list: one adapter per address, with"
+                " --weights w1,w2\n",
                 argv[0]);
     return 2;
   }
@@ -1162,7 +1206,27 @@ int main(int argc, char** argv) {
   for (int i = 1; i + 1 < argc; ++i) {
     std::string const k = argv[i];
     if (k == "--qp") o.qp = static_cast<uint32_t>(std::atoi(argv[i + 1]));
-    else if (k == "--local") o.local_ip = argv[i + 1];
+    else if (k == "--local") {
+      o.local_ips.clear();
+      char const* q = argv[i + 1];
+      while (*q != '\0') {
+        char const* c = std::strchr(q, ',');
+        o.local_ips.emplace_back(q, c == nullptr ? std::strlen(q)
+                                                 : static_cast<size_t>(c - q));
+        if (c == nullptr) break;
+        q = c + 1;
+      }
+      if (!o.local_ips.empty()) o.local_ip = o.local_ips.front();
+    } else if (k == "--weights") {
+      o.weights.clear();
+      char const* q = argv[i + 1];
+      while (*q != '\0') {
+        o.weights.push_back(std::strtod(q, nullptr));
+        char const* c = std::strchr(q, ',');
+        if (c == nullptr) break;
+        q = c + 1;
+      }
+    }
     else if (k == "--chunk")
       o.chunk = std::strtoull(argv[i + 1], nullptr, 10);
     else if (k == "--gpu")

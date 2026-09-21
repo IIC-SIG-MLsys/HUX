@@ -13,13 +13,11 @@ namespace hux {
 
 // ---------------- PeerImpl ----------------
 
-PeerImpl::PeerImpl(PeerId id, Identity remote, ProviderConnectionPtr conn,
-                   PeerCaps caps, EngineImpl* engine,
-                   TransportProviderPtr provider)
+PeerImpl::PeerImpl(PeerId id, Identity remote, std::vector<Lane> lanes,
+                   PeerCaps caps, EngineImpl* engine)
     : id_(id),
       remote_identity_(remote),
-      conn_(std::move(conn)),
-      provider_(std::move(provider)),
+      lanes_(std::move(lanes)),
       caps_(caps),
       engine_(engine) {}
 
@@ -50,21 +48,31 @@ Status PeerImpl::import_region(std::vector<uint8_t> const& descriptor,
                           d.origin.engine != remote_identity_.engine))
     return Status::kStaleGeneration;
 
-  /* The peer exported a key per transport; take the one minted by the
-   * transport this peer is reached over. A region exported only for another
-   * path is refused here, where the reason is visible, rather than accepted
-   * and rejected by hardware somewhere with no context. */
+  /* The peer exported a key per transport, and the whole list is kept: a
+   * peer reached over more than one adapter has a key per adapter, and a
+   * write carried by one cannot use another's -- an rkey belongs to the
+   * protection domain that issued it, and the lane is not known until the
+   * transfer is split.
+   *
+   * What is settled here is that at least one lane can use this region. A
+   * region exported only for a path this peer is not reached over is refused
+   * where the reason is visible, rather than accepted and rejected by
+   * hardware somewhere with no context. */
   if (!d.provider_keys.empty()) {
-    std::string const want = provider_->caps().name;
-    bool found = false;
-    for (auto const& k : d.provider_keys) {
-      if (k.provider == want) {
-        d.remote_key = k.remote_key;
-        found = true;
+    bool usable = false;
+    for (auto const& lane : lanes_) {
+      if (lane.provider == nullptr) continue;
+      std::string const want = lane.provider->caps().name;
+      for (auto const& k : d.provider_keys) {
+        if (k.provider != want) continue;
+        /* The first lane's key stays in the unnamed field, so anything that
+         * reads it without asking for a lane gets the primary one. */
+        if (&lane == &lanes_.front()) d.remote_key = k.remote_key;
+        usable = true;
         break;
       }
     }
-    if (!found) return Status::kUnsupported;
+    if (!usable) return Status::kUnsupported;
   }
 
   auto r = std::make_shared<RemoteRegionImpl>(d);
@@ -511,7 +519,18 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
   }
 
   /* In local preference order, the first transport that suits where the peer
-   * is and that the peer also offers. */
+   * is and that the peer also offers -- and then every sibling of it, so a
+   * transfer can be split across them.
+   *
+   * Siblings are transports of one family: "rdma" and "rdma#1" are the same
+   * thing on two adapters, while "ipc" is a different path entirely.
+   * Splitting a transfer between an adapter and shared memory would be
+   * splitting it between two different answers to where the peer is. */
+  auto const family = [](std::string const& n) {
+    size_t const h = n.find('#');
+    return h == std::string::npos ? n : n.substr(0, h);
+  };
+
   TransportProviderPtr chosen;
   for (auto const& prov : providers_) {
     std::string const name = prov->caps().name;
@@ -530,10 +549,33 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
     if (chosen != nullptr) break;
   }
   if (chosen == nullptr) return Status::kUnsupported;
+  std::string const chosen_family = family(chosen->caps().name);
 
-  ProviderConnectionPtr conn;
-  Status s = chosen->connect(provider_meta, &conn);
-  if (s != Status::kOk) return s;
+  std::vector<PeerImpl::Lane> lanes;
+  {
+    ProviderConnectionPtr conn;
+    Status const s = chosen->connect(provider_meta, &conn);
+    if (s != Status::kOk) return s;
+    lanes.push_back(
+        {chosen, std::move(conn), chosen->caps().relative_capacity});
+  }
+
+  /* The rest of the family, where the peer offers them too. A lane that will
+   * not connect is left out rather than failing the peer: one adapter being
+   * unreachable is a reason to use the others, not to give up. */
+  for (auto const& prov : providers_) {
+    if (prov == chosen) continue;
+    std::string const name = prov->caps().name;
+    if (!suits(name, locality) || family(name) != chosen_family) continue;
+    for (auto const& o : offered) {
+      if (o.first != name) continue;
+      ProviderConnectionPtr lane_conn;
+      if (prov->connect(o.second, &lane_conn) == Status::kOk)
+        lanes.push_back(
+            {prov, std::move(lane_conn), prov->caps().relative_capacity});
+      break;
+    }
+  }
 
   PeerCaps caps;
   caps.provider = chosen->caps().name;
@@ -561,14 +603,19 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
     caps.path = PathKind::kIpc;
   else
     caps.path = PathKind::kRdma;
-  caps.qp_count = conn->qp_count();
+  /* Across every lane, since that is how many queue pairs this peer is
+   * actually reached over. One adapter's count would understate it. */
+  caps.qp_count = 0;
+  for (auto const& l : lanes)
+    if (l.conn != nullptr) caps.qp_count += l.conn->qp_count();
+  caps.lane_count = static_cast<uint32_t>(lanes.size());
   if (device_ != nullptr) {
     caps.remote_max_registration_bytes = device_->caps().max_registration_bytes;
   }
 
   PeerId id = next_peer_.fetch_add(1, std::memory_order_relaxed);
-  auto p = std::make_shared<PeerImpl>(id, peer_id, std::move(conn), caps, this,
-                                      std::move(chosen));
+  auto p =
+      std::make_shared<PeerImpl>(id, peer_id, std::move(lanes), caps, this);
   {
     std::lock_guard<std::mutex> g(mu_);
     peers_[id] = p;
@@ -585,7 +632,17 @@ Status EngineImpl::remove_peer(PeerPtr peer) {
     std::lock_guard<std::mutex> g(mu_);
     peers_.erase(p->id());
   }
-  return p->provider()->disconnect(p->conn_ptr());
+  /* Every lane. Leaving one connected would hold the peer's memory
+   * registered on that adapter and keep a channel open that nothing will
+   * ever read again. The first failure is reported and the rest are still
+   * closed, because half a disconnect is worse than either outcome. */
+  Status first = Status::kOk;
+  for (auto const& l : p->lanes()) {
+    if (l.provider == nullptr || l.conn == nullptr) continue;
+    Status const s = l.provider->disconnect(l.conn);
+    if (s != Status::kOk && first == Status::kOk) first = s;
+  }
+  return first;
 }
 
 std::shared_ptr<MemoryRegionImpl> EngineImpl::find_region(RegionId id) const {
@@ -616,10 +673,18 @@ Status EngineImpl::build_subops(PeerId peer,
                                 std::vector<RegionView> const& local,
                                 std::vector<RegionView> const& remote,
                                 SubOp::Kind kind, RequestId req,
-                                std::string const& provider,
-                                std::vector<SubOp>* out,
+                                std::vector<PeerImpl::Lane> const& lanes,
+                                std::vector<std::vector<SubOp>>* out,
                                 std::vector<MemoryRegionPtr>* held,
                                 void** target_addr, uint64_t* target_bytes) {
+  if (lanes.empty()) return Status::kNotFound;
+  out->assign(lanes.size(), {});
+  /* Bytes already given to each lane, so the next chunk can go where it
+   * costs least in proportion to what that lane can carry. Whole chunks are
+   * assigned rather than fractions of one: a chunk is already the scheduling
+   * unit, and splitting below it would trade balance for round trips. */
+  std::vector<double> assigned(lanes.size(), 0.0);
+
   uint64_t sub_id = 0;
   uint64_t total = 0;
   for (size_t i = 0; i < local.size(); ++i) {
@@ -645,6 +710,23 @@ Status EngineImpl::build_subops(PeerId peer,
     while (off < local[i].span.length) {
       uint64_t n = local[i].span.length - off;
       if (n > cfg_.chunk_bytes) n = cfg_.chunk_bytes;
+      /* Whichever lane this chunk costs least, in proportion to what that
+       * lane carries. With one lane this picks it every time and nothing
+       * about the result changes. */
+      size_t lane = 0;
+      double best = 0;
+      bool have = false;
+      for (size_t k = 0; k < lanes.size(); ++k) {
+        double const w = lanes[k].weight > 0 ? lanes[k].weight : 1e-9;
+        double const cost = (assigned[k] + static_cast<double>(n)) / w;
+        if (!have || cost < best) {
+          best = cost;
+          lane = k;
+          have = true;
+        }
+      }
+
+      std::string const& lane_name = lanes[lane].provider->caps().name;
       SubOp op;
       op.kind = kind;
       op.request = req;
@@ -655,12 +737,16 @@ Status EngineImpl::build_subops(PeerId peer,
        * first. A key minted by a NIC means nothing to a mapping, and using one
        * for the other would be accepted here and refused far away. */
       uint64_t lkey = 0;
-      if (!lr->local_key_for(provider, &lkey)) return Status::kUnsupported;
+      if (!lr->local_key_for(lane_name, &lkey)) return Status::kUnsupported;
       op.local_key = lkey;
       op.remote_addr = rr->base() + remote[i].span.offset + off;
-      op.remote_key = rr->remote_key();
+      /* And the peer's key for that same transport, for the same reason from
+       * the other end. */
+      if (!rr->remote_key_for(lane_name, &op.remote_key))
+        return Status::kUnsupported;
       op.length = n;
-      out->push_back(op);
+      (*out)[lane].push_back(op);
+      assigned[lane] += static_cast<double>(n);
       off += n;
     }
   }
@@ -821,19 +907,22 @@ Status EngineImpl::submit_vector(Peer* peer,
   }
 
   RequestId req_id = next_request_.fetch_add(1, std::memory_order_relaxed);
-  std::vector<SubOp> ops;
+  std::vector<std::vector<SubOp>> per_lane;
   std::vector<MemoryRegionPtr> held;
   void* target_addr = nullptr;
   uint64_t target_bytes = 0;
-  Status s = build_subops(p->id(), local, remote, kind, req_id,
-                          p->provider()->caps().name, &ops, &held, &target_addr,
-                          &target_bytes);
+  Status s = build_subops(p->id(), local, remote, kind, req_id, p->lanes(),
+                          &per_lane, &held, &target_addr, &target_bytes);
   if (s != Status::kOk) return s;
 
+  size_t total_ops = 0;
+  for (auto const& v : per_lane) total_ops += v.size();
+
   auto req = std::make_shared<RequestImpl>(
-      req_id, kind, static_cast<uint32_t>(ops.size()), opts.context);
+      req_id, kind, static_cast<uint32_t>(total_ops), opts.context);
   for (auto& r : held) req->hold_region(std::move(r));
   req->hold_connection(p->conn_ptr());
+  req->set_peer(p->id());
   req->set_device_backend(device_.get());
   req->set_target(target_addr, target_bytes);
   if (kind == SubOp::Kind::kWrite && !remote.empty()) {
@@ -862,31 +951,43 @@ Status EngineImpl::submit_vector(Peer* peer,
       stats_.peak_inflight_requests = depth;
   }
 
-  PendingSubmit ps;
-  ps.req = req;
-  ps.ops = std::move(ops);
-  ps.conn = p->conn_ptr();
-  ps.peer = p->id();
-  ps.provider = p->provider();
+  /* One piece of pending work per lane. The request counts sub-operations
+   * rather than connections, so it completes when every lane's share has,
+   * and nothing below here has to know a transfer was split. */
+  std::vector<PendingSubmit> parts;
+  for (size_t k = 0; k < per_lane.size(); ++k) {
+    if (per_lane[k].empty()) continue;
+    PendingSubmit ps;
+    ps.req = req;
+    ps.ops = std::move(per_lane[k]);
+    ps.conn = p->lanes()[k].conn;
+    ps.peer = p->id();
+    ps.provider = p->lanes()[k].provider.get();
+    ps.after = opts.after;
+    parts.push_back(std::move(ps));
+  }
+  /* The first lane, for what belongs to a single connection: a ready handoff
+   * travels back over one channel, not over whichever carried a chunk. */
   req->set_provider(p->provider());
-  ps.after = opts.after;
 
-  if (!ps.after.empty() && !dependencies_met(ps.after)) {
+  if (!opts.after.empty() && !dependencies_met(opts.after)) {
     /* The request is accepted and handed back now; only its submission waits,
      * so the calling thread never blocks on the device. */
     req->set_state(RequestState::kWaitDependency);
     {
       std::lock_guard<std::mutex> g(mu_);
-      pending_.push_back(std::move(ps));
+      for (auto& ps : parts) pending_.push_back(std::move(ps));
     }
     *out = req;
     return Status::kOk;
   }
 
-  if (!post_ops(&ps, cfg_.scheduler_quantum_bytes)) {
-    /* Not all of it fit in one turn; the rest waits for a later pass. */
-    std::lock_guard<std::mutex> g(mu_);
-    pending_.push_back(std::move(ps));
+  for (auto& ps : parts) {
+    if (!post_ops(&ps, cfg_.scheduler_quantum_bytes)) {
+      /* Not all of it fit in one turn; the rest waits for a later pass. */
+      std::lock_guard<std::mutex> g(mu_);
+      pending_.push_back(std::move(ps));
+    }
   }
   *out = req;
   if (req->accepted_subops() > 0 || req->error().ok()) return Status::kOk;
@@ -1021,9 +1122,10 @@ void EngineImpl::reap_departed_peers() {
     for (auto& kv : peers_) {
       auto& p = kv.second;
       if (!p->connected()) continue;
-      ProviderConnection* c = p->conn();
-      /* Only a provider can see its channel close, and it says so here. */
-      if (c != nullptr && !c->alive()) gone.push_back(p);
+      /* Only a provider can see its channel close, and it says so here.
+       * Any lane, not the first: a transfer split across them cannot
+       * complete on the strength of the ones still up. */
+      if (p->any_lane_gone()) gone.push_back(p);
     }
   }
   if (gone.empty()) return;
@@ -1037,7 +1139,10 @@ void EngineImpl::reap_departed_peers() {
     {
       std::lock_guard<std::mutex> g(mu_);
       for (auto it = inflight_.begin(); it != inflight_.end();) {
-        if (it->second->connection() == p->conn_ptr()) {
+        /* By peer, not by connection: a split transfer sits on several of
+         * this peer's connections and matching one of them would strand only
+         * part of it. */
+        if (it->second->peer() == p->id()) {
           stranded.push_back(it->second);
           it = inflight_.erase(it);
         } else {

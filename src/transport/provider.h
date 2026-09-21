@@ -67,6 +67,15 @@ struct ProviderCaps {
   bool needs_explicit_flush = false; /* UCX: local put != remote visibility. */
   /* Reserved alongside SubOp::signal_peer; see the note there. */
   bool supports_peer_signal = false;
+  /* What a transfer split across siblings should give this one, relative to
+   * the others. Equal shares are wrong whenever the siblings are not equal:
+   * two adapters on one host here differ by 2.14x, and an even split would
+   * be held to the slower one and finish below the faster one used alone.
+   *
+   * A measurement rather than a constant -- run the benchmark against each
+   * adapter and use the rates. One by default, which is right when there is
+   * only one. */
+  double relative_capacity = 1.0;
   uint64_t max_segment_bytes = 0; /* 0 if unbounded. */
   uint32_t max_sge = 1;
 };

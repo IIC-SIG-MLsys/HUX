@@ -45,6 +45,10 @@ struct PeerCaps {
   PeerPlace place = PeerPlace::kUnknown;
   std::string provider;
   uint32_t qp_count = 0;
+  /* How many ways this peer is reached at once. One unless the engine holds
+   * a transport per adapter and the peer offers the same, in which case a
+   * transfer is split between them. */
+  uint32_t lane_count = 1;
   bool remote_device_is_gpu = false;
   uint64_t remote_max_registration_bytes = 0; /* 0 if unbounded. */
 };

@@ -428,7 +428,8 @@ Status RdmaProvider::start_listener() {
 
 ProviderCaps RdmaProvider::caps() const {
   ProviderCaps c;
-  c.name = "rdma";
+  c.name = cfg_.nic_ordinal == 0 ? std::string("rdma")
+                                 : "rdma#" + std::to_string(cfg_.nic_ordinal);
   c.supports_read = true;
   c.supports_write = true;
   c.supports_vector = false; /* Core splits into scalar sub-operations. */
@@ -438,6 +439,7 @@ ProviderCaps RdmaProvider::caps() const {
    * queue pair completing says nothing about the others. Arrival is announced
    * over the control channel once every sub-operation is done. */
   c.supports_peer_signal = false;
+  c.relative_capacity = cfg_.relative_capacity;
   c.max_segment_bytes = 0;
   c.max_sge = cfg_.max_sge;
   return c;
@@ -726,7 +728,23 @@ Status RdmaProvider::connect(std::vector<uint8_t> const& peer_metadata,
     ::close(sock);
     return Status::kPeerDisconnected;
   }
+  /* Bounded. The peer's listener accepting the socket says nothing about
+   * anything being ready to exchange endpoints on it -- a process holding a
+   * transport per adapter and accepting on one of them at a time will leave
+   * the others' handshakes unanswered for as long as it likes. Blocking
+   * there would hang the caller inside what it thinks is a connect, and with
+   * several lanes it would hang the whole peer over one adapter. */
+  timeval tv{30, 0};
+  ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   Status s = build_connection(sock, out);
+  /* Blocking again once it is up: the control channel is polled, not waited
+   * on, and a receive timeout there would look like the peer going away. */
+  if (s == Status::kOk) {
+    timeval none{0, 0};
+    ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof(none));
+    ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &none, sizeof(none));
+  }
   /* Not closed: build_connection keeps it as the control channel. On failure
    * it never took ownership, so it is closed here. */
   if (s != Status::kOk) ::close(sock);

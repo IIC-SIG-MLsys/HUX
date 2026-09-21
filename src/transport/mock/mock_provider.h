@@ -21,6 +21,12 @@
 namespace hux {
 
 struct MockConfig {
+  /* What this provider calls itself. Tests that need several of one family
+   * -- a transfer split across siblings -- give each a name, since the
+   * engine pairs a local transport with a peer's by name. */
+  std::string name = "mock";
+  /* Its share when a transfer is split across siblings. */
+  double relative_capacity = 1.0;
   uint32_t qp_count = 1;
   uint32_t submit_capacity = 1024;
   /* Cap on accepted SubOps per submit, 0 for no cap; stages partial posts. */
@@ -80,7 +86,8 @@ class MockProvider : public TransportProvider {
 
   ProviderCaps caps() const override {
     ProviderCaps c;
-    c.name = "mock";
+    c.name = cfg_.name;
+    c.relative_capacity = cfg_.relative_capacity;
     c.supports_read = true;
     c.supports_write = true;
     c.supports_vector = true;

@@ -69,6 +69,12 @@ class RequestImpl : public Request {
 
   void hold_region(MemoryRegionPtr r) { held_regions_.push_back(std::move(r)); }
   void hold_connection(ProviderConnectionPtr c) { held_conn_ = std::move(c); }
+  /* Which peer this belongs to. A transfer split across a peer's adapters
+   * has chunks on more than one connection, so "did this request go out on
+   * the connection that just died" is the wrong question -- the right one is
+   * whether it belongs to the peer that just went. */
+  void set_peer(PeerId p) { peer_ = p; }
+  PeerId peer() const { return peer_; }
   /* The connection this request went out on: a handoff belongs on the same
    * one, not on whichever peer happens to be registered. */
   ProviderConnectionPtr connection() const { return held_conn_; }
@@ -115,6 +121,7 @@ class RequestImpl : public Request {
 
   std::vector<MemoryRegionPtr> held_regions_;
   ProviderConnectionPtr held_conn_;
+  PeerId peer_ = 0;
   TransportProvider* provider_ = nullptr;
   DeviceBackend* device_ = nullptr;
   void* target_addr_ = nullptr;

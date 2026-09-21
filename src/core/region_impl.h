@@ -158,6 +158,23 @@ class RemoteRegionImpl : public RemoteRegion {
 
   uint64_t base() const { return d_.base; }
   uint64_t remote_key() const { return d_.remote_key; }
+  /* The key the named transport minted. A peer with an adapter each side of
+   * a machine exported one per adapter, and a write carried by one of them
+   * cannot use the other's: an rkey belongs to the protection domain that
+   * issued it. Falls back to the unnamed key for a peer that exported only
+   * one. */
+  bool remote_key_for(std::string const& provider, uint64_t* out) const {
+    for (auto const& k : d_.provider_keys)
+      if (k.provider == provider) {
+        *out = k.remote_key;
+        return true;
+      }
+    if (d_.provider_keys.empty()) {
+      *out = d_.remote_key;
+      return true;
+    }
+    return false;
+  }
   void invalidate() { valid_.store(false, std::memory_order_release); }
 
  private:
