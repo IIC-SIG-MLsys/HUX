@@ -80,14 +80,19 @@ and the long-running crossings of those dimensions rather than one at a
 time.
 
 **BENCH-01.** `hux-bench` measures latency and bandwidth at fixed sizes
-across two machines. Trace replay, mixed long and short requests, several
-peers, a producing and consuming kernel, and the ablations are not there.
+across two machines, with a chosen number of requests in flight, a stream of
+interleaved sizes measured against each size run alone, the processor time a
+transfer costs, and several peers at once.
 
-**MIG-01. Done.** [migration.md](migration.md) has the object and call
-mapping, four worked examples against the real HMC signatures -- a one-off
-write, a batch, waiting for a particular stage, and telling the peer -- and a
-compatibility statement covering the four version numbers and what each
-refuses. The HUX half of every example compiles against the headers.
+`--peers N` talks to N servers on consecutive ports from one engine. Each
+server stamps its memory with a byte of its own and the client checks what
+came back, which is the part worth having: a read landing on the wrong
+peer's region succeeds and returns the right number of bytes, so only the
+contents say anything is wrong. That is the defect found on 2026-09-21, and
+this would have caught it.
+
+Still missing: trace replay, a producing and consuming kernel on the
+critical path, and the ablations.
 
 **PY-01. Done.** Complete, stream and event adapters included. A build with
 a device backend exposes `import_stream`, `record_event` and

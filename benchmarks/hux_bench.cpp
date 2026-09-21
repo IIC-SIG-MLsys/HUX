@@ -83,6 +83,10 @@ struct Options {
   /* Sizes to interleave in one stream, so that a short request has a long
    * one ahead of it. Empty means each size runs on its own. */
   std::vector<uint64_t> mix;
+  /* How many servers to talk to at once, on consecutive ports. One engine
+   * with several peers is the shape a client actually takes, and it is a
+   * shape nothing else here measures. */
+  int peers = 1;
   std::vector<uint64_t> sizes = {4096, 65536, 1u << 20, 8u << 20};
   int iters = 50;
   int warmup = 5;
@@ -170,7 +174,39 @@ struct Pool {
 #endif
     return dev != nullptr;
   }
+
+  /* Every peer stamps its memory with a byte of its own, so a reader can
+   * check it got the peer it asked for. Nothing else in the benchmark
+   * distinguishes one peer's bytes from another's, and a request landing on
+   * the wrong peer's region succeeds with the right length. */
+  bool fill(uint8_t v) {
+    if (ptr == nullptr) return false;
+    if (dev == nullptr) {
+      std::memset(ptr, v, bytes);
+      return true;
+    }
+    std::vector<uint8_t> pattern(bytes, v);
+    return dev->copy(ptr, pattern.data(), bytes) == Status::kOk;
+  }
+
+  /* The first bytes back on the host, for that check. */
+  bool peek(std::vector<uint8_t>* out, uint64_t n) const {
+    if (ptr == nullptr) return false;
+    n = n < bytes ? n : bytes;
+    out->assign(n, 0);
+    if (dev == nullptr) {
+      std::memcpy(out->data(), ptr, n);
+      return true;
+    }
+    return dev->copy(out->data(), ptr, n) == Status::kOk;
+  }
 };
+
+/* The byte a peer on this port stamps its memory with. Never zero, so an
+ * untouched destination cannot pass for a peer's data. */
+uint8_t stamp_for(uint16_t port) {
+  return static_cast<uint8_t>((port % 251) + 1);
+}
 
 /* Processor time charged to this process, user and system together and
  * across all its threads. Divided by the bytes moved it answers what a
@@ -244,6 +280,10 @@ int run_server(Options const& o) {
     std::printf("register failed\n");
     return 1;
   }
+  if (!pool.fill(stamp_for(g_meta_port))) {
+    std::printf("[server] could not stamp the pool\n");
+    return 1;
+  }
   std::vector<uint8_t> desc;
   region->export_descriptor(&desc);
   /* The engine's metadata, not the provider's dialling blob. The blob works
@@ -265,8 +305,9 @@ int run_server(Options const& o) {
   a.sin_port = htons(g_meta_port);
   ::bind(srv, reinterpret_cast<sockaddr*>(&a), sizeof(a));
   ::listen(srv, 1);
-  std::printf("[server] ready on :%u, %llu MiB registered\n", g_meta_port,
-              (unsigned long long)(pool.bytes >> 20));
+  std::printf("[server] ready on :%u, %llu MiB registered, stamped 0x%02x\n",
+              g_meta_port, (unsigned long long)(pool.bytes >> 20),
+              stamp_for(g_meta_port));
   int fd = ::accept(srv, nullptr, nullptr);
 
   send_blob(fd, meta.data(), static_cast<uint32_t>(meta.size()));
@@ -287,20 +328,42 @@ int run_server(Options const& o) {
   return 0;
 }
 
-int run_client(std::string const& ip, Options const& o) {
+/* One server's metadata and exported region, over the side channel it
+ * publishes them on. The socket stays open: the server holds its memory
+ * registered until the client closes it. */
+int fetch_from(std::string const& ip, uint16_t port, std::vector<uint8_t>* meta,
+               std::vector<uint8_t>* desc) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   sockaddr_in a{};
   a.sin_family = AF_INET;
-  a.sin_port = htons(g_meta_port);
+  a.sin_port = htons(port);
   ::inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
+  bool connected = false;
   for (int i = 0; i < 30; ++i) {
-    if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) break;
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
+      connected = true;
+      break;
+    }
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  if (!connected) {
+    ::close(fd);
+    return -1;
+  }
+  if (!recv_blob(fd, meta) || !recv_blob(fd, desc)) {
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
 
+int run_client(std::string const& ip, Options const& o) {
   std::vector<uint8_t> meta, desc;
-  recv_blob(fd, &meta);
-  recv_blob(fd, &desc);
+  int fd = fetch_from(ip, g_meta_port, &meta, &desc);
+  if (fd < 0) {
+    std::printf("could not reach a server on :%u\n", g_meta_port);
+    return 1;
+  }
 
 
   RdmaConfig cfg;
@@ -459,6 +522,113 @@ int run_client(std::string const& ip, Options const& o) {
     return {it == runs.end() ? std::vector<double>{} : it->second, wall};
   };
 
+  if (o.peers > 1) {
+    /* One engine, several peers, each stamping its memory with a byte of its
+     * own. The point is the check at the end: a read from the wrong peer's
+     * region succeeds and returns the right number of bytes, so only the
+     * contents say anything is wrong. Region ids are handed out per engine
+     * from one, so every peer has a region 1 for a request to land on. */
+    uint64_t const size = std::min<uint64_t>(o.sizes.front(), pool.bytes);
+    std::printf("\n%d peers on :%u..%u, %llu B each\n", o.peers, g_meta_port,
+                static_cast<unsigned>(g_meta_port + o.peers - 1),
+                (unsigned long long)size);
+    std::printf("%-8s %-10s %10s %12s %14s\n", "peer", "port", "median_us",
+                "rate_Gb/s", "read back");
+
+    struct Extra {
+      int fd = -1;
+      uint16_t port = 0;
+      PeerPtr peer;
+      RemoteRegionPtr remote;
+    };
+    std::vector<Extra> all;
+    /* The first one is the peer already connected above. */
+    all.push_back({fd, g_meta_port, peer, remote});
+    bool ok = true;
+    for (int i = 1; i < o.peers && ok; ++i) {
+      Extra e;
+      e.port = static_cast<uint16_t>(g_meta_port + i);
+      std::vector<uint8_t> m, d;
+      e.fd = fetch_from(ip, e.port, &m, &d);
+      if (e.fd < 0) {
+        std::printf("  no server on :%u -- start one per peer\n", e.port);
+        ok = false;
+        break;
+      }
+      Status s2 = engine->add_peer(m, &e.peer);
+      if (s2 != Status::kOk) {
+        std::printf("  add_peer(:%u) -> %s\n", e.port, to_string(s2));
+        ok = false;
+        break;
+      }
+      s2 = e.peer->import_region(d, &e.remote);
+      if (s2 != Status::kOk) {
+        std::printf("  import_region(:%u) -> %s\n", e.port, to_string(s2));
+        ok = false;
+        break;
+      }
+      all.push_back(std::move(e));
+    }
+
+    if (ok) {
+      RegionView lv;
+      if (local->view(0, size, &lv) != Status::kOk) ok = false;
+      for (size_t i = 0; ok && i < all.size(); ++i) {
+        RegionView rv;
+        if (all[i].remote->view(0, size, &rv) != Status::kOk) {
+          ok = false;
+          break;
+        }
+        std::vector<double> lat;
+        auto const start = Clock::now();
+        for (int n = 0; n < o.iters; ++n) {
+          auto const t0 = Clock::now();
+          RequestPtr req;
+          if (engine->read(all[i].peer.get(), lv, rv, {}, &req) != Status::kOk)
+            break;
+          std::vector<RequestPtr> done;
+          while (!is_terminal(req->state())) engine->poll_completions(64, &done);
+          if (req->state() != RequestState::kSucceeded) break;
+          lat.push_back(
+              std::chrono::duration<double, std::micro>(Clock::now() - t0)
+                  .count());
+        }
+        double const wall =
+            std::chrono::duration<double>(Clock::now() - start).count();
+        if (lat.empty()) {
+          std::printf("%-8zu :%-9u  no transfer succeeded\n", i, all[i].port);
+          continue;
+        }
+        Summary const sum = summarize(lat, size);
+        /* What came back, against what that port stamps. This is the check
+         * the whole section exists for. */
+        std::vector<uint8_t> got;
+        uint8_t const want = stamp_for(all[i].port);
+        bool right = pool.peek(&got, 64);
+        for (uint8_t b : got)
+          if (b != want) right = false;
+        /* The byte is printed, not just the verdict: three peers all
+         * reading "correct" means nothing unless their stamps differ, and
+         * showing them is quicker than working it out. */
+        char seen[16] = "unreadable";
+        if (!got.empty()) std::snprintf(seen, sizeof(seen), "0x%02x", got[0]);
+        std::printf("%-8zu :%-9u %10.1f %12.2f   %s %s\n", i, all[i].port,
+                    sum.median_us,
+                    wall > 0 ? lat.size() * size * 8.0 / (wall * 1e9) : 0.0,
+                    seen, right ? "ok" : "WRONG PEER");
+        if (!right && !got.empty())
+          std::printf("         wanted 0x%02x, read 0x%02x -- this peer's"
+                      " region resolved to another peer's memory\n",
+                      want, got[0]);
+      }
+    }
+    for (size_t i = 1; i < all.size(); ++i)
+      if (all[i].fd >= 0) {
+        send_blob(all[i].fd, "x", 1);
+        ::close(all[i].fd);
+      }
+  }
+
   if (!o.mix.empty()) {
     /* Each size alone first, then all of them interleaved. Without the
      * alone column there is nothing to compare the mixed one against, and
@@ -596,7 +766,8 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: %s server|client <ip> [--qp N] [--cc SPEC]"
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
-                " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n",
+                " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n"
+                "       [--peers N]\n",
                 argv[0]);
     return 2;
   }
@@ -611,6 +782,8 @@ int main(int argc, char** argv) {
       o.gpu = std::atoi(argv[i + 1]);
     else if (k == "--inflight")
       o.inflight = std::max(1, std::atoi(argv[i + 1]));
+    else if (k == "--peers")
+      o.peers = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--mix") {
       o.mix.clear();
       char const* p = argv[i + 1];
