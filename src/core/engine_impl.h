@@ -22,8 +22,8 @@ class EngineImpl;
 
 class PeerImpl : public Peer {
  public:
-  PeerImpl(PeerId id, ProviderConnectionPtr conn, PeerCaps caps,
-           EngineImpl* engine, TransportProviderPtr provider);
+  PeerImpl(PeerId id, Identity remote, ProviderConnectionPtr conn,
+           PeerCaps caps, EngineImpl* engine, TransportProviderPtr provider);
 
   PeerId id() const override { return id_; }
   Epoch epoch() const override {
@@ -53,6 +53,9 @@ class PeerImpl : public Peer {
 
  private:
   PeerId const id_;
+  /* Who is on the other end, as the metadata said. Held so an imported
+   * descriptor can be checked against the peer it is being imported into. */
+  Identity const remote_identity_;
   ProviderConnectionPtr conn_;
   TransportProviderPtr provider_;
   PeerCaps const caps_;

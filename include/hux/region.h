@@ -13,7 +13,8 @@ namespace hux {
 
 /* Wire format version. A major mismatch is rejected outright rather than
  * parsed on a best-effort basis. */
-constexpr uint16_t kDescriptorMajor = 1;
+/* 2: the descriptor names the engine that exported it. */
+constexpr uint16_t kDescriptorMajor = 2;
 constexpr uint16_t kDescriptorMinor = 0;
 
 /* One segment of a transfer. Local and remote segments pair up by index and

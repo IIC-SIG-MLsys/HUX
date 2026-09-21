@@ -24,18 +24,30 @@ after 48 minutes.
 ## Not blocked, just not done
 
 **FAIL-01, peer restart and reconnect.** Departure is handled on both
-transports now. A provider reports it through `ProviderConnection::alive()`
--- the IPC path when its socket closes, the RDMA path when its control
-channel reads end of file, which it used to treat the same as having nothing
-to read. Every progress turn retires peers whose connection has gone, fails
-what was in flight with `kPeerDisconnected`, and marks writes as possibly
-having reached the target, because after a disconnect there is no way to find
-out. Measured on real RDMA: a client notices a departed peer 0.2 s after it
-exits, which is the polling interval.
+transports. A provider reports it through `ProviderConnection::alive()` --
+the IPC path when its socket closes, the RDMA path when its control channel
+reads end of file, which it used to treat the same as having nothing to read.
+Every progress turn retires peers whose connection has gone, fails what was
+in flight with `kPeerDisconnected`, and marks writes as possibly having
+reached the target, because after a disconnect there is no way to find out.
+Measured on real RDMA: a client notices a departed peer 0.2 s after it exits,
+which is the polling interval.
 
-Reconnection itself is what remains, and it may not be worth having:
-`remove_peer` plus `add_peer` already rebuilds the path, and the only thing
-reconnection adds is keeping the same PeerId across it.
+Restart is covered too, and it needed a fix rather than a test. A peer that
+comes back is a new engine, and region ids are handed out per engine from
+one, so its predecessor's descriptors went on looking current. They now carry
+the identity of the engine that exported them and an import into anything
+else is refused with `kStaleGeneration`. Before that the descriptor imported
+cleanly and the transfer failed several calls later with `kInvalidArgument`,
+which describes the argument rather than the peer.
+
+Reconnection itself is what remains, and it is not worth having as a separate
+mechanism: `remove_peer` plus `add_peer` rebuilds the path, and the only
+thing a reconnect would add is keeping one `PeerId` across it. That is worth
+less than it sounds, because the peer's regions have to be re-exported and
+re-imported anyway -- the check above is precisely what stops the old
+descriptors being reused -- so the application is already doing the work a
+preserved id was meant to save.
 
 **CC-02, an adaptive controller that meets a target.** Compared against off
 and a fixed window under four concurrent flows on a saturated link, and they

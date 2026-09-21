@@ -3,6 +3,8 @@
 
 #include <cstring>
 
+#include "control/identity.h"
+
 namespace hux {
 namespace {
 
@@ -32,9 +34,10 @@ uint64_t get_u64(uint8_t const* p) {
   return v;
 }
 
-/* major(2) minor(2) region(8) gen(4) base(8) len(8) rkey(8) kind(1) idx(4)
- * access(4) */
-constexpr size_t kDescriptorBytes = 2 + 2 + 8 + 4 + 8 + 8 + 8 + 1 + 4 + 4;
+/* major(2) minor(2) origin(24) region(8) gen(4) base(8) len(8) rkey(8)
+ * kind(1) idx(4) access(4) */
+constexpr size_t kDescriptorBytes =
+    2 + 2 + kIdentityBytes + 8 + 4 + 8 + 8 + 8 + 1 + 4 + 4;
 
 }  // namespace
 
@@ -43,6 +46,7 @@ void encode_descriptor(RegionDescriptor const& d, std::vector<uint8_t>* out) {
   out->reserve(kDescriptorBytes);
   put_u16(out, kDescriptorMajor);
   put_u16(out, kDescriptorMinor);
+  encode_identity(d.origin, out);
   put_u64(out, d.region);
   put_u32(out, d.generation);
   put_u64(out, d.base);
@@ -72,6 +76,9 @@ Status decode_descriptor(std::vector<uint8_t> const& buf,
   p += 2;
   /* Reject an incompatible major rather than parsing best-effort. */
   if (out->major != kDescriptorMajor) return Status::kUnsupported;
+  if (decode_identity(buf, 4, &out->origin) != Status::kOk)
+    return Status::kInvalidArgument;
+  p += kIdentityBytes;
   out->region = get_u64(p);
   p += 8;
   out->generation = get_u32(p);
@@ -132,11 +139,12 @@ bool registration_covers(Registration const& r, void* addr, uint64_t length,
   return offset <= r.length && length <= r.length - offset;
 }
 
-MemoryRegionImpl::MemoryRegionImpl(RegionId id, Generation gen, void* base,
-                                   uint64_t length, DeviceId dev,
+MemoryRegionImpl::MemoryRegionImpl(Identity origin, RegionId id, Generation gen,
+                                   void* base, uint64_t length, DeviceId dev,
                                    MemoryKind mem, AccessFlags access,
                                    RegistrationPtr reg)
-    : id_(id),
+    : origin_(origin),
+      id_(id),
       gen_(gen),
       base_(base),
       length_(length),
@@ -159,6 +167,7 @@ Status MemoryRegionImpl::view(uint64_t offset, uint64_t length,
 Status MemoryRegionImpl::export_descriptor(std::vector<uint8_t>* out) const {
   if (out == nullptr) return Status::kInvalidArgument;
   RegionDescriptor d;
+  d.origin = origin_;
   d.region = id_;
   d.generation = gen_;
   d.base = reinterpret_cast<uint64_t>(base_);

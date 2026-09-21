@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "control/identity.h"
 #include "hux/region.h"
 
 namespace hux {
@@ -23,6 +24,13 @@ struct ProviderKey {
 struct RegionDescriptor {
   uint16_t major = 0;
   uint16_t minor = 0;
+  /* The engine that exported it. Region ids are handed out per engine from
+   * one, so an id says nothing about where it came from: a peer that
+   * restarts numbers its regions from the beginning again and its old
+   * descriptors go on looking current. Carrying the origin is what lets an
+   * import refuse them, instead of the hardware refusing the transfer later
+   * with a message about a key. */
+  Identity origin;
   RegionId region = 0;
   Generation generation = 0;
   uint64_t base = 0; /* Peer virtual address; never dereferenced here. */
@@ -95,11 +103,12 @@ bool registration_covers(Registration const& r, void* addr, uint64_t length,
 
 class MemoryRegionImpl : public MemoryRegion {
  public:
-  MemoryRegionImpl(RegionId id, Generation gen, void* base, uint64_t length,
-                   DeviceId dev, MemoryKind mem, AccessFlags access,
-                   RegistrationPtr reg);
+  MemoryRegionImpl(Identity origin, RegionId id, Generation gen, void* base,
+                   uint64_t length, DeviceId dev, MemoryKind mem,
+                   AccessFlags access, RegistrationPtr reg);
 
   RegionId id() const override { return id_; }
+  Identity origin() const { return origin_; }
   Generation generation() const override { return gen_; }
   void* base() const override { return base_; }
   uint64_t length() const override { return length_; }
@@ -123,6 +132,7 @@ class MemoryRegionImpl : public MemoryRegion {
   bool retired() const { return retired_.load(std::memory_order_acquire); }
 
  private:
+  Identity const origin_;
   RegionId const id_;
   Generation const gen_;
   void* const base_;

@@ -61,9 +61,14 @@ completion arrives. Ask `req->reached(stage)` for the one you need.
 you whether the remote side may already have been written. Batches are not
 atomic, and nothing is replayed automatically.
 
-**Descriptors carry a generation.** A peer that deregisters tells you, and the
-imported region stops accepting submissions. Holding a descriptor is not
-permission to use it forever.
+**Descriptors carry a generation and an origin.** A peer that deregisters
+tells you, and the imported region stops accepting submissions. A descriptor
+also names the engine that exported it, and importing it into any other peer
+is refused with `kStaleGeneration` -- including the peer that replaced it
+after a restart, which is a different engine however identical its address.
+Region ids are handed out per engine from one, so without that check a
+predecessor's descriptors go on looking current. Holding a descriptor is not
+permission to use it forever, or on whichever peer is to hand.
 
 ## What is not carried over
 
@@ -233,6 +238,10 @@ field out of a neighbour's bytes and then acts on it.
 | RDMA handshake | `kWireMajor` | connection setup | `kUnsupported`; no queue pair is created |
 | IPC handshake | `kIpcWireMajor` | socket handshake | `kUnsupported`; the socket is closed |
 | Region descriptor | `kDescriptorMajor` | `import_region` | `kUnsupported`; nothing is imported |
+
+The descriptor is at major 2. Major 1 did not name the exporting engine, so
+an importer could not tell one peer's region 1 from another's; a peer built
+against it is refused rather than read.
 
 The engine metadata blob also begins with a magic number, so `add_peer` can
 tell an engine's metadata from a single provider's dialling blob by looking

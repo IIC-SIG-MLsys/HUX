@@ -13,9 +13,11 @@ namespace hux {
 
 // ---------------- PeerImpl ----------------
 
-PeerImpl::PeerImpl(PeerId id, ProviderConnectionPtr conn, PeerCaps caps,
-                   EngineImpl* engine, TransportProviderPtr provider)
+PeerImpl::PeerImpl(PeerId id, Identity remote, ProviderConnectionPtr conn,
+                   PeerCaps caps, EngineImpl* engine,
+                   TransportProviderPtr provider)
     : id_(id),
+      remote_identity_(remote),
       conn_(std::move(conn)),
       provider_(std::move(provider)),
       caps_(caps),
@@ -27,6 +29,16 @@ Status PeerImpl::import_region(std::vector<uint8_t> const& descriptor,
   RegionDescriptor d;
   Status s = decode_descriptor(descriptor, &d);
   if (s != Status::kOk) return s;
+
+  /* Exported by this peer, and not by something else that happens to number
+   * its regions the same way. A peer that restarted is a different engine
+   * and its predecessor's descriptors are refused here, where the reason is
+   * "this is not yours" -- rather than several calls later, as a key the
+   * hardware does not recognise. */
+  if (d.origin.host != remote_identity_.host ||
+      d.origin.process != remote_identity_.process ||
+      d.origin.engine != remote_identity_.engine)
+    return Status::kStaleGeneration;
 
   /* The peer exported a key per transport; take the one minted by the
    * transport this peer is reached over. A region exported only for another
@@ -259,9 +271,11 @@ Status EngineImpl::register_memory(void* addr, uint64_t length,
   }
 
   RegionId id = next_region_.fetch_add(1, std::memory_order_relaxed);
+  Identity origin = local_identity();
+  origin.engine = engine_id_;
   auto r = std::make_shared<MemoryRegionImpl>(
-      id, generation_.load(std::memory_order_acquire), addr, length, dev, mem,
-      access, reg);
+      origin, id, generation_.load(std::memory_order_acquire), addr, length,
+      dev, mem, access, reg);
   {
     std::lock_guard<std::mutex> g(mu_);
     regions_[id] = r;
@@ -543,7 +557,7 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
   }
 
   PeerId id = next_peer_.fetch_add(1, std::memory_order_relaxed);
-  auto p = std::make_shared<PeerImpl>(id, std::move(conn), caps, this,
+  auto p = std::make_shared<PeerImpl>(id, peer_id, std::move(conn), caps, this,
                                       std::move(chosen));
   {
     std::lock_guard<std::mutex> g(mu_);
