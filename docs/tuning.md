@@ -227,3 +227,33 @@ meaningless without it. And the adapters sit on different roots and different
 NUMA nodes, so what one costs the other is a question worth asking rather
 than assuming -- which is the ceiling check for NET-03 in
 [remaining.md](remaining.md), not a reason to go and implement it.
+
+
+## Do the two adapters add up? (the ceiling for NET-03)
+
+Striping one transfer across both adapters is only worth building if two
+flows, one per adapter, reach more together than the better adapter reaches
+alone. If they share a bottleneck the sum is that bottleneck and the feature
+buys nothing. Asked before writing any of it.
+
+Two passes, 2000 transfers of 4 MiB per flow:
+
+| | write |
+| --- | --- |
+| `mlx5_0` alone | 23.87 Gb/s |
+| `mlx5_3` alone | 51.56 Gb/s |
+| both at once | **75.38 Gb/s** (75.77, 75.00) |
+| against the better one alone | **1.46x** |
+
+They add. More precisely, each flow keeps its solo rate while the other runs:
+23.90 with 51.87, and 23.78 with 51.22, against 23.87 and 51.56 alone. Within
+1%, so at these rates the two adapters cost each other nothing -- which
+follows from their sitting on different PCIe roots and different NUMA nodes,
+but did not have to be true.
+
+So the ceiling is 1.46x and the work is worth doing. Note what that number is
+not: it is the ceiling for a perfect implementation on this host, with these
+two adapters at this ratio. A striping policy that split a request evenly
+would be limited by the slower adapter and reach about 48 Gb/s, which is less
+than `mlx5_3` alone. Weighted by capacity is the only split that wins here,
+and the weights are a measurement rather than a constant.

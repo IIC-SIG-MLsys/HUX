@@ -28,7 +28,15 @@ address the provider is told to advertise -- `--local 192.168.2.243` comes
 out on `mlx5_0` and `--local 192.168.2.235` on `mlx5_3`, both reaching the
 same peer.
 
-So the hardware is there and the work is the work. It is not small.
+The ceiling was measured before writing any of it: two flows, one per
+adapter, reach 75.38 Gb/s against 51.56 for the better adapter alone, a
+**1.46x** headroom, and each flow keeps its solo rate while the other runs.
+See [tuning.md](tuning.md). A split that ignored the 2.14x between them
+would be held to the slower adapter and finish below `mlx5_3` on its own, so
+the weights are part of the feature rather than a refinement of it.
+
+So the hardware is there, the gain is real, and the work is the work. It is
+not small.
 Registration, keys and queue pairs are all per device today; striping one
 request means a protection domain per adapter, a key per adapter in the
 descriptor, and a decision about which adapter each sub-operation goes to.
