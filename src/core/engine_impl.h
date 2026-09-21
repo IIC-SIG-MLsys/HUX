@@ -119,7 +119,7 @@ class EngineImpl : public Engine {
                        TransferOptions const& opts, SubOp::Kind kind,
                        RequestPtr* out);
   /* Splits paired segments into SubOps of at most chunk_bytes. */
-  Status build_subops(std::vector<RegionView> const& local,
+  Status build_subops(PeerId peer, std::vector<RegionView> const& local,
                       std::vector<RegionView> const& remote, SubOp::Kind kind,
                       RequestId req, std::string const& provider,
                       std::vector<SubOp>* out,
@@ -153,7 +153,11 @@ class EngineImpl : public Engine {
                                     DeviceId device, AccessFlags access);
   void cache_registration(RegistrationPtr reg);
   std::shared_ptr<MemoryRegionImpl> find_region(RegionId id) const;
-  std::shared_ptr<RemoteRegionImpl> find_remote(RegionId id) const;
+  /* Keyed by the peer as well as the id. Region ids are handed out per
+   * engine from one, so every peer has a region 1 and an id alone names
+   * nothing. */
+  PeerId peer_for_conn(ProviderConnection* conn) const;
+  std::shared_ptr<RemoteRegionImpl> find_remote(PeerId peer, RegionId id) const;
   void progress_loop();
   /* Notices peers whose connection has gone and settles what was in flight to
    * them. A peer that exits between transfers leaves nothing to fail on its
@@ -178,7 +182,8 @@ class EngineImpl : public Engine {
   /* Registrations kept for reuse. Entries stay while any handle references
    * them; beyond that the bound decides how many are held speculatively. */
   std::deque<RegistrationPtr> reg_cache_;
-  std::unordered_map<RegionId, std::shared_ptr<RemoteRegionImpl>> remotes_;
+  std::map<std::pair<PeerId, RegionId>, std::shared_ptr<RemoteRegionImpl>>
+      remotes_;
   std::unordered_map<PeerId, std::shared_ptr<PeerImpl>> peers_;
   std::unordered_map<RequestId, RequestImplPtr> inflight_;
   std::deque<RequestPtr> completed_;

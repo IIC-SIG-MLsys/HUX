@@ -24,6 +24,7 @@ add_test(NAME contract COMMAND hux_contract_tests)
 if(TARGET hux_transport_rdma)
   add_executable(hux_rdma_tests
     test_main.cpp
+    contract/test_peer_region_ids.cpp
     contract/test_metadata_envelope.cpp
     contract/test_wire_version.cpp
     contract/test_congestion.cpp)

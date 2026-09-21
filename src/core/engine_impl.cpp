@@ -48,7 +48,7 @@ Status PeerImpl::import_region(std::vector<uint8_t> const& descriptor,
   auto r = std::make_shared<RemoteRegionImpl>(d);
   {
     std::lock_guard<std::mutex> g(engine_->mu_);
-    engine_->remotes_[d.region] = r;
+    engine_->remotes_[{id_, d.region}] = r;
   }
   {
     std::lock_guard<std::mutex> g(mu_);
@@ -570,13 +570,26 @@ std::shared_ptr<MemoryRegionImpl> EngineImpl::find_region(RegionId id) const {
   return it == regions_.end() ? nullptr : it->second;
 }
 
-std::shared_ptr<RemoteRegionImpl> EngineImpl::find_remote(RegionId id) const {
+PeerId EngineImpl::peer_for_conn(ProviderConnection* conn) const {
+  if (conn == nullptr) return 0;
   std::lock_guard<std::mutex> g(mu_);
-  auto it = remotes_.find(id);
+  for (auto const& kv : peers_)
+    if (kv.second->conn() == conn) return kv.second->id();
+  /* A connection this engine accepted without an application ever adding a
+   * Peer for it. Nothing to scope against, and saying so is better than
+   * guessing. */
+  return 0;
+}
+
+std::shared_ptr<RemoteRegionImpl> EngineImpl::find_remote(PeerId peer,
+                                                          RegionId id) const {
+  std::lock_guard<std::mutex> g(mu_);
+  auto it = remotes_.find({peer, id});
   return it == remotes_.end() ? nullptr : it->second;
 }
 
-Status EngineImpl::build_subops(std::vector<RegionView> const& local,
+Status EngineImpl::build_subops(PeerId peer,
+                                std::vector<RegionView> const& local,
                                 std::vector<RegionView> const& remote,
                                 SubOp::Kind kind, RequestId req,
                                 std::string const& provider,
@@ -589,7 +602,7 @@ Status EngineImpl::build_subops(std::vector<RegionView> const& local,
     auto lr = find_region(local[i].region);
     if (lr == nullptr) return Status::kNotFound;
     if (lr->retired()) return Status::kStaleGeneration;
-    auto rr = find_remote(remote[i].region);
+    auto rr = find_remote(peer, remote[i].region);
     if (rr == nullptr) return Status::kNotFound;
     if (!rr->valid()) return Status::kStaleGeneration;
 
@@ -788,9 +801,9 @@ Status EngineImpl::submit_vector(Peer* peer,
   std::vector<MemoryRegionPtr> held;
   void* target_addr = nullptr;
   uint64_t target_bytes = 0;
-  Status s =
-      build_subops(local, remote, kind, req_id, p->provider()->caps().name,
-                   &ops, &held, &target_addr, &target_bytes);
+  Status s = build_subops(p->id(), local, remote, kind, req_id,
+                          p->provider()->caps().name, &ops, &held, &target_addr,
+                          &target_bytes);
   if (s != Status::kOk) return s;
 
   auto req = std::make_shared<RequestImpl>(
@@ -800,7 +813,7 @@ Status EngineImpl::submit_vector(Peer* peer,
   req->set_device_backend(device_.get());
   req->set_target(target_addr, target_bytes);
   if (kind == SubOp::Kind::kWrite && !remote.empty()) {
-    auto rr = find_remote(remote[0].region);
+    auto rr = find_remote(p->id(), remote[0].region);
     if (rr != nullptr) {
       req->set_remote_target(remote[0].region, rr->generation(),
                              Span{remote[0].span.offset, target_bytes});
@@ -1047,7 +1060,16 @@ Status EngineImpl::progress() {
     TransportProvider* const prov = prov_ptr.get();
     std::vector<ControlMessage> msgs;
     if (prov->poll_control(cfg_.cq_batch, &msgs) == Status::kOk) {
-      for (auto const& m : msgs) {
+      for (auto& m : msgs) {
+        /* Which peer this came from, in the engine's own numbering. A
+         * provider cannot fill this in: it knows connections and its own
+         * notion of identity, not the ids handed to the application. Without
+         * it a control message can only be matched by what it names, and
+         * every peer numbers its regions from one. */
+        if (m.conn != nullptr) {
+          PeerId const from = peer_for_conn(m.conn);
+          if (from != 0) m.peer = from;
+        }
         if (static_cast<ControlType>(m.type) == ControlType::kReadyHandoff) {
           ReadyHandoffBody b;
           if (decode_ready_handoff(m.payload, &b) != Status::kOk) continue;
@@ -1112,7 +1134,10 @@ Status EngineImpl::progress() {
           std::shared_ptr<RemoteRegionImpl> rr;
           {
             std::lock_guard<std::mutex> g(mu_);
-            auto it = remotes_.find(b.region);
+            /* Scoped to the peer that sent the notice: another peer's
+             * region can share the id, and retiring the wrong one would
+             * silently stop a healthy path. */
+            auto it = remotes_.find({m.peer, b.region});
             if (it != remotes_.end()) rr = it->second;
           }
           /* Only if the generations match: an id can be reused, and a notice
