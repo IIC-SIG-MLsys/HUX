@@ -48,6 +48,20 @@ if(TARGET hux_transport_rdma)
       target_link_libraries(hux_rdma_loopback PRIVATE hux_device_${vendor})
     endif()
   endforeach()
+
+  # The long run: every dimension at once for hours. Two machines and a
+  # day of them, so ctest builds it and never runs it.
+  add_executable(hux_soak manual/soak.cpp)
+  target_include_directories(hux_soak PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(hux_soak PRIVATE hux_transport_rdma)
+  target_compile_options(hux_soak PRIVATE -Wall -Wextra)
+  foreach(vendor cuda rocm neuware)
+    string(TOUPPER ${vendor} VENDOR_UP)
+    if(TARGET hux_device_${vendor})
+      target_compile_definitions(hux_soak PRIVATE HUX_LOOPBACK_${VENDOR_UP})
+      target_link_libraries(hux_soak PRIVATE hux_device_${vendor})
+    endif()
+  endforeach()
 endif()
 
 # Two processes and a device that can export an allocation, so it is built

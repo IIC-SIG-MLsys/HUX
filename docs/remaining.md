@@ -26,9 +26,30 @@ this cannot be written honestly, let alone measured.
 target at the same time, and by local convention that kind of run happens
 between 00:00 and 06:00 so it does not disturb anyone.
 
-**REL-01, the 24-hour verification.** Literally a day of machine time, and
-probably more than one attempt: the longest run so far found a real defect
-after 48 minutes.
+**REL-01, the 24-hour verification.** The harness exists --
+`tests/manual/soak.cpp`, built as `hux_soak` -- and crosses every dimension
+at once rather than one at a time: several peers, several threads, both
+directions, sizes from 4 KiB to 4 MiB interleaved, host or device memory,
+and a registration dropped and remade every few hundred rounds.
+
+Every round verifies its bytes, because a transport defect that is not a
+crash is a wrong byte and a soak that only counted completions would run for
+a day and report success while moving rubbish. Reads come from a half of the
+peer's memory that carries that peer's own pattern and is never written;
+writes go into a slice of the other half belonging to that thread alone, so
+one thread cannot invent a failure for another. It also watches the engine's
+own counters, and stops if a transfer is ever staged rather than done in
+place.
+
+Verified two ways: a short run moves 33 GiB over 33,000 rounds with nothing
+copied, and a deliberately wrong pattern on the server is caught after two
+rounds. A soak that cannot fail is not a soak.
+
+What is left is the day itself, and it does not fit: by local convention a
+run that loads a shared fabric belongs between 00:00 and 06:00, and 24 hours
+does not. `--pause-ms` exists so the soak can run at a declared fraction of
+the link rather than as fast as it goes, which is the thing to settle before
+booking a day.
 
 ## Not blocked, just not done
 
@@ -74,10 +95,12 @@ pair; incast from more machines is not.
 individually: several queue pairs, both directions, host and device memory,
 registration reuse, notification back-pressure, failure paths, six threads
 issuing mixed sizes at once, and several peers served concurrently with the
-bytes checked per peer. What is missing is the part that needs hardware this
-pair does not have -- incast, and one request striped across several NICs --
-and the long-running crossings of those dimensions rather than one at a
-time.
+bytes checked per peer. Crossing them rather than taking them one at a time
+is what `hux_soak` does, so that half is no longer missing -- only the run
+length is, and that is REL-01's problem above.
+
+What remains is the part that needs hardware this pair does not have:
+incast, and one request striped across several NICs.
 
 **BENCH-01.** `hux-bench` measures latency and bandwidth at fixed sizes
 across two machines, with a chosen number of requests in flight, a stream of
