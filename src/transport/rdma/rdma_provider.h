@@ -175,6 +175,10 @@ class RdmaProvider : public TransportProvider {
   /* A completion drawn from the shared queue by something other than
    * poll(), handed back so the engine still sees it. */
   void stash_completion(ibv_wc const& wc);
+  /* Records a verification completion for whoever is waiting on that queue
+   * pair, and takes it back out. */
+  void note_verified(uint32_t qp_num, ibv_wc_status st);
+  bool take_verified(uint32_t qp_num, ibv_wc_status* st);
 
   CongestionController* cc() const { return cc_.get(); }
   ibv_pd* pd() const { return pd_; }
@@ -225,6 +229,14 @@ class RdmaProvider : public TransportProvider {
    * dropped on the floor. poll() takes these before it touches the queue. */
   std::mutex stash_mu_;
   std::deque<ibv_wc> stashed_;
+
+  /* And the other direction of the same race. A progress thread polls this
+   * queue too, so whichever of the two reaches a verification completion
+   * first leaves it here for the other: a connection being proved cannot
+   * rely on being the only reader. Keyed by queue pair, since several
+   * connections can be verified at once. */
+  std::mutex verify_mu_;
+  std::unordered_map<uint32_t, ibv_wc_status> verify_done_;
 
   std::mutex inflight_mu_;
   std::unordered_map<uint64_t, InflightOp> inflight_;

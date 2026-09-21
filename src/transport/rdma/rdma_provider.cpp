@@ -201,7 +201,10 @@ RdmaConnection::~RdmaConnection() {
  * side never uses it, so the two cannot be confused when the CQ is shared. */
 namespace {
 constexpr uint64_t kRecvWrId = (1ull << 63);
-}
+/* And one the data path never mints either, so a connection proving itself
+ * cannot be mistaken for a transfer. */
+constexpr uint64_t kVerifyWrId = (1ull << 62);
+}  // namespace
 
 Status RdmaConnection::arm_receives(ibv_pd* pd, uint32_t count) {
   recv_buf_.assign(count * 16, 0);
@@ -233,12 +236,6 @@ Status RdmaConnection::repost_receive() {
                                                    : Status::kTransportError;
 }
 
-/* A work request id the data path never mints, so a verification completion
- * cannot be mistaken for a transfer's. */
-namespace {
-constexpr uint64_t kVerifyWrId = (1ull << 62);
-}
-
 Status RdmaConnection::verify_path(int64_t timeout_ms) {
   if (qps_.empty() || recv_mr_ == nullptr) return Status::kUnsupported;
   ibv_qp* const qp = qps_[0].qp;
@@ -261,6 +258,11 @@ Status RdmaConnection::verify_path(int64_t timeout_ms) {
   auto const deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline) {
+    /* Left here by a progress thread that drew it from the queue first. */
+    ibv_wc_status st;
+    if (owner_->take_verified(my_qp_num, &st))
+      return st == IBV_WC_SUCCESS ? Status::kOk : Status::kTransportError;
+
     ibv_wc wc[8];
     int const n = ibv_poll_cq(owner_->cq(), 8, wc);
     if (n < 0) return Status::kTransportError;
@@ -1047,6 +1049,20 @@ void RdmaProvider::stash_completion(ibv_wc const& wc) {
   stashed_.push_back(wc);
 }
 
+void RdmaProvider::note_verified(uint32_t qp_num, ibv_wc_status st) {
+  std::lock_guard<std::mutex> g(verify_mu_);
+  verify_done_[qp_num] = st;
+}
+
+bool RdmaProvider::take_verified(uint32_t qp_num, ibv_wc_status* st) {
+  std::lock_guard<std::mutex> g(verify_mu_);
+  auto it = verify_done_.find(qp_num);
+  if (it == verify_done_.end()) return false;
+  *st = it->second;
+  verify_done_.erase(it);
+  return true;
+}
+
 Status RdmaProvider::poll(uint32_t max_events,
                           std::vector<CompletionEvent>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
@@ -1073,6 +1089,13 @@ Status RdmaProvider::poll(uint32_t max_events,
   }
 
   for (int i = 0; i < n; ++i) {
+    if (wc[i].wr_id == kVerifyWrId) {
+      /* A connection proving itself. This loop and that one both read the
+       * same queue, so whichever gets there first leaves it for the other
+       * rather than reporting it as a transfer that nothing asked for. */
+      note_verified(wc[i].qp_num, wc[i].status);
+      continue;
+    }
     if ((wc[i].wr_id & kRecvWrId) != 0) {
       /* A peer's write landed. The immediate value names the handoff; the
        * receive buffer itself holds nothing. */
