@@ -1,9 +1,17 @@
 # What is left, and what each piece needs
 
-Against the 26 required tasks in the roadmap (the six ENV items are
-conditional and not counted). Nineteen are done. This is the rest, with what
-each one is actually blocked on, because most of them are not blocked on
-writing code.
+The roadmap numbers 23 required tasks, plus six conditional ENV items that
+are not counted here. Seven of the 23 are outstanding and listed below, so
+sixteen are done.
+
+An earlier version of this page said nineteen of twenty-six, which was wrong
+in both halves by the same three -- the denominator was never counted from
+the roadmap and the numerator was carried along with it. Counted from the
+list: API-01, BACK-01, CC-01, COR-01, CTL-01, DEV-01, FAIL-01, MEM-01,
+MEM-02, MIG-01, NET-01, NET-02, NTF-01, SCH-01, TOP-01, TST-01.
+
+What is left is below, with what each one is actually blocked on, because
+most of them are not blocked on writing code.
 
 ## Blocked on hardware or machine time
 
