@@ -115,7 +115,7 @@ class TimelyController : public CongestionController {
  public:
   explicit TimelyController(TimelyParams const& p) : p_(p) {
     for (auto& d : dir_) {
-      d.rate_bps = p.additive_increase_bps * 10;
+      d.rate_Bps = p.additive_increase_Bps * 10;
       d.min_delay = std::chrono::nanoseconds::max();
       d.next_send = CcClock::now();
     }
@@ -142,7 +142,7 @@ class TimelyController : public CongestionController {
     /* The doorbell is what gets paced, not a decision taken earlier: the next
      * send time advances by however long these bytes take at the current
      * rate. */
-    double const seconds = static_cast<double>(bytes) / d.rate_bps;
+    double const seconds = static_cast<double>(bytes) / d.rate_Bps;
     auto const gap = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(seconds));
     CcTime const base = now > d.next_send ? now : d.next_send;
@@ -182,13 +182,13 @@ class TimelyController : public CongestionController {
 
   double rate_bytes_per_sec(CcDirection dir) const override {
     std::lock_guard<std::mutex> g(mu_);
-    return dir_[idx(dir)].rate_bps;
+    return dir_[idx(dir)].rate_Bps;
   }
 
  private:
   struct Dir {
     uint64_t inflight = 0;
-    double rate_bps = 0;
+    double rate_Bps = 0;
     std::chrono::nanoseconds min_delay{};
     std::chrono::nanoseconds prev_delay{};
     double avg_delay_diff_us = 0;
@@ -209,7 +209,7 @@ class TimelyController : public CongestionController {
     double base_ns = d.min_delay == std::chrono::nanoseconds::max()
                          ? 1e6 /* no sample yet: assume a millisecond */
                          : static_cast<double>(d.min_delay.count());
-    double bytes = d.rate_bps * base_ns / 1e9;
+    double bytes = d.rate_Bps * base_ns / 1e9;
     uint64_t w = static_cast<uint64_t>(bytes);
     return w < (1u << 16) ? (1u << 16) : w;
   }
@@ -233,11 +233,11 @@ class TimelyController : public CongestionController {
     d.avg_delay_diff_us =
         (1.0 - p_.ewma_alpha) * d.avg_delay_diff_us + p_.ewma_alpha * diff_us;
 
-    double new_rate = d.rate_bps;
+    double new_rate = d.rate_Bps;
     if (sample_us < t_low_us) {
       /* Below the low threshold there is no queue worth reacting to, so the
        * gradient is ignored and the rate simply grows. */
-      new_rate += p_.additive_increase_bps;
+      new_rate += p_.additive_increase_Bps;
     } else if (sample_us > t_high_us) {
       /* A queue has already built; back off in proportion to the overshoot. */
       new_rate *= 1.0 - p_.beta * (1.0 - t_high_us / sample_us);
@@ -246,7 +246,7 @@ class TimelyController : public CongestionController {
       double const norm_grad =
           d.avg_delay_diff_us / (min_us > 0 ? min_us : 1.0);
       if (norm_grad <= 0) {
-        new_rate += p_.additive_increase_bps;
+        new_rate += p_.additive_increase_Bps;
       } else {
         /* Delay is rising while still within bounds: slow down before the
          * queue grows, which is the whole point of reacting to the gradient
@@ -255,9 +255,9 @@ class TimelyController : public CongestionController {
       }
     }
 
-    if (new_rate < p_.min_rate_bps) new_rate = p_.min_rate_bps;
-    if (new_rate > p_.max_rate_bps) new_rate = p_.max_rate_bps;
-    d.rate_bps = new_rate;
+    if (new_rate < p_.min_rate_Bps) new_rate = p_.min_rate_Bps;
+    if (new_rate > p_.max_rate_Bps) new_rate = p_.max_rate_Bps;
+    d.rate_Bps = new_rate;
   }
 
   mutable std::mutex mu_;

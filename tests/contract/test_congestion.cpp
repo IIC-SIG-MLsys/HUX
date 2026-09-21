@@ -167,7 +167,7 @@ HUX_TEST(timely_slows_on_a_rising_gradient_before_the_threshold) {
   p.t_low = std::chrono::microseconds(10);
   p.t_high = std::chrono::microseconds(10000);
   p.beta = 0.5;
-  p.additive_increase_bps = 1e6;
+  p.additive_increase_Bps = 1e6;
   auto cc = make_cc_timely(p);
 
   /* Settle at a steady delay between the thresholds. */
@@ -185,20 +185,20 @@ HUX_TEST(timely_slows_on_a_rising_gradient_before_the_threshold) {
 
 HUX_TEST(timely_rate_stays_within_its_bounds) {
   TimelyParams p;
-  p.min_rate_bps = 1e6;
-  p.max_rate_bps = 10e6;
+  p.min_rate_Bps = 1e6;
+  p.max_rate_Bps = 10e6;
   p.t_low = std::chrono::microseconds(50);
   p.t_high = std::chrono::microseconds(100);
   p.beta = 0.9;
   auto cc = make_cc_timely(p);
 
   for (int i = 0; i < 200; ++i) feed(cc, 4096, 1);
-  CHECK(cc->rate_bytes_per_sec(CcDirection::kWrite) <= p.max_rate_bps);
+  CHECK(cc->rate_bytes_per_sec(CcDirection::kWrite) <= p.max_rate_Bps);
 
   for (int i = 0; i < 500; ++i) feed(cc, 4096, 100000);
   /* Never paced down to a stop: a rate of zero would never recover, since
    * recovery depends on completions that can no longer be sent. */
-  CHECK(cc->rate_bytes_per_sec(CcDirection::kWrite) >= p.min_rate_bps);
+  CHECK(cc->rate_bytes_per_sec(CcDirection::kWrite) >= p.min_rate_Bps);
 }
 
 HUX_TEST(timely_does_not_treat_a_failure_as_congestion) {
@@ -219,7 +219,7 @@ HUX_TEST(timely_paces_the_doorbell) {
   /* Pacing has to constrain the actual submission. A next send time that
    * never moves would mean the rate exists only on paper. */
   TimelyParams p;
-  p.max_rate_bps = 1e6; /* 1 MB/s: 64 KiB takes about 65 ms */
+  p.max_rate_Bps = 1e6; /* 1 MB/s: 64 KiB takes about 65 ms */
   auto cc = make_cc_timely(p);
 
   CcTime const before = cc->next_send_time(CcDirection::kWrite);

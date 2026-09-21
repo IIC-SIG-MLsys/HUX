@@ -91,13 +91,17 @@ struct TimelyParams {
   std::chrono::microseconds t_high{500};
   /* Multiplicative decrease factor. */
   double beta = 0.008;
-  /* Additive increase per round, in bytes per second. */
-  double additive_increase_bps = 10e6;
+  /* Everything here is BYTES per second, which is what the controller
+   * divides a length by to get a duration. The fields used to be named
+   * _bps and were read as bits by anyone setting them, including the
+   * comment that called 100e9 the line rate of the fabric: as bytes it is
+   * 800 Gb/s, eight times the fabric, so the ceiling never engaged. */
+  double additive_increase_Bps = 10e6; /* 80 Mb/s per round */
   /* Weight for the delay-difference EWMA; higher tracks recent samples more
    * closely. */
   double ewma_alpha = 0.3;
-  double min_rate_bps = 1e6;   /* never paces down to a stop */
-  double max_rate_bps = 100e9; /* line rate of the fabric under test */
+  double min_rate_Bps = 1e6;    /* 8 Mb/s: never paces down to a stop */
+  double max_rate_Bps = 12.5e9; /* 100 Gb/s, the fabric under test */
 };
 
 /* Rate-based adaptive control after TIMELY. Reacts to the delay gradient

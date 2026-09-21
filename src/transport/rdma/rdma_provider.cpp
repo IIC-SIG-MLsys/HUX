@@ -464,7 +464,15 @@ std::string RdmaProvider::describe() const {
     << "\"signal_period\":" << cfg_.signal_period << ',' << "\"cc\":\""
     << (cc_ != nullptr ? cc_->name() : "none") << "\","
     << "\"cc_window_bytes\":"
-    << (cc_ != nullptr ? cc_->window_bytes(CcDirection::kWrite) : 0) << "}";
+    << (cc_ != nullptr ? cc_->window_bytes(CcDirection::kWrite) : 0)
+    << ','
+    /* What the controller settled on, not what it was configured with. A
+     * rate-based controller that ramps too slowly to reach line rate within
+     * a run looks like a slow transport unless this is visible. Zero for a
+     * controller that does not work in rates. */
+    << "\"cc_rate_bps\":"
+    << (cc_ != nullptr ? cc_->rate_bytes_per_sec(CcDirection::kWrite) : 0.0)
+    << "}";
   return o.str();
 }
 

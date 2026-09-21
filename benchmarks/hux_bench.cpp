@@ -117,6 +117,19 @@ bool recv_blob(int fd, std::vector<uint8_t>* out) {
 
 CongestionControllerPtr make_cc(std::string const& spec) {
   if (spec == "timely") return make_cc_timely();
+  /* timely:<Mb/s> overrides only the additive increase. The default follows
+   * the paper, which was written against a 10GE fabric; on a faster one the
+   * ramp from the starting rate to line rate takes thousands of completions,
+   * and a run shorter than that measures the ramp rather than the
+   * controller. Made settable so that is a measurement and not an
+   * assertion. */
+  if (spec.rfind("timely:", 0) == 0) {
+    TimelyParams p;
+    /* Given in Mb/s, stored in bytes per second. */
+    p.additive_increase_Bps =
+        std::strtod(spec.c_str() + 7, nullptr) * 1e6 / 8.0;
+    return make_cc_timely(p);
+  }
   if (spec.rfind("fixed:", 0) == 0)
     return make_cc_fixed_window(std::strtoull(spec.c_str() + 6, nullptr, 10));
   return make_cc_off();
@@ -505,6 +518,10 @@ int run_client(std::string const& ip, Options const& o) {
                   sum.median_us, sum.p10_us, sum.p90_us, sum.gbps, rate);
     }
   }
+
+  /* Printed again at the end, because a controller's state is the result of
+   * the run, not of the configuration it started with. */
+  std::printf("\nafter the run: %s\n", prov->describe().c_str());
 
   EngineStats const st = engine->stats();
   std::printf("\nextra payload copied: %llu B%s\n",
