@@ -1,15 +1,15 @@
 # What is left, and what each piece needs
 
 The roadmap numbers 23 required tasks, plus six conditional ENV items that
-are not counted here. Six of the 23 are outstanding and listed below, so
-seventeen are done.
+are not counted here. Five of the 23 are outstanding and listed below, so
+eighteen are done.
 
 An earlier version of this page said nineteen of twenty-six, which was wrong
 in both halves by the same three -- the denominator was never counted from
 the roadmap and the numerator was carried along with it. Counted from the
 list: API-01, BACK-01, CC-01, COR-01, CTL-01, DEV-01, FAIL-01, MEM-01,
 MEM-02, MIG-01, NET-01, NET-02, NTF-01, PY-01, SCH-01, TOP-01,
-TST-01.
+TST-01, BENCH-01.
 
 What is left is below, with what each one is actually blocked on, because
 most of them are not blocked on writing code.
@@ -123,7 +123,7 @@ length is, and that is REL-01's problem above.
 What remains is the part that needs hardware this pair does not have:
 incast, and one request striped across several NICs.
 
-**BENCH-01.** `hux-bench` measures latency and bandwidth at fixed sizes
+**BENCH-01. Done.** `hux-bench` measures latency and bandwidth at fixed sizes
 across two machines, with a chosen number of requests in flight, a stream of
 interleaved sizes measured against each size run alone, the processor time a
 transfer costs, and several peers at once.
@@ -144,9 +144,14 @@ something: see [tuning.md](tuning.md).
 vector path, which nothing had exercised. Eight ways costs nothing
 measurable: see [tuning.md](tuning.md).
 
-Still missing: trace replay. The ablations are in tuning.md -- queue pairs,
-chunk size, congestion control, requests in flight, segments -- so what is
-left there is a workload to replay rather than a dimension to sweep.
+`--trace FILE` replays a recorded arrival pattern and reports how far behind
+schedule each request went out, against a floor measured by running the same
+waiting loop with nothing submitted -- because waiting for a due time costs
+something, and without that row the benchmark's own granularity is charged to
+the transport. The ablations are in [tuning.md](tuning.md): queue pairs,
+chunk size, congestion control, requests in flight, segments, adapters.
+
+**BENCH-01 is done.**
 
 **PY-01. Done.** Complete, stream and event adapters included. A build with
 a device backend exposes `import_stream`, `record_event` and

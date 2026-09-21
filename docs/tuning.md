@@ -257,3 +257,33 @@ two adapters at this ratio. A striping policy that split a request evenly
 would be limited by the slower adapter and reach about 48 Gb/s, which is less
 than `mlx5_3` alone. Weighted by capacity is the only split that wins here,
 and the weights are a measurement rather than a constant.
+
+## Replaying a recorded workload
+
+`--trace FILE` replays arrivals rather than issuing as fast as it can. One
+record per line, `<at_us> <bytes> <r|w>`, times from the start of the replay.
+`benchmarks/traces/bursty.trace` is a synthetic one -- quiet stretches broken
+by clusters, 4 KiB to 1 MiB -- so the path has something to run against;
+replace it with a recording of the workload you care about.
+
+The number a replay reports is not throughput. Throughput says how fast this
+end can go; a replay asks whether it kept up with work arriving on somebody
+else's schedule, and the answer is how far behind each request went out.
+
+317 records, 68.2 MiB over 0.453 s:
+
+| behind schedule | median | p90 | p99 |
+| --- | --- | --- | --- |
+| the replayer alone | 0.2 us | 20.0 us | 27.5 us |
+| replaying | 1.0 us | 20.9 us | 34.8 us |
+
+**The first row is the point.** Waiting for a due time has a cost of its own,
+and without measuring it every microsecond of that cost is charged to the
+transport. Here the transport adds 0.8 us at the median and 7.3 us at p99 to
+a floor the benchmark would have paid anyway.
+
+An earlier version reported 45.4 us median and attributed all of it to the
+transport. It was the sleep granularity in the waiting loop: sleeping up to
+the deadline overshoots it by however long the sleep was. Spinning the last
+50 us took the floor from 45 us to 0.2, and what remains is small enough that
+the floor row is still needed to see it.

@@ -92,6 +92,12 @@ struct Options {
    * -- it pairs segments by index, submits them together, and has to handle
    * a partial submit. Nothing in this benchmark exercised it. */
   int segments = 1;
+  /* A recorded workload to replay. One record per line:
+   *     <at_us> <bytes> <r|w>
+   * with blank lines and # comments ignored. Times are from the start of
+   * the replay, so a trace describes when work arrives rather than how fast
+   * this end can go. */
+  std::string trace;
   /* Rounds of the producer-consumer check. Zero skips it. */
   int produce = 0;
   /* How much work to put on the stream before recording the event. Tuned so
@@ -265,6 +271,50 @@ bool make_native_stream(void** out) {
   (void)out;
   return false;
 #endif
+}
+
+/* One line of a recorded workload. */
+struct TraceRecord {
+  uint64_t at_us = 0;
+  uint64_t bytes = 0;
+  bool write = false;
+};
+
+/* Reads the whole trace before the clock starts: parsing while replaying
+ * would charge the file's cost to the transport. Returns false and says
+ * which line was wrong, rather than silently replaying a shorter workload
+ * than the file describes. */
+bool read_trace(std::string const& path, std::vector<TraceRecord>* out) {
+  std::FILE* f = std::fopen(path.c_str(), "r");
+  if (f == nullptr) {
+    std::printf("cannot open trace %s\n", path.c_str());
+    return false;
+  }
+  char line[512];
+  int lineno = 0;
+  while (std::fgets(line, sizeof(line), f) != nullptr) {
+    ++lineno;
+    char* p = line;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p == '#' || *p == '\n' || *p == '\0') continue;
+    unsigned long long at = 0, bytes = 0;
+    char dir = 0;
+    if (std::sscanf(p, "%llu %llu %c", &at, &bytes, &dir) != 3 ||
+        (dir != 'r' && dir != 'w')) {
+      std::printf("trace %s line %d: expected \"<at_us> <bytes> <r|w>\"\n",
+                  path.c_str(), lineno);
+      std::fclose(f);
+      return false;
+    }
+    out->push_back({at, bytes, dir == 'w'});
+  }
+  std::fclose(f);
+  /* Arrival order, whatever order the file was in. */
+  std::sort(out->begin(), out->end(),
+            [](TraceRecord const& a, TraceRecord const& b) {
+              return a.at_us < b.at_us;
+            });
+  return !out->empty();
 }
 
 /* The byte a peer on this port stamps its memory with. Never zero, so an
@@ -631,6 +681,139 @@ int run_client(std::string const& ip, Options const& o) {
     return {it == runs.end() ? std::vector<double>{} : it->second, wall};
   };
 
+  if (!o.trace.empty()) {
+    std::vector<TraceRecord> trace;
+    if (!read_trace(o.trace, &trace)) return 1;
+
+    /* Anything the region cannot hold is dropped rather than silently
+     * shrunk, because a replay that quietly changed the sizes is no longer
+     * replaying that workload. */
+    uint64_t const cap = std::min<uint64_t>(pool.bytes, remote->length());
+    size_t dropped = 0;
+    trace.erase(std::remove_if(trace.begin(), trace.end(),
+                               [&](TraceRecord const& r) {
+                                 bool const too_big = r.bytes > cap || r.bytes == 0;
+                                 if (too_big) ++dropped;
+                                 return too_big;
+                               }),
+                trace.end());
+    if (dropped > 0)
+      std::printf("\ntrace: %zu of %zu records do not fit in %llu B and were"
+                  " dropped\n",
+                  dropped, dropped + trace.size(), (unsigned long long)cap);
+
+    if (trace.empty()) {
+      std::printf("\ntrace: nothing left to replay\n");
+    } else {
+      uint64_t total = 0;
+      for (auto const& r : trace) total += r.bytes;
+      std::printf("\nreplaying %zu records, %.1f MiB, over %.3f s\n",
+                  trace.size(), total / double(1 << 20),
+                  trace.back().at_us / 1e6);
+
+      /* What the replayer costs on its own, before any transfer. Waiting
+       * for a due time has a granularity, and without measuring it every
+       * microsecond of that granularity would be charged to the transport.
+       * Same loop, same clock, nothing submitted. */
+      std::vector<double> floor_us;
+      {
+        auto const dry_start = Clock::now();
+        for (auto const& r : trace) {
+          auto const due = dry_start + std::chrono::microseconds(r.at_us);
+          while (Clock::now() < due) {
+            if (due - Clock::now() > std::chrono::microseconds(50))
+              std::this_thread::sleep_for(std::chrono::microseconds(20));
+          }
+          floor_us.push_back(
+              std::chrono::duration<double, std::micro>(Clock::now() - due)
+                  .count());
+        }
+      }
+      Summary const fl = summarize(floor_us, 0);
+
+      /* Lateness is the measurement. Throughput says how fast this end can
+       * go; a replay asks whether it kept up with work that arrived on
+       * somebody else's schedule, and the answer is how far behind each
+       * request went out -- above the floor just measured. */
+      std::vector<double> late_us, lat_us;
+      std::vector<RequestPtr> live;
+      auto const start = Clock::now();
+      size_t issued = 0;
+      bool ok = true;
+      while (issued < trace.size() && ok) {
+        TraceRecord const& r = trace[issued];
+        auto const due = start + std::chrono::microseconds(r.at_us);
+        /* Completions are collected while waiting, so a request that is due
+         * later does not queue behind the polling. */
+        while (Clock::now() < due) {
+          std::vector<RequestPtr> done;
+          engine->poll_completions(64, &done);
+          /* Sleeping right up to the deadline would overshoot it by the
+           * sleep's own granularity, which is what the floor above
+           * measures; spin the last stretch instead. */
+          if (due - Clock::now() > std::chrono::microseconds(50))
+            std::this_thread::sleep_for(std::chrono::microseconds(20));
+        }
+        auto const now = Clock::now();
+        late_us.push_back(
+            std::chrono::duration<double, std::micro>(now - due).count());
+
+        RegionView lv, rv;
+        if (local->view(0, r.bytes, &lv) != Status::kOk ||
+            remote->view(0, r.bytes, &rv) != Status::kOk) {
+          ok = false;
+          break;
+        }
+        RequestPtr req;
+        Status const st =
+            r.write ? engine->write(peer.get(), lv, rv, {}, &req)
+                    : engine->read(peer.get(), lv, rv, {}, &req);
+        if (st != Status::kOk) {
+          std::printf("record %zu (%llu B) -> %s\n", issued,
+                      (unsigned long long)r.bytes, to_string(st));
+          ok = false;
+          break;
+        }
+        live.push_back(std::move(req));
+        ++issued;
+
+        for (auto it = live.begin(); it != live.end();) {
+          if (!is_terminal((*it)->state())) {
+            ++it;
+            continue;
+          }
+          lat_us.push_back(
+              std::chrono::duration<double, std::micro>(Clock::now() - now)
+                  .count());
+          it = live.erase(it);
+        }
+      }
+      while (!live.empty()) {
+        std::vector<RequestPtr> done;
+        engine->poll_completions(64, &done);
+        for (auto it = live.begin(); it != live.end();)
+          it = is_terminal((*it)->state()) ? live.erase(it) : ++it;
+      }
+      double const wall =
+          std::chrono::duration<double>(Clock::now() - start).count();
+
+      Summary const l = summarize(late_us, 0);
+      std::printf("%-22s %10s %10s %10s\n", "behind schedule", "median", "p90",
+                  "p99");
+      std::printf("%-22s %9.1fus %9.1fus %9.1fus\n", "  replayer alone",
+                  fl.median_us, fl.p90_us, fl.p99_us);
+      std::printf("%-22s %9.1fus %9.1fus %9.1fus\n", "  replaying", l.median_us,
+                  l.p90_us, l.p99_us);
+      std::printf("issued %zu of %zu; wall %.3f s against the trace's %.3f s;"
+                  " %.2f Gb/s\n",
+                  issued, trace.size(), wall, trace.back().at_us / 1e6,
+                  wall > 0 ? total * 8.0 / (wall * 1e9) : 0.0);
+      std::printf("the first row is this benchmark's own cost of waiting for a"
+                  " due time.\nOnly what the second row has above it belongs"
+                  " to the transport.\n");
+    }
+  }
+
   if (o.produce > 0) {
     /* A producer on the caller's stream, then a transfer of what it wrote.
      *
@@ -971,7 +1154,7 @@ int main(int argc, char** argv) {
                 " [--sizes a,b,c] [--iters N] [--local IP] [--chunk BYTES]"
                 " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n"
                 "       [--peers N] [--segments N] [--produce N]\n"
-                "       [--produce-repeats N]\n",
+                "       [--produce-repeats N] [--trace FILE]\n",
                 argv[0]);
     return 2;
   }
@@ -990,6 +1173,7 @@ int main(int argc, char** argv) {
       o.peers = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--segments")
       o.segments = std::max(1, std::atoi(argv[i + 1]));
+    else if (k == "--trace") o.trace = argv[i + 1];
     else if (k == "--produce") o.produce = std::max(0, std::atoi(argv[i + 1]));
     else if (k == "--produce-repeats")
       o.produce_repeats = std::max(1, std::atoi(argv[i + 1]));
