@@ -36,13 +36,18 @@ would be held to the slower adapter and finish below `mlx5_3` on its own, so
 the weights are part of the feature rather than a refinement of it.
 
 **Implemented, and measured on loopback at 1.33x** -- 48.60 Gb/s over one
-adapter against 64.54 over two, three alternating passes. Across machines it
-does not yet run: the peer here has only one adapter that can carry data,
-and the way that failed is a gap of this library's own. A lane that connects
-and cannot carry anything hangs every transfer through that peer, because a
-request is not complete until every lane's share is. `connect` returning ok
-should mean the queue pair has carried something, and today it means only
-that the endpoints were exchanged. See [tuning.md](tuning.md).
+adapter against 64.54 over two, three alternating passes. Across machines it has only one
+adapter to work with, because the peer's second cannot carry data, and it
+degrades to that one and runs at full single-adapter speed: 51.40 Gb/s
+against 51.26 for that adapter alone, the difference being three seconds
+spent proving the other one at setup.
+
+That degradation had to be built. A lane that connects and carries nothing
+used to hang every transfer through the peer, since a request is not
+complete until every lane's share is. `connect` now ends by sending a few
+bytes and waiting for its own completion, so returning ok means the queue
+pair has carried something rather than that the endpoints were exchanged.
+See [tuning.md](tuning.md).
 Registration, keys and queue pairs are all per device today; striping one
 request means a protection domain per adapter, a key per adapter in the
 descriptor, and a decision about which adapter each sub-operation goes to.

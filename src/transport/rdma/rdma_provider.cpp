@@ -233,6 +233,59 @@ Status RdmaConnection::repost_receive() {
                                                    : Status::kTransportError;
 }
 
+/* A work request id the data path never mints, so a verification completion
+ * cannot be mistaken for a transfer's. */
+namespace {
+constexpr uint64_t kVerifyWrId = (1ull << 62);
+}
+
+Status RdmaConnection::verify_path(int64_t timeout_ms) {
+  if (qps_.empty() || recv_mr_ == nullptr) return Status::kUnsupported;
+  ibv_qp* const qp = qps_[0].qp;
+  uint32_t const my_qp_num = qp->qp_num;
+
+  ibv_sge sge{};
+  sge.addr = reinterpret_cast<uint64_t>(recv_buf_.data());
+  sge.length = 8;
+  sge.lkey = recv_mr_->lkey;
+
+  ibv_send_wr wr{};
+  wr.wr_id = kVerifyWrId;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+  wr.opcode = IBV_WR_SEND;
+  wr.send_flags = IBV_SEND_SIGNALED;
+  ibv_send_wr* bad = nullptr;
+  if (ibv_post_send(qp, &wr, &bad) != 0) return Status::kTransportError;
+
+  auto const deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    ibv_wc wc[8];
+    int const n = ibv_poll_cq(owner_->cq(), 8, wc);
+    if (n < 0) return Status::kTransportError;
+    for (int i = 0; i < n; ++i) {
+      if (wc[i].wr_id == kVerifyWrId && wc[i].qp_num == my_qp_num) {
+        /* Success means the far end acknowledged it. Anything else means
+         * this path does not work, whatever its state says. */
+        return wc[i].status == IBV_WC_SUCCESS ? Status::kOk
+                                              : Status::kTransportError;
+      }
+      if ((wc[i].wr_id & kRecvWrId) != 0 && wc[i].qp_num == my_qp_num) {
+        /* The peer's own verification landing here. Consume it and put the
+         * receive back, or the queue is one short for ever after. */
+        repost_receive();
+        continue;
+      }
+      /* Someone else's transfer. Drawn from a queue shared with every other
+       * connection, so it goes back to the engine rather than being lost. */
+      owner_->stash_completion(wc[i]);
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+  return Status::kTimeout;
+}
+
 uint32_t RdmaConnection::submit_capacity() const {
   uint32_t const depth = owner_->config().sq_depth;
   uint64_t room = 0;
@@ -266,6 +319,18 @@ QueuePair* RdmaConnection::pick_queue_pair_locked() {
 }
 
 // ---------------- RdmaProvider ----------------
+
+void RdmaProvider::forget_conn_of(RdmaConnection* c) {
+  std::lock_guard<std::mutex> g(conn_mu_);
+  for (auto it = conn_by_qp_.begin(); it != conn_by_qp_.end();)
+    it = it->second == c ? conn_by_qp_.erase(it) : std::next(it);
+  for (auto it = ctrl_conns_.begin(); it != ctrl_conns_.end();) {
+    auto held = it->lock();
+    /* Expired entries go too: this is the only place that walks the list. */
+    it = (held == nullptr || held.get() == c) ? ctrl_conns_.erase(it)
+                                              : std::next(it);
+  }
+}
 
 void RdmaProvider::register_conn(uint32_t qp_num, RdmaConnection* c) {
   std::lock_guard<std::mutex> g(conn_mu_);
@@ -701,6 +766,18 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
    * afterwards still finds a receive waiting. */
   Status rs = conn->arm_receives(pd_, cfg_.rq_depth);
   if (rs != Status::kOk) return rs;
+
+  /* And proved, before it is handed out. Reaching ready is not evidence that
+   * anything can cross: two addresses on one subnet bring both queue pairs
+   * up while the kernel route sends every reply out the other interface, and
+   * the caller is given a lane that will never complete a transfer. With one
+   * lane that is a peer that does not work; with several it is worse, since
+   * a request needs every lane's share and one silent lane hangs the rest. */
+  Status const proved = conn->verify_path(cfg_.verify_timeout_ms);
+  if (proved != Status::kOk) {
+    forget_conn_of(conn.get());
+    return proved;
+  }
   *out = conn;
   return Status::kOk;
 }
@@ -965,6 +1042,11 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
 /* Drains up to max_events completions and hands back every one of them.
  * Stopping early on a particular request would lose the completions sharing
  * the batch, and those requests would never reach a terminal state. */
+void RdmaProvider::stash_completion(ibv_wc const& wc) {
+  std::lock_guard<std::mutex> g(stash_mu_);
+  stashed_.push_back(wc);
+}
+
 Status RdmaProvider::poll(uint32_t max_events,
                           std::vector<CompletionEvent>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
@@ -972,8 +1054,23 @@ Status RdmaProvider::poll(uint32_t max_events,
   if (max_events == 0) return Status::kOk;
 
   std::vector<ibv_wc> wc(max_events);
-  int n = ibv_poll_cq(cq_, static_cast<int>(max_events), wc.data());
-  if (n < 0) return Status::kTransportError;
+  int n = 0;
+  /* Anything set aside while a connection was being verified comes first:
+   * it was drawn from the queue before this call and would otherwise never
+   * be reported. */
+  {
+    std::lock_guard<std::mutex> g(stash_mu_);
+    while (!stashed_.empty() && n < static_cast<int>(max_events)) {
+      wc[n++] = stashed_.front();
+      stashed_.pop_front();
+    }
+  }
+  if (n < static_cast<int>(max_events)) {
+    int const drawn =
+        ibv_poll_cq(cq_, static_cast<int>(max_events) - n, wc.data() + n);
+    if (drawn < 0) return Status::kTransportError;
+    n += drawn;
+  }
 
   for (int i = 0; i < n; ++i) {
     if ((wc[i].wr_id & kRecvWrId) != 0) {

@@ -80,6 +80,11 @@ struct RdmaConfig {
    *
    * Zero for a single-adapter engine, which is every caller that does not
    * ask for more, so nothing changes on the wire for them. */
+  /* How long a new connection has to carry a few bytes before it is
+   * refused. Long enough for a queue pair's own retries to give up on a path
+   * that does not work, short enough that a caller is not left waiting on
+   * one. */
+  int64_t verify_timeout_ms = 3000;
   uint32_t nic_ordinal = 0;
   /* This adapter's share when a transfer is split across several. See
    * ProviderCaps::relative_capacity; the provider cannot measure this for
@@ -167,6 +172,10 @@ class RdmaProvider : public TransportProvider {
    * application that has no out-of-band channel of its own. */
   Status accept(int64_t timeout_ms, ProviderConnectionPtr* out);
 
+  /* A completion drawn from the shared queue by something other than
+   * poll(), handed back so the engine still sees it. */
+  void stash_completion(ibv_wc const& wc);
+
   CongestionController* cc() const { return cc_.get(); }
   ibv_pd* pd() const { return pd_; }
   ibv_cq* cq() const { return cq_; }
@@ -178,6 +187,9 @@ class RdmaProvider : public TransportProvider {
   Status open_device();
   Status start_listener();
   Status build_connection(int sock, ProviderConnectionPtr* out);
+  /* Drops a half-built connection out of the queue-pair map and the control
+   * list, so a refused one leaves nothing behind. */
+  void forget_conn_of(RdmaConnection* c);
 
   RdmaConfig cfg_;
   CongestionControllerPtr cc_;
@@ -208,6 +220,12 @@ class RdmaProvider : public TransportProvider {
      * one whose outstanding count it retires. */
     RdmaConnection* conn = nullptr;
   };
+  /* Completions drawn from the shared queue while verifying a new
+   * connection, which belong to somebody else's transfer and must not be
+   * dropped on the floor. poll() takes these before it touches the queue. */
+  std::mutex stash_mu_;
+  std::deque<ibv_wc> stashed_;
+
   std::mutex inflight_mu_;
   std::unordered_map<uint64_t, InflightOp> inflight_;
   uint64_t next_wr_id_ = 1;
@@ -277,6 +295,15 @@ class RdmaConnection : public ProviderConnection {
    * posted before the peer writes, or the arrival is lost. */
   Status arm_receives(ibv_pd* pd, uint32_t count);
   Status repost_receive();
+  /* Sends a few bytes and waits for its own completion. On a reliable
+   * connection that completion means the peer acknowledged it, so it is the
+   * cheapest proof that this queue pair can carry anything at all.
+   *
+   * Reaching ready does not prove that. Two addresses on one subnet will
+   * exchange endpoints and bring both queue pairs up while the kernel route
+   * sends every reply out the other interface, and the transport looks
+   * connected and moves nothing. */
+  Status verify_path(int64_t timeout_ms);
 
   /* An RC queue pair that hits a fatal completion moves to ERROR and flushes
    * everything after it. Without marking that, later requests fail one by one

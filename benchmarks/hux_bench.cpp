@@ -462,18 +462,28 @@ int run_server(Options const& o) {
 
   /* One accept per transport, because the client dials every one it can
    * reach: a server that accepted on the first would leave the others'
-   * handshakes unanswered and the client waiting on them. */
+   * handshakes unanswered and the client waiting on them.
+   *
+   * An adapter that will not come up is skipped rather than fatal. The
+   * client makes the same decision on its side -- a lane it cannot prove is
+   * left out -- and the two ends arrive at the same smaller set. One
+   * unusable adapter is a reason to serve on the others, which is what a
+   * host with a spare adapter has one for. */
   std::vector<ProviderConnectionPtr> conns;
   for (auto& tp : provs) {
     ProviderConnectionPtr conn;
     auto* rp = static_cast<RdmaProvider*>(tp.get());
     Status const s = rp->accept(30000, &conn);
     if (s != Status::kOk) {
-      std::printf("[server] rdma accept on %s failed: %s\n",
+      std::printf("[server] %s did not come up: %s -- serving without it\n",
                   rp->caps().name.c_str(), to_string(s));
-      return 1;
+      continue;
     }
     conns.push_back(std::move(conn));
+  }
+  if (conns.empty()) {
+    std::printf("[server] no adapter came up\n");
+    return 1;
   }
   std::printf("[server] connected; holding memory until the client finishes\n");
 
@@ -554,11 +564,16 @@ int run_client(std::string const& ip, Options const& o) {
   PeerPtr peer;
   Status const added = engine->add_peer(meta, &peer);
   if (added != Status::kOk) {
-    /* The usual cause is the server having advertised 0.0.0.0, which is
-     * what it does without --local: there is no address in its metadata to
-     * dial. Naming it beats the silent exit this used to be. */
-    std::printf("add_peer failed: %s. Start the server with --local <ip>.\n",
-                to_string(added));
+    /* Two different causes, and the hint has to match. A timeout means the
+     * adapters connected and could not carry anything; anything else is
+     * usually the server having advertised 0.0.0.0, which is what it does
+     * without --local, leaving no address in its metadata to dial. */
+    if (added == Status::kTimeout)
+      std::printf("add_peer failed: no adapter could carry a transfer to the"
+                  " peer.\n");
+    else
+      std::printf("add_peer failed: %s. Start the server with --local <ip>.\n",
+                  to_string(added));
     return 1;
   }
   RemoteRegionPtr remote;

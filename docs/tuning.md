@@ -316,10 +316,26 @@ not complete until every lane's share is, so one silent lane hangs all of
 them, with no timeout and nothing said. Striping on loopback worked because
 both adapters are on one host and no route is consulted.
 
-`connect` returning `kOk` currently means the endpoints were exchanged and
-the queue pair reached ready. That is too weak a claim to hand a caller a
-lane on -- the same shape of mistake as a copy that returns before its bytes
-have landed. It should mean the queue pair has carried something.
+`connect` returning `kOk` used to mean the endpoints were exchanged and the
+queue pair reached ready. That is too weak a claim to hand a caller a lane
+on -- the same shape of mistake as a copy that returns before its bytes have
+landed. It now means the queue pair has carried something: the handshake
+ends by sending a few bytes and waiting for its own completion, which on a
+reliable connection means the far end acknowledged them.
+
+With that, the same three configurations behave as they should:
+
+| | |
+| --- | --- |
+| the dead adapter alone | refused in 3.0 s, saying no adapter could carry a transfer |
+| the working adapter alone | 51.26 Gb/s, 1.1 s |
+| both, one of them dead | 51.40 Gb/s, 4.1 s |
+
+The third row is the point. A lane that cannot carry anything now costs
+three seconds once, at setup, instead of hanging every transfer for ever.
+Both ends reach the same smaller set on their own: the client leaves out a
+lane it cannot prove, and the server serves on the adapters that came up
+rather than giving up because one did not.
 
 An earlier version of this section blamed the fabric on the strength of a
 test whose client started three seconds after the server, whether or not the
