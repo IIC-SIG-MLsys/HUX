@@ -301,6 +301,7 @@ Status IpcProvider::connect(std::vector<uint8_t> const& peer_metadata,
     return s;
   }
   sock_ = fd;
+  outbox_.reset(fd);
   auto conn = std::make_shared<IpcConnection>(this);
   conn_ = conn.get();
   publish_all(fd);
@@ -329,6 +330,7 @@ Status IpcProvider::accept(int64_t timeout_ms, ProviderConnectionPtr* out) {
         return s;
       }
       sock_ = fd;
+      outbox_.reset(fd);
       auto conn = std::make_shared<IpcConnection>(this);
       conn_ = conn.get();
       publish_all(fd);
@@ -353,6 +355,7 @@ Status IpcProvider::disconnect(ProviderConnectionPtr) {
   }
   imported_.clear();
   if (sock_ >= 0) {
+    outbox_.reset(-1);
     ::close(sock_);
     sock_ = -1;
   }
@@ -363,11 +366,19 @@ Status IpcProvider::disconnect(ProviderConnectionPtr) {
 Status IpcProvider::send_frame(int fd, uint16_t type,
                                std::vector<uint8_t> const& body) {
   if (fd < 0) return Status::kPeerDisconnected;
-  std::vector<uint8_t> head;
-  put_u32(&head, static_cast<uint32_t>(body.size()));
-  put_u16(&head, type);
-  if (!send_all(fd, head.data(), head.size())) return Status::kPeerDisconnected;
-  if (!body.empty() && !send_all(fd, body.data(), body.size()))
+  /* One buffer. A frame split into two writes can be separated from its
+   * header by another frame or by a partial write, and the peer's reader
+   * then takes the next header as this one's body -- with no way back. */
+  std::vector<uint8_t> frame;
+  put_u32(&frame, static_cast<uint32_t>(body.size()));
+  put_u16(&frame, type);
+  frame.insert(frame.end(), body.begin(), body.end());
+
+  /* Everything for the established socket goes through the queue, not only
+   * control frames: two paths writing one socket would interleave a direct
+   * write into a frame the queue had only partly sent. */
+  if (fd == sock_) return outbox_.post(std::move(frame));
+  if (!send_all(fd, frame.data(), frame.size()))
     return Status::kPeerDisconnected;
   return Status::kOk;
 }
@@ -491,6 +502,7 @@ void IpcProvider::peer_is_gone_locked() {
   }
   imported_.clear();
   if (sock_ >= 0) {
+    outbox_.reset(-1);
     ::close(sock_);
     sock_ = -1;
   }
@@ -498,6 +510,15 @@ void IpcProvider::peer_is_gone_locked() {
 
 Status IpcProvider::pump(int fd) {
   if (fd < 0) return Status::kPeerDisconnected;
+  /* Both directions. Anything the send path could not push out goes here,
+   * because this is what every caller runs to make progress on the socket --
+   * including the withdrawal wait, which would otherwise sit for its whole
+   * timeout waiting for an acknowledgement of a frame still in the queue. */
+  if (outbox_.flush() == Status::kPeerDisconnected) {
+    std::lock_guard<std::mutex> g(mu_);
+    peer_is_gone_locked();
+    return Status::kPeerDisconnected;
+  }
   bool closed = false;
   for (;;) {
     uint8_t buf[4096];
@@ -566,6 +587,11 @@ Status IpcProvider::pump(int fd) {
   return Status::kOk;
 }
 
+/* How long a submit waits for a key the peer has not published yet. Long
+ * enough for a peer that is about to, short enough that a key which is
+ * never coming is reported rather than waited on. */
+constexpr int kPublicationWaitMs = 250;
+
 Status IpcProvider::ensure_mapped(uint64_t key, Imported** out) {
   auto it = imported_.find(key);
   if (it == imported_.end()) return Status::kNotFound;
@@ -587,15 +613,44 @@ SubmitResult IpcProvider::submit(ProviderConnection* conn,
     return r;
   }
 
-  /* A publication may still be in the socket when the first operation against
-   * it is submitted, so the frames are drained before the keys are looked up
-   * rather than after failing to find one. */
+  /* A publication may still be on its way when the first operation against
+   * it is submitted. connect() returns once this side's handshake is done,
+   * which is before the peer has accepted and sent what it holds -- so
+   * draining what has arrived is not enough, because there may be nothing
+   * there yet. Measured: a client that connects, imports a descriptor and
+   * reads straight away was refused every time, for a key the peer was
+   * about to publish.
+   *
+   * So the keys this batch needs are waited for, briefly, rather than the
+   * request being failed for information that is in flight. This also
+   * covers a region registered after the connection was made, which a
+   * handshake-time exchange would not. Every later submit finds them
+   * present and does not wait. */
   int fd = -1;
   {
     std::lock_guard<std::mutex> g(mu_);
     fd = sock_;
   }
-  pump(fd);
+  {
+    auto const deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kPublicationWaitMs);
+    while (true) {
+      pump(fd);
+      bool have_all = true;
+      {
+        std::lock_guard<std::mutex> g(mu_);
+        if (peer_gone_ || sock_ < 0) break;
+        for (auto const& op : ops) {
+          if (imported_.count(op.remote_key) == 0) {
+            have_all = false;
+            break;
+          }
+        }
+      }
+      if (have_all || std::chrono::steady_clock::now() >= deadline) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
 
   std::lock_guard<std::mutex> g(mu_);
   /* Refused rather than attempted. The mapping may still be addressable

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "control/identity.h"
+#include "transport/control_outbox.h"
 #include "hux/device.h"
 #include "transport/provider.h"
 
@@ -113,6 +114,12 @@ class IpcProvider : public TransportProvider {
    * the time submit returns. */
   Status pump(int fd);
   Status send_frame(int fd, uint16_t type, std::vector<uint8_t> const& body);
+  /* Frames for the established socket never wait on it. They are produced on
+   * the completion path, which drives every transfer, and send_control holds
+   * this provider's lock while it sends -- so a peer that had not read for a
+   * moment stopped the whole provider for as long as the socket's timeout,
+   * and was then declared gone. */
+  ControlOutbox outbox_;
   void publish_all(int fd);
   /* Maps a published region, or returns the mapping already held. */
   Status ensure_mapped(uint64_t key, Imported** out);
