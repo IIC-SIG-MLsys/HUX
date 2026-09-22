@@ -346,10 +346,12 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
   }
   for (auto& p : peers) {
     if (!p->connected()) continue;
-    /* Counted by what happened. The local handle goes either way, so a
-     * notice the transport would not take leaves the peer holding a
-     * descriptor for memory that is no longer there, and this counter is
-     * the only place that shows. */
+    /* Counted by whether the transport took it, which is not the same as
+     * the peer having read it: a control message it accepts may still be
+     * queued for a peer that is not reading, and the provider reports what
+     * is still owed. The local handle goes either way, so a notice that was
+     * refused leaves the peer holding a descriptor for memory that is no
+     * longer there, and this counter is the only place that shows. */
     Status const sent = p->provider()->send_control(
         p->conn(), static_cast<uint16_t>(ControlType::kRegionInvalidate),
         payload);
@@ -1413,11 +1415,13 @@ Status EngineImpl::progress() {
                                       ? req->provider()
                                       : providers_.front().get();
         if (conn != nullptr) {
-          /* Counted by what happened, not by having tried. The request is
-           * about to succeed either way -- the bytes did land -- so a
-           * handoff the transport refused leaves the peer waiting for a
-           * signal that is never coming, and this counter is the only place
-           * it shows. */
+          /* Counted by whether the transport took it. Taken is not the
+           * same as delivered -- it may still be queued for a peer that is
+           * not reading, which the provider reports separately -- but
+           * refused is certain: the request is about to succeed either way,
+           * the bytes did land, and a handoff nobody took leaves the peer
+           * waiting for a signal that is never coming. This counter is the
+           * only place it shows. */
           Status const sent = prov->send_control(
               conn.get(), static_cast<uint16_t>(ControlType::kReadyHandoff),
               payload);

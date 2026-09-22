@@ -56,7 +56,13 @@ struct EngineStats {
 
   /* Control plane, kept apart from data: it has its own resources, and
    * counting them together would hide a stalled control channel behind
-   * healthy data traffic. */
+   * healthy data traffic.
+   *
+   * The "sent" counters below mean the transport took the message, not that
+   * the peer has read it: a control channel never waits on the socket, so an
+   * accepted message can still be queued for a peer that is not reading.
+   * What is still owed is the provider's to report; what was refused
+   * outright is counted here. */
   uint64_t notifications_sent = 0;
   uint64_t notifications_received = 0;
   uint64_t notifications_dropped = 0; /* queue full, so not acknowledged */
