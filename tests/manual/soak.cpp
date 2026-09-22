@@ -17,6 +17,8 @@
  *   soak server --local <ip> --port <p>          (one per peer)
  *   soak client <server-ip> --local <ip> --port <p> --peers N --hours H
  */
+#include <unistd.h>
+
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +39,21 @@ using namespace hux::manual;
 using Clock = std::chrono::steady_clock;
 
 namespace {
+
+/* Resident memory, in MiB. The counters below say how much work went
+ * through; this says whether anything was kept. A run that moves correct
+ * bytes for a day while this climbs has still found a defect, and without
+ * it the only way to notice would be the machine running out. */
+double rss_mib() {
+  std::FILE* f = std::fopen("/proc/self/statm", "r");
+  if (f == nullptr) return 0.0;
+  unsigned long total = 0, resident = 0;
+  int const n = std::fscanf(f, "%lu %lu", &total, &resident);
+  std::fclose(f);
+  if (n != 2) return 0.0;
+  long const page = ::sysconf(_SC_PAGESIZE);
+  return double(resident) * double(page) / double(1 << 20);
+}
 
 /* Small and large in the same stream, so a short request has a long one in
  * front of it as it would in a real workload. */
@@ -369,7 +386,8 @@ int run_client(std::string const& ip, Options const& o) {
     std::printf(
         "%6.2f h  %10llu rounds (+%llu)  %8.1f GiB  "
         "accepted=%llu succeeded=%llu failed=%llu cancelled=%llu  "
-        "copied=%llu\n",
+        "copied=%llu  |  rss=%.0f MiB regs=%llu peak_inflight=%llu "
+        "handoffs_lost=%llu\n",
         hours, (unsigned long long)rounds,
         (unsigned long long)(rounds - last_rounds),
         g_bytes.load() / double(1 << 30),
@@ -380,7 +398,13 @@ int run_client(std::string const& ip, Options const& o) {
         (unsigned long long)(st.requests_cancelled -
                              baseline.requests_cancelled),
         (unsigned long long)(st.payload_bytes_copied -
-                             baseline.payload_bytes_copied));
+                             baseline.payload_bytes_copied),
+        /* Held rather than done: these are the ones that answer whether a
+         * day of correct transfers left anything behind. */
+        rss_mib(), (unsigned long long)st.registration_cache_size,
+        (unsigned long long)st.peak_inflight_requests,
+        (unsigned long long)(st.ready_handoffs_failed -
+                             baseline.ready_handoffs_failed));
     std::fflush(stdout);
     last_rounds = rounds;
 
