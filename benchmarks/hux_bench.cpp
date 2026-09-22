@@ -584,9 +584,23 @@ int run_client(std::string const& ip, Options const& o) {
   }
 
   std::printf("\n%s\n\n", engine->describe().c_str());
-  std::printf("%-10s %-8s %10s %10s %10s %10s %10s %7s %10s\n", "size", "op",
-              "median_us", "p10_us", "p90_us", "Gb/s", "rate_Gb/s", "cores",
-              "cpu_s/GiB");
+
+  /* What was actually established, not what was asked for. A run given two
+   * addresses whose second lane could not be proved falls back to one and
+   * goes on working, so a striped arm can quietly measure a single adapter
+   * and be reported as striping. Asking for N and getting fewer is said
+   * here rather than left to be inferred from how long the run took. */
+  {
+    size_t const asked = o.local_ips.empty() ? 1 : o.local_ips.size();
+    std::printf("peer reached over %u of %zu adapter(s) asked for",
+                peer->caps().lane_count, asked);
+    if (peer->caps().lane_count < asked)
+      std::printf("  <-- the rest could not carry a transfer");
+    std::printf("\n\n");
+  }
+  std::printf("%-10s %-8s %10s %10s %10s %10s %10s %10s %7s %10s\n", "size",
+              "op", "median_us", "p10_us", "p90_us", "p99_us", "Gb/s",
+              "rate_Gb/s", "cores", "cpu_s/GiB");
 
   auto one_transfer = [&](uint64_t bytes, bool write) -> double {
     RegionView lv, rv;
@@ -1168,11 +1182,11 @@ int run_client(std::string const& ip, Options const& o) {
       double const gib = samples.size() * bytes / double(1 << 30);
       double const cores =
           last_wall_seconds > 0 ? last_cpu_seconds / last_wall_seconds : 0.0;
-      std::printf(
-          "%-10llu %-8s %10.1f %10.1f %10.1f %10.2f %10.2f %7.2f %10.3f\n",
-          (unsigned long long)bytes, write ? "write" : "read", sum.median_us,
-          sum.p10_us, sum.p90_us, sum.gbps, rate, cores,
-          gib > 0 ? last_cpu_seconds / gib : 0.0);
+      std::printf("%-10llu %-8s %10.1f %10.1f %10.1f %10.1f %10.2f %10.2f"
+                  " %7.2f %10.3f\n",
+                  (unsigned long long)bytes, write ? "write" : "read",
+                  sum.median_us, sum.p10_us, sum.p90_us, sum.p99_us, sum.gbps,
+                  rate, cores, gib > 0 ? last_cpu_seconds / gib : 0.0);
     }
   }
 

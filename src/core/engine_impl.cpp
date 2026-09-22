@@ -1333,14 +1333,26 @@ Status EngineImpl::progress() {
     bool last = req->on_subop_complete(ev);
     if (!last) continue;
 
+    /* Counted before the request is released, in all three cases.
+     *
+     * Finishing a request wakes whoever is waiting on it, and that caller
+     * may read the counters straight afterwards. Counting second leaves a
+     * window in which every request a caller has seen finish is not yet in
+     * the totals -- rare on an idle machine and about eight times in a
+     * hundred under contention, which is how it reached the pipeline rather
+     * than a desk. If a caller has seen it end, the counters say so. */
     if (req->cancel_requested()) {
+      {
+        std::lock_guard<std::mutex> g(stats_mu_);
+        ++stats_.requests_cancelled;
+      }
       req->finish_cancelled();
-      std::lock_guard<std::mutex> g(stats_mu_);
-      ++stats_.requests_cancelled;
     } else if (!req->error().ok()) {
+      {
+        std::lock_guard<std::mutex> g(stats_mu_);
+        ++stats_.requests_failed;
+      }
       req->fail(req->error());
-      std::lock_guard<std::mutex> g(stats_mu_);
-      ++stats_.requests_failed;
     } else {
       /* Every accepted sub-operation is done, so transfer_complete holds.
        * Device visibility comes next, and only then target_ready. */
@@ -1374,9 +1386,11 @@ Status EngineImpl::progress() {
           ++stats_.ready_handoffs_sent;
         }
       }
+      {
+        std::lock_guard<std::mutex> g(stats_mu_);
+        ++stats_.requests_succeeded;
+      }
       req->finish_success();
-      std::lock_guard<std::mutex> g(stats_mu_);
-      ++stats_.requests_succeeded;
     }
     {
       std::lock_guard<std::mutex> g(mu_);

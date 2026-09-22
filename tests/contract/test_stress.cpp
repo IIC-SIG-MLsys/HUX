@@ -269,8 +269,19 @@ HUX_TEST(several_peers_at_once_do_not_get_each_others_data) {
         if (dst_reg[i]->view(0, kSpan, &lv) != Status::kOk) continue;
         if (remotes[i]->view(0, kSpan, &rv) != Status::kOk) continue;
         RequestPtr r;
-        if (engine->read(peers[i].get(), lv, rv, {}, &r) != Status::kOk)
-          continue;
+        /* Offered again while the engine says its queue is full. kWouldBlock
+         * is not a failure: nothing was accepted and nothing was sent, and
+         * the contract is to retry. Skipping instead made this test assume
+         * every submission is taken, which is only true when the machine is
+         * idle -- under contention it submitted fewer than it counted on and
+         * failed on the total, about eight times in a hundred. */
+        Status s = Status::kWouldBlock;
+        for (int tries = 0; tries < 10000; ++tries) {
+          s = engine->read(peers[i].get(), lv, rv, {}, &r);
+          if (s != Status::kWouldBlock) break;
+          std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        if (s != Status::kOk) continue;
         ++submitted;
         std::lock_guard<std::mutex> g(mu);
         issued[i].push_back(std::move(r));
@@ -296,6 +307,10 @@ HUX_TEST(several_peers_at_once_do_not_get_each_others_data) {
   CHECK_EQ(submitted.load(), kPeers * kPerPeer);
 
   EngineStats const st = engine->stats();
-  CHECK_EQ(st.requests_succeeded, static_cast<uint64_t>(kPeers * kPerPeer));
+  /* Against what was actually submitted, not against the number the loop
+   * intended. The two are the same now that back-pressure is retried, and
+   * comparing to the intention is how a retry that quietly gave up would go
+   * unnoticed. */
+  CHECK_EQ(st.requests_succeeded, static_cast<uint64_t>(submitted.load()));
   CHECK_EQ(st.requests_failed, uint64_t{0});
 }
