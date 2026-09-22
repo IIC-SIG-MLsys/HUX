@@ -24,10 +24,38 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build -j
+        # A job count rather than a bare -j, which means unlimited: thirty
+        # translation units compiling at once on a two-core runner with 7 GB
+        # is a memory limit waiting to be found.
+        run: cmake --build build -j2
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Test again, under contention
+        # Races do not need repetition to surface, they need contention, and
+        # a runner with two cores has plenty of it. Two failures in the first
+        # sixty-three runs came from one -- a request was counted after the
+        # caller waiting on it had been released -- and running the suite
+        # once could not find it. Eight copies at once could, three times in
+        # forty.
+        #
+        # Cheap enough to keep: the suite takes three seconds.
+        run: |
+          for round in 1 2 3 4 5; do
+            for k in 1 2 3 4 5 6 7 8; do
+              ./build/tests/hux_contract_tests > "/tmp/par_$k.log" 2>&1 &
+            done
+            wait
+            for k in 1 2 3 4 5 6 7 8; do
+              if ! grep -q ", 0 failed" "/tmp/par_$k.log"; then
+                echo "round $round, instance $k:"
+                cat "/tmp/par_$k.log"
+                exit 1
+              fi
+            done
+          done
+          echo "40 runs under contention, all passed"
 
   missing-dependency:
     name: enabling an absent backend fails at configure time
