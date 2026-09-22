@@ -48,13 +48,22 @@ void put_u32(std::vector<uint8_t>* o, uint32_t v) {
   for (int i = 0; i < 4; ++i) o->push_back((v >> (8 * i)) & 0xff);
 }
 
+/* An interrupted call is not a failure. Both of these run on a socket
+ * carrying a five-second timeout -- set for the handshake and deliberately
+ * left in place afterwards, since a control frame that cannot go out in that
+ * long on a Unix socket means the peer has stopped reading. EAGAIN therefore
+ * does mean the deadline passed, and is reported. A signal does not. */
 bool send_all(int fd, void const* buf, size_t n) {
   auto const* p = static_cast<uint8_t const*>(buf);
   while (n > 0) {
     ssize_t k = ::send(fd, p, n, MSG_NOSIGNAL);
-    if (k <= 0) return false;
-    p += k;
-    n -= static_cast<size_t>(k);
+    if (k > 0) {
+      p += k;
+      n -= static_cast<size_t>(k);
+      continue;
+    }
+    if (k < 0 && errno == EINTR) continue;
+    return false;
   }
   return true;
 }
@@ -63,9 +72,13 @@ bool recv_all(int fd, void* buf, size_t n) {
   auto* p = static_cast<uint8_t*>(buf);
   while (n > 0) {
     ssize_t k = ::recv(fd, p, n, 0);
-    if (k <= 0) return false;
-    p += k;
-    n -= static_cast<size_t>(k);
+    if (k > 0) {
+      p += k;
+      n -= static_cast<size_t>(k);
+      continue;
+    }
+    if (k < 0 && errno == EINTR) continue;
+    return false;
   }
   return true;
 }
@@ -370,7 +383,12 @@ void IpcProvider::publish_all(int fd) {
     put_u16(&body, static_cast<uint16_t>(kv.second.handle.bytes.size()));
     body.insert(body.end(), kv.second.handle.bytes.begin(),
                 kv.second.handle.bytes.end());
-    send_frame(fd, kFramePublish, body);
+    /* Same as above: a peer that did not hear about a region will refuse
+     * every transfer naming it, and the refusal would arrive far from here. */
+    if (send_frame(fd, kFramePublish, body) != Status::kOk) {
+      peer_is_gone_locked();
+      return;
+    }
   }
 }
 
@@ -406,7 +424,13 @@ Status IpcProvider::register_region(void* addr, uint64_t length, DeviceId,
     put_u64(&body, handle.allocation_bytes);
     put_u16(&body, static_cast<uint16_t>(handle.bytes.size()));
     body.insert(body.end(), handle.bytes.begin(), handle.bytes.end());
-    send_frame(sock_, kFramePublish, body);
+    /* A publish the peer never got means it does not know this region
+     * exists, and every transfer naming it would fail later with an unknown
+     * key -- while this call returned a perfectly good one. The frame only
+     * fails on a socket that is not going to carry anything else, so the
+     * peer is treated as gone and submissions say so straight away. */
+    if (send_frame(sock_, kFramePublish, body) != Status::kOk)
+      peer_is_gone_locked();
   }
 
   /* The two differ, as they do on a NIC: the peer names the region by the key
