@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <map>
 #include <chrono>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -104,6 +105,19 @@ struct Options {
    * the replay, so a trace describes when work arrives rather than how fast
    * this end can go. */
   std::string trace;
+  /* Unix milliseconds to begin the measured loop at. Several machines given
+   * the same value start together, which is what makes their rates
+   * addable: measured at different times they describe different runs, and
+   * summing them once produced 166 Gb/s over a 100 Gb/s adapter. Zero
+   * starts as soon as setup is done. */
+  int64_t start_at_ms = 0;
+  /* Run the measured loop for this long instead of for a fixed count.
+   *
+   * With a count, senders of different speeds finish at different times and
+   * the fast one leaves the link to the others, so the rates describe
+   * partly-shared windows and adding them overstates what the receiver
+   * carried. With a duration they all stop together. */
+  double for_seconds = 0;
   /* Rounds of the producer-consumer check. Zero skips it. */
   int produce = 0;
   /* How much work to put on the stream before recording the event. Tuned so
@@ -583,6 +597,25 @@ int run_client(std::string const& ip, Options const& o) {
     return 1;
   }
 
+  /* Everything above is setup, and it takes a different amount of time on
+   * each machine. Waiting here lines several of them up. */
+  if (o.start_at_ms > 0) {
+    auto const target = std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(o.start_at_ms));
+    auto const wait =
+        std::chrono::duration_cast<std::chrono::duration<double>>(
+            target - std::chrono::system_clock::now())
+            .count();
+    if (wait > 0) {
+      std::printf("waiting %.2f s to start together\n", wait);
+      std::fflush(stdout);
+      while (std::chrono::system_clock::now() < target)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } else {
+      std::printf("start time already passed by %.2f s; not lined up\n", -wait);
+    }
+  }
+
   std::printf("\n%s\n\n", engine->describe().c_str());
 
   /* What was actually established, not what was asked for. A run given two
@@ -698,8 +731,24 @@ int run_client(std::string const& ip, Options const& o) {
     double const cpu0 = cpu_seconds();
     auto const start = Clock::now();
 
+    /* A deadline rather than a count, when one was asked for. Work already
+     * in flight is still waited for, so the last requests are not counted as
+     * having taken however long the run had left. */
+    auto const deadline =
+        o.for_seconds > 0
+            ? start + std::chrono::duration_cast<Clock::duration>(
+                          std::chrono::duration<double>(o.for_seconds))
+            : Clock::time_point::max();
+    bool stopping = false;
+
     while (finished < schedule.size()) {
-      while (static_cast<int>(live.size()) < depth &&
+      if (!stopping && o.for_seconds > 0 && Clock::now() >= deadline) {
+        /* Stop offering; the loop then drains what is outstanding. */
+        stopping = true;
+        finished += schedule.size() - submitted;
+        submitted = schedule.size();
+      }
+      while (!stopping && static_cast<int>(live.size()) < depth &&
              submitted < schedule.size()) {
         uint64_t const bytes = schedule[submitted];
         auto const& v = views[bytes];
@@ -1231,6 +1280,7 @@ int main(int argc, char** argv) {
                 " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n"
                 "       [--peers N] [--segments N] [--produce N]\n"
                 "       [--produce-repeats N] [--trace FILE]\n"
+                "       [--start-at UNIX_MS] [--for-seconds S]\n"
                 "       --local takes a list: one adapter per address, with"
                 " --weights w1,w2\n",
                 argv[0]);
@@ -1272,6 +1322,9 @@ int main(int argc, char** argv) {
     else if (k == "--segments")
       o.segments = std::max(1, std::atoi(argv[i + 1]));
     else if (k == "--trace") o.trace = argv[i + 1];
+    else if (k == "--start-at")
+      o.start_at_ms = std::strtoll(argv[i + 1], nullptr, 10);
+    else if (k == "--for-seconds") o.for_seconds = std::atof(argv[i + 1]);
     else if (k == "--produce") o.produce = std::max(0, std::atoi(argv[i + 1]));
     else if (k == "--produce-repeats")
       o.produce_repeats = std::max(1, std::atoi(argv[i + 1]));
