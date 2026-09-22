@@ -74,39 +74,40 @@ because RC transport provides it. Interleaving 16 KiB and 4 MiB writes at
 depth 8 puts about four large transfers ahead of each small one, which is
 the harm a controller exists to prevent.
 
-**These are being re-measured.** They were taken against a receiver that
-never read its control channel, so the handoff each write produces was being
-dropped rather than delivered, and every small-write figure below is lower
-than it should be -- the re-run puts the fixed window's median at 11.1 us
-rather than 8.0. The conclusions do not move: a window still takes two
-orders of magnitude off the small write, and the adaptive controller still
-matches its median and loses badly on the tail. The table is replaced when
-the machines are free. See "What a ready handoff costs" below for how this
-came to light.
-
 Four passes rotating the order so each configuration runs in each position,
-2000 transfers a point, each size also measured alone for reference:
+2000 transfers a point, each size also measured alone for reference. The
+receiver reads its control channel, so the notice each write produces is
+delivered rather than dropped -- an earlier version of this table was taken
+against one that did not, and every small-write figure in it was about 3 us
+lower than the truth.
 
 | | small p50 | small p99 | large p50 | rate | behind |
 | --- | --- | --- | --- | --- | --- |
-| off | 1295.6 us | 1481.3 | 1483.0 | **91.23 Gb/s** | 68.4x |
-| fixed 1 MiB window | **8.0 us** | **8.4** | 2925.5 | 83.84 | 0.4x |
-| TIMELY, the paper's increase | 241.9 | 3038.2 | 5191.6 | 43.06 | 15.8x |
-| TIMELY, increase scaled to this fabric | 8.2 | 1325.7 | 2877.1 | 80.69 | 0.4x |
+| off | 1297.5 us | 1484.2 | 1485.9 | **91.14 Gb/s** | 36.6x |
+| fixed 1 MiB window | **11.2 us** | **12.7** | 2992.9 | 81.67 | 0.4x |
+| TIMELY, the paper's increase | 257.1 | 3007.4 | 5046.4 | 43.58 | 7.9x |
+| TIMELY, increase scaled to this fabric | 11.6 | 1121.2 | 2973.8 | 80.84 | 0.4x |
 
 "behind" is how much longer a small write takes with large ones ahead of it
 than it takes alone at the same depth.
 
-**A window is worth 8% of the throughput and takes 162x off the small
-write's latency.** That is the trade, and it is a large one: without it a
-16 KiB write waits 1.3 ms behind traffic it has nothing to do with.
+**A window costs 10% of the throughput and takes 116x off the small write's
+latency.** That is the trade, and it is a large one: without it a 16 KiB
+write waits 1.3 ms behind traffic it has nothing to do with.
 
 **The adaptive controller does not beat the fixed window.** Scaled to this
-fabric it reaches the same median -- 8.2 us against 8.0 -- and its tail is
-158 times worse, 1325.7 against 8.4. Left at the paper's increase it is
-worse on everything. CC-02 asks for an adaptive controller that meets a
-target; measured against the simplest thing that has a window at all, it
-does not earn its complexity here.
+fabric it reaches the same median -- 11.6 us against 11.2 -- and its tail is
+88 times worse, 1121.2 against 12.7. Left at the paper's increase it costs
+half the throughput as well. CC-02 asks for an adaptive controller that
+meets a target; measured against the simplest thing that has a window at
+all, it does not earn its complexity here.
+
+The medians are over four passes and one of them is thrown out by taking
+them. The first configuration of a run keeps coming back disturbed -- here
+"off" measured 39.26 Gb/s in pass 1 against 91.05, 91.23 and 91.30 in the
+other three, and two minutes of settling beforehand did not prevent it. A
+median of four is why the table can be read anyway, and a mean would not
+be.
 
 These numbers replace an earlier run in which TIMELY managed 2.97 Gb/s and a
 head-of-line factor of 818. That was a defect rather than a result: its rate
