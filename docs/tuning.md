@@ -342,3 +342,45 @@ test whose client started three seconds after the server, whether or not the
 server was listening. That test reported `.243` to `.252` as failing, which
 is the pairing measured at 24 Gb/s twice on either side of it. Waiting for
 the server to say it was ready changed three of the four answers.
+
+## Why TIMELY delivered 2.97 Gb/s on a path that carries 91
+
+The head-of-line run above measured it at 2.97 Gb/s against 91.27 for no
+control at all, with a head-of-line penalty of 818x. That is not a tuning
+problem, and the first explanation offered for it was wrong.
+
+The guess was that its window -- rate times the smallest delay seen -- came
+out smaller than a chunk, so every chunk took the escape for an operation
+larger than the whole window and went out alone. Serialising 1 MiB chunks on
+a path with a 15 us base delay would still give about 78 Gb/s, so that
+cannot be it.
+
+Asked of the controller directly, with `tests/manual/timely_probe.cpp`:
+
+| operations | admitted | paced / 200000 | over budget | rate reached |
+| --- | --- | --- | --- | --- |
+| 1 MiB | 1.87 Gb/s | 199912 | 0 | 3.47 Gb/s |
+| 128 KiB | 37.44 Gb/s | 98799 | 88507 | 100 Gb/s |
+| 64 KiB | 56.57 Gb/s | 119518 | 45955 | 100 Gb/s |
+
+The window refused nothing at all with 1 MiB operations. What refused them
+was the pacing, on a rate that stopped at 3.47 Gb/s and never climbed.
+
+**The increase was applied per completion rather than per round trip.** With
+megabyte operations there are few completions, so the rate climbs slowly, so
+there are fewer still -- a loop that never gets out of its own way. Small
+operations complete often enough to escape it, which is why the same
+controller reached line rate with 64 KiB.
+
+Scaling the increase by how many round trips have passed, which is what the
+paper specifies, with the same probe:
+
+| operations | before | after |
+| --- | --- | --- |
+| 1 MiB, mixed with 16 KiB | 1.87 Gb/s | **41.45 Gb/s** |
+| 1 MiB alone | 2.10 Gb/s | **54.53 Gb/s** |
+| 128 KiB | 37.44 | 41.95 |
+| 64 KiB | 56.57 | 59.31 |
+
+The sizes that already worked are unchanged, which is the check that matters:
+a fix that bought the large case by spending the small one would not be one.

@@ -150,11 +150,11 @@ class TimelyController : public CongestionController {
   }
 
   void on_feedback(CcDirection dir, uint64_t bytes,
-                   std::chrono::nanoseconds rtt, CcTime) override {
+                   std::chrono::nanoseconds rtt, CcTime now) override {
     std::lock_guard<std::mutex> g(mu_);
     Dir& d = dir_[idx(dir)];
     release_locked(d, bytes);
-    update_rate_locked(d, rtt);
+    update_rate_locked(d, rtt, now);
   }
 
   void on_error(CcDirection dir, uint64_t bytes, CcTime) override {
@@ -194,6 +194,10 @@ class TimelyController : public CongestionController {
     double avg_delay_diff_us = 0;
     bool have_prev = false;
     CcTime next_send{};
+    /* When the rate was last moved, so the increase can be per unit time
+     * rather than per completion. */
+    CcTime last_update{};
+    bool have_last_update = false;
   };
 
   static size_t idx(CcDirection d) { return static_cast<size_t>(d); }
@@ -214,9 +218,38 @@ class TimelyController : public CongestionController {
     return w < (1u << 16) ? (1u << 16) : w;
   }
 
-  void update_rate_locked(Dir& d, std::chrono::nanoseconds rtt) {
+  /* How many round trips have passed since the rate last moved.
+   *
+   * The increase is per round trip, not per completion. Adding it once per
+   * completion makes the ramp depend on how many completions there are,
+   * which depends on the rate: with megabyte operations there are few
+   * completions, so the rate climbs slowly, so there are fewer still. Driven
+   * that way from its starting rate it never arrives -- measured at 1.87
+   * Gb/s admitted with 1 MiB operations, against 56 Gb/s with 64 KiB ones,
+   * on a path that carries 91. */
+  double rounds_since_locked(Dir const& d, CcTime now) const {
+    if (!d.have_last_update) return 1.0;
+    double const base_ns = d.min_delay == std::chrono::nanoseconds::max()
+                               ? 1e6
+                               : static_cast<double>(d.min_delay.count());
+    if (base_ns <= 0) return 1.0;
+    double const dt_ns = static_cast<double>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now -
+                                                             d.last_update)
+            .count());
+    if (dt_ns <= 0) return 0.0;
+    double const rounds = dt_ns / base_ns;
+    /* Bounded, so a long idle stretch does not arrive as one enormous
+     * increase into a path whose state is no longer known. */
+    return rounds > 64.0 ? 64.0 : rounds;
+  }
+
+  void update_rate_locked(Dir& d, std::chrono::nanoseconds rtt, CcTime now) {
     if (rtt <= std::chrono::nanoseconds::zero()) return;
     if (rtt < d.min_delay) d.min_delay = rtt;
+    double const rounds = rounds_since_locked(d, now);
+    d.last_update = now;
+    d.have_last_update = true;
 
     double const sample_us = static_cast<double>(rtt.count()) / 1000.0;
     double const t_low_us = static_cast<double>(p_.t_low.count());
@@ -237,7 +270,7 @@ class TimelyController : public CongestionController {
     if (sample_us < t_low_us) {
       /* Below the low threshold there is no queue worth reacting to, so the
        * gradient is ignored and the rate simply grows. */
-      new_rate += p_.additive_increase_Bps;
+      new_rate += p_.additive_increase_Bps * rounds;
     } else if (sample_us > t_high_us) {
       /* A queue has already built; back off in proportion to the overshoot. */
       new_rate *= 1.0 - p_.beta * (1.0 - t_high_us / sample_us);
@@ -246,7 +279,7 @@ class TimelyController : public CongestionController {
       double const norm_grad =
           d.avg_delay_diff_us / (min_us > 0 ? min_us : 1.0);
       if (norm_grad <= 0) {
-        new_rate += p_.additive_increase_Bps;
+        new_rate += p_.additive_increase_Bps * rounds;
       } else {
         /* Delay is rising while still within bounds: slow down before the
          * queue grows, which is the whole point of reacting to the gradient

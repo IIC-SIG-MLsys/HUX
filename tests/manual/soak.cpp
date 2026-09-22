@@ -79,6 +79,10 @@ std::atomic<bool> g_stop{false};
 std::atomic<uint64_t> g_rounds{0};
 std::atomic<uint64_t> g_bytes{0};
 std::atomic<uint64_t> g_failures{0};
+/* How often the engine asked for the work to be offered again. Reported
+ * rather than treated as an error, so back-pressure is visible as what it
+ * is. */
+std::atomic<uint64_t> g_blocked{0};
 
 void say_failure(char const* what, int peer, uint64_t size,
                  char const* detail) {
@@ -92,6 +96,29 @@ void say_failure(char const* what, int peer, uint64_t size,
   std::fflush(stdout);
   g_failures.fetch_add(1);
   g_stop.store(true);
+}
+
+/* Submits, retrying while the engine says its queue is full.
+ *
+ * kWouldBlock is not a failure: the request was never accepted and had no
+ * network side effect, and the contract says to retry it. Treating it as an
+ * error is how a soak reports a defect after two million rounds of the
+ * engine doing exactly what it promised -- which is what the first
+ * overnight run did.
+ *
+ * Bounded, because retrying for ever would turn a genuinely stuck engine
+ * into a hang rather than a failure. */
+Status submit_retrying(Engine* engine, Peer* peer, RegionView const& lv,
+                       RegionView const& rv, bool write, RequestPtr* out,
+                       std::atomic<uint64_t>* blocked) {
+  for (int i = 0; i < 20000; ++i) {
+    Status const s = write ? engine->write(peer, lv, rv, {}, out)
+                           : engine->read(peer, lv, rv, {}, out);
+    if (s != Status::kWouldBlock) return s;
+    blocked->fetch_add(1);
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  return Status::kWouldBlock;
 }
 
 int run_server(Options const& o) {
@@ -256,14 +283,16 @@ int run_client(std::string const& ip, Options const& o) {
           uint8_t const mine = static_cast<uint8_t>(0xC0 + t);
           scratch[t].fill(mine);
           RequestPtr w;
-          if (engine->write(p.peer.get(), lv, rv, {}, &w) != Status::kOk ||
+          if (submit_retrying(engine.get(), p.peer.get(), lv, rv, true, &w,
+                              &g_blocked) != Status::kOk ||
               w->wait(60000) != Status::kOk) {
             say_failure("write", p.port, size, "did not complete");
             return;
           }
           scratch[t].fill(0x00);
           RequestPtr r;
-          if (engine->read(p.peer.get(), lv, rv, {}, &r) != Status::kOk ||
+          if (submit_retrying(engine.get(), p.peer.get(), lv, rv, false, &r,
+                              &g_blocked) != Status::kOk ||
               r->wait(60000) != Status::kOk) {
             say_failure("read back", p.port, size, "did not complete");
             return;
@@ -279,7 +308,8 @@ int run_client(std::string const& ip, Options const& o) {
         } else {
           scratch[t].fill(0x00);
           RequestPtr r;
-          if (engine->read(p.peer.get(), lv, rv, {}, &r) != Status::kOk ||
+          if (submit_retrying(engine.get(), p.peer.get(), lv, rv, false, &r,
+                              &g_blocked) != Status::kOk ||
               r->wait(60000) != Status::kOk) {
             say_failure("read", p.port, size, "did not complete");
             return;
