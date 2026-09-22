@@ -816,14 +816,30 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
     return false;
   }
 
-  if (sr.accepted == 0 && sr.status != Status::kOk) {
-    ErrorInfo e;
-    e.status = sr.status;
-    e.provider = prov->caps().name;
-    e.peer_id = p->peer;
-    e.provider_errno = sr.provider_errno;
-    e.detail = "submit rejected";
-    p->req->seal_accepted();
+  if (sr.accepted == slice.size()) return p->ops.empty();
+
+  /* Submission has stopped for a reason that is not back-pressure, so no
+   * more of this request will ever be posted. */
+  p->req->seal_accepted();
+  /* Across every quantum, not just this call: a request posted in several
+   * goes can have sub-operations outstanding from an earlier one. */
+  uint32_t const outstanding = p->req->accepted_subops();
+
+  ErrorInfo e;
+  e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
+  e.provider = prov->caps().name;
+  e.peer_id = p->peer;
+  e.provider_errno = sr.provider_errno;
+  e.may_have_modified_target = outstanding > 0;
+  e.detail = outstanding == 0 ? "submit rejected" : "partial submit";
+
+  if (outstanding == 0) {
+    /* Nothing reached the NIC, so local DMA never started and the request
+     * can end here. */
+    {
+      std::lock_guard<std::mutex> g(stats_mu_);
+      ++stats_.requests_failed;
+    }
     {
       std::lock_guard<std::mutex> g(mu_);
       inflight_.erase(p->req->id());
@@ -832,19 +848,20 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
     p->req->fail(e);
     return true;
   }
-  if (sr.accepted < slice.size()) {
-    ErrorInfo e;
-    e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
-    e.provider = prov->caps().name;
-    e.peer_id = p->peer;
-    e.provider_errno = sr.provider_errno;
-    e.may_have_modified_target = true;
-    e.detail = "partial submit";
-    p->req->seal_accepted();
-    p->req->fail(e);
-    return true;
-  }
-  return p->ops.empty();
+
+  /* Sub-operations are still reading the source. Failing here would publish
+   * FailedSafe -- local DMA has stopped -- while it has not, and a caller
+   * that reuses its buffer on that word hands the NIC memory it no longer
+   * owns. It would also leave the request in inflight_ for good: the
+   * completion path skips anything already terminal, so the entry, the
+   * request and the regions it holds would never be released.
+   *
+   * So the reason is recorded and the request drains. The last accepted
+   * sub-operation ends it through the ordinary path, which counts it,
+   * releases it, and publishes FailedSafe when it is true. */
+  p->req->note_error(e);
+  p->req->set_state(RequestState::kDraining);
+  return true;
 }
 
 /* One scheduling pass: every waiting request gets a turn of at most a

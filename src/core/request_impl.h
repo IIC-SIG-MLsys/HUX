@@ -63,6 +63,12 @@ class RequestImpl : public Request {
   bool sealed() const;
   uint32_t total_subops() const { return total_subops_; }
 
+  /* Records why this request will fail, without ending it. Submission can
+   * stop for good while sub-operations it already handed to the NIC are
+   * still reading the source: the error is known then, but FailedSafe says
+   * local DMA has stopped, and it has not. The completion path ends the
+   * request once those drain. */
+  void note_error(ErrorInfo const& e);
   void fail(ErrorInfo const& e);
   void finish_success();
   void finish_cancelled();

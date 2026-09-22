@@ -273,6 +273,64 @@ HUX_TEST(partial_submit_reports_and_keeps_accepted) {
   CHECK_EQ(f.provider->submitted_subops(), 3u);
 }
 
+/* FailedSafe says local DMA has stopped. When submission gives up partway,
+ * the sub-operations it already handed to the NIC are still reading the
+ * source, so the request cannot be terminal yet -- a caller that frees its
+ * buffer on seeing the failure would hand the NIC memory it no longer owns.
+ * The request used to fail at submit time, before any of them completed. */
+HUX_TEST(partial_submit_waits_while_the_nic_still_reads_the_source) {
+  EngineConfig cfg = explicit_cfg();
+  cfg.chunk_bytes = 512; /* 8 chunks. */
+  MockConfig mock;
+  mock.accept_limit = 3;
+  mock.never_complete = true; /* the three stay outstanding */
+  Fixture f;
+  CHECK(f.setup(cfg, mock));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 4096, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kOk);
+  CHECK(req != nullptr);
+
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 50; ++i) f.engine->poll_completions(16, &done);
+  bool finished = true;
+  CHECK_STATUS(req->test(&finished), Status::kOk);
+  CHECK(!finished);
+  CHECK_STATUS(req->wait(20), Status::kTimeout);
+}
+
+/* And when they do complete, the request has to be released. The completion
+ * path skips anything already terminal, so failing at submit time left the
+ * entry in the in-flight table for good -- which the engine's own bound then
+ * counts against every later request. */
+HUX_TEST(partial_submit_releases_the_request) {
+  EngineConfig cfg = explicit_cfg();
+  cfg.chunk_bytes = 512;
+  cfg.max_inflight_requests = 4;
+  MockConfig mock;
+  mock.accept_limit = 3;
+  Fixture f;
+  CHECK(f.setup(cfg, mock));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 4096, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
+
+  /* Three times the bound: if the failures are not released, admission stops
+   * after four. */
+  for (int i = 0; i < 12; ++i) {
+    RequestPtr req;
+    CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+                 Status::kOk);
+    CHECK_STATUS(f.drain(req, 500), Status::kResourceExhausted);
+    CHECK(!req->error().ok());
+  }
+  EngineStats const st = f.engine->stats();
+  CHECK_EQ(st.requests_failed, uint64_t(12));
+}
+
 HUX_TEST(full_submit_rejection_has_no_side_effect) {
   EngineConfig cfg = explicit_cfg();
   MockConfig mock;

@@ -121,6 +121,12 @@ Status RequestImpl::cancel() {
   return Status::kOk;
 }
 
+void RequestImpl::note_error(ErrorInfo const& e) {
+  std::lock_guard<std::mutex> g(mu_);
+  if (terminal_locked()) return;
+  if (error_.ok()) error_ = e;
+}
+
 void RequestImpl::fail(ErrorInfo const& e) {
   {
     std::lock_guard<std::mutex> g(mu_);
