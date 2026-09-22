@@ -697,7 +697,10 @@ NB_MODULE(hux, m) {
       .def_prop_ro("connected", &PyPeer::connected)
       .def("caps", &PyPeer::caps,
            "The transport in use, where the peer is, and the provider's name.")
-      .def("import_region", &PyPeer::import_region, nb::arg("descriptor"));
+      /* A remote region is looked up through the peer it was imported
+       * into, so the peer has to outlive it. */
+      .def("import_region", &PyPeer::import_region, nb::arg("descriptor"),
+           nb::keep_alive<0, 1>());
 
   nb::class_<PyRequest>(m, "Request")
       .def_prop_ro("state", &PyRequest::state)
@@ -723,6 +726,7 @@ NB_MODULE(hux, m) {
       .def("progress", &PyEngine::progress,
            "One turn of the progress engine, for the explicit mode.")
       .def("notify", &PyEngine::notify, nb::arg("peer"), nb::arg("payload"),
+           nb::keep_alive<0, 1>(),
            "Send an application message; completes on the peer's"
            " acknowledgement.")
       .def("poll_notifications", &PyEngine::poll_notifications,
@@ -734,28 +738,43 @@ NB_MODULE(hux, m) {
            "Registers an object supporting the buffer protocol. The engine "
            "keeps a reference to it for as long as the registration lives.")
       .def("local_metadata", &PyEngine::local_metadata)
-      .def("add_peer", &PyEngine::add_peer, nb::arg("metadata"))
+      /* A peer holds a plain pointer to the engine -- importing a region
+       * writes into the engine's table -- so dropping the engine while
+       * Python still has the peer would leave it pointing at freed memory.
+       * Every object below is tied to the engine for the same reason: a
+       * request needs the engine's progress to ever complete, and a stream
+       * or event belongs to the device backend the engine holds. Regions
+       * are deliberately not tied: their registration keeps the providers
+       * alive on its own, so one outliving the engine is allowed. */
+      .def("add_peer", &PyEngine::add_peer, nb::arg("metadata"),
+           nb::keep_alive<0, 1>())
       .def("read", &PyEngine::read, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offset") = 0,
            nb::arg("remote_offset") = 0, nb::arg("length") = 0,
-           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
+           nb::keep_alive<0, 1>())
       .def("write", &PyEngine::write, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offset") = 0,
            nb::arg("remote_offset") = 0, nb::arg("length") = 0,
-           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
+           nb::keep_alive<0, 1>())
       .def("readv", &PyEngine::readv, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offsets"),
            nb::arg("remote_offsets"), nb::arg("lengths"),
-           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
+           nb::keep_alive<0, 1>())
       .def("writev", &PyEngine::writev, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offsets"),
            nb::arg("remote_offsets"), nb::arg("lengths"),
-           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{})
+           nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
+           nb::keep_alive<0, 1>())
       .def("import_stream", &PyEngine::import_stream, nb::arg("native_handle"),
+           nb::keep_alive<0, 1>(),
            "Adapt an execution queue the application already owns, given as"
            " the native handle -- torch.cuda.Stream.cuda_stream, for"
            " instance.")
       .def("record_event", &PyEngine::record_event, nb::arg("stream"),
+           nb::keep_alive<0, 1>(),
            "A point in that stream, to pass to a transfer as `after`.")
       .def("stream_wait_event", &PyEngine::stream_wait_event,
            nb::arg("stream"), nb::arg("event"),

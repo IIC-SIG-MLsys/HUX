@@ -335,6 +335,36 @@ def test_the_stream_calls_refuse_without_a_backend():
         check(True, "import_stream raises")
 
 
+def test_objects_outliving_the_engine_do_not_use_freed_memory():
+    """A peer holds a plain pointer to the engine, and importing a region
+    writes into the engine's table. Nothing in Python says so, and objects
+    are not destroyed in program order at interpreter exit, so dropping the
+    engine while a peer is still held used to leave the peer pointing at
+    freed memory -- a crash or silent corruption, with no Python-level
+    symptom to read. The binding now keeps the engine alive behind them."""
+    eng = hux.make_mock_engine(move_data=True)
+    peer = eng.add_peer(eng.local_metadata())
+    src = bytearray(b"x" * 4096)
+    dst = bytearray(4096)
+    src_region = eng.register_memory(src)
+    dst_region = eng.register_memory(dst)
+    desc = src_region.descriptor()
+
+    del eng
+    gc.collect()
+
+    # Every one of these reaches through to the engine that Python no longer
+    # names.
+    remote = peer.import_region(desc)
+    check(remote.length == 4096, "a peer still works after the engine is dropped")
+    check(peer.connected, "the peer is still connected")
+
+    # And a region is deliberately independent: its registration holds the
+    # providers, so it stays usable on its own.
+    check(src_region.length == 4096, "a region outlives the engine by design")
+    check(len(dst_region.descriptor()) > 0, "and can still be described")
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -352,6 +382,7 @@ def main():
         test_a_stream_the_caller_owns_can_be_adapted,
         test_a_transfer_can_be_ordered_after_an_event,
         test_the_stream_calls_refuse_without_a_backend,
+        test_objects_outliving_the_engine_do_not_use_freed_memory,
     ]:
         print(f"{fn.__name__}:")
         fn()
