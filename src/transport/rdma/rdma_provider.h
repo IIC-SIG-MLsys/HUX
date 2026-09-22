@@ -17,6 +17,7 @@
 #define HUX_TRANSPORT_RDMA_PROVIDER_H
 
 #include <infiniband/verbs.h>
+#include "transport/control_outbox.h"
 
 #include <atomic>
 #include <cstdint>
@@ -144,6 +145,8 @@ class RdmaProvider : public TransportProvider {
 
   ProviderCaps caps() const override;
   ProviderStats stats() const override;
+  /* Control messages queued for peers that have not taken them yet. */
+  size_t queued_control_messages() const;
   std::string describe() const override;
 
   Status register_region(void* addr, uint64_t length, DeviceId device,
@@ -248,7 +251,7 @@ class RdmaProvider : public TransportProvider {
   /* A receive completion names its QP, not its connection, so the two are
    * mapped here to re-arm the right one. Entries are removed by the
    * connection's destructor. */
-  std::mutex conn_mu_;
+  mutable std::mutex conn_mu_;
   std::unordered_map<uint32_t, RdmaConnection*> conn_by_qp_;
   std::vector<std::weak_ptr<RdmaConnection>> ctrl_conns_;
   void register_conn(uint32_t qp_num, RdmaConnection* c);
@@ -339,7 +342,9 @@ class RdmaConnection : public ProviderConnection {
    * traffic keeps moving when the data path is congested or broken. */
   std::atomic<bool> peer_closed_{false};
   int ctrl_fd = -1;
-  std::mutex send_mu_;     /* serializes header and payload together */
+  /* Outbound control messages never wait on the socket: they are produced
+   * on the completion path, which drives every transfer on the engine. */
+  ControlOutbox outbox;
   std::vector<uint8_t> rx; /* partial message carried between polls */
 };
 

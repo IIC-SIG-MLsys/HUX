@@ -30,6 +30,7 @@ add_library(hux_core
   src/control/identity.cpp
   src/device/host_backend.cpp
   src/device/topology.cpp
+  src/transport/control_outbox.cpp
   src/transport/local/local_provider.cpp
   src/transport/mock/mock_provider.cpp
 )

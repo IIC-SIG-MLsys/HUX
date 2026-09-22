@@ -1,6 +1,7 @@
 # Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
 add_executable(hux_contract_tests
   test_main.cpp
+  contract/test_control_outbox.cpp
   contract/test_striping.cpp
   contract/test_contract.cpp
   contract/test_dependencies.cpp
@@ -21,6 +22,11 @@ target_include_directories(hux_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(hux_contract_tests PRIVATE hux_core hux_transport_ipc)
 target_compile_options(hux_contract_tests PRIVATE -Wall -Wextra)
 add_test(NAME contract COMMAND hux_contract_tests)
+# A timeout, because the failures worth catching here are waits. The one
+# that prompted this test sat in poll() for 30 s a message; without a bound
+# a regression stops looking like a failure and starts looking like CI
+# being slow.
+set_tests_properties(contract PROPERTIES TIMEOUT 300)
 
 if(TARGET hux_transport_rdma)
   add_executable(hux_rdma_tests
@@ -33,6 +39,7 @@ if(TARGET hux_transport_rdma)
   target_link_libraries(hux_rdma_tests PRIVATE hux_transport_rdma)
   target_compile_options(hux_rdma_tests PRIVATE -Wall -Wextra)
   add_test(NAME rdma_wire COMMAND hux_rdma_tests)
+  set_tests_properties(rdma_wire PROPERTIES TIMEOUT 300)
 
   # Two processes and a real NIC, so it is built but never run by ctest.
   # Built here rather than compiled by hand, so it cannot drift from the

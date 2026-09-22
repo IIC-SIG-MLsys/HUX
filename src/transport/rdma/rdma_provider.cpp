@@ -36,19 +36,22 @@ uint32_t get_u32(uint8_t const* p) {
   return v;
 }
 
-/* Writes all of it, or says it could not.
+/* Writes all of the handshake, or says it could not.
  *
- * Two things this has to get right that the obvious loop does not.
+ * Only the handshake. Waiting for room is the right thing while two
+ * processes are agreeing on endpoints -- the caller is inside connect() and
+ * expects to wait -- and the wrong thing afterwards, when control messages
+ * come from the completion path and a wait there stops every transfer on
+ * the engine. Those go through ControlOutbox, which never waits.
  *
  * MSG_NOSIGNAL, because a peer that has closed its end turns a write into
  * SIGPIPE, and nothing here installs a handler: the process would die of a
  * peer disconnecting. The IPC provider passes it; this one did not.
  *
- * And EAGAIN is not a disconnect. The control channel is non-blocking once
- * the handshake is done, so a full send buffer -- a peer whose progress
- * thread has not run for a while, which is exactly what a loaded machine
- * does -- came back as the peer having gone away. It waits for room
- * instead, up to the deadline. */
+ * And EAGAIN is not a disconnect. The socket carries a send timeout during
+ * the handshake, so a peer that is slow to answer -- a process holding a
+ * transport per adapter, answering one handshake at a time -- came back as
+ * the peer having gone away. It waits for room instead, bounded. */
 bool send_all(int fd, void const* buf, size_t n, int timeout_ms = 30000) {
   auto* p = static_cast<uint8_t const*>(buf);
   auto const deadline =
@@ -544,6 +547,16 @@ ProviderCaps RdmaProvider::caps() const {
   return c;
 }
 
+size_t RdmaProvider::queued_control_messages() const {
+  size_t n = 0;
+  std::lock_guard<std::mutex> g(conn_mu_);
+  for (auto const& w : ctrl_conns_) {
+    auto c = w.lock();
+    if (c != nullptr) n += c->outbox.backlog_messages();
+  }
+  return n;
+}
+
 std::string RdmaProvider::describe() const {
   std::ostringstream o;
   o << "{"
@@ -562,7 +575,12 @@ std::string RdmaProvider::describe() const {
     << "\"sq_depth\":" << cfg_.sq_depth << ','
     << "\"rq_depth\":" << cfg_.rq_depth << ','
     << "\"cq_depth\":" << cfg_.cq_depth << ','
-    << "\"signal_period\":" << cfg_.signal_period << ',' << "\"cc\":\""
+    << "\"signal_period\":" << cfg_.signal_period << ','
+    /* Control messages written but not yet taken by the peer. Non-zero at
+     * the end of a run means the peer was not reading its control channel
+     * and these never arrived: the transfers succeeded and nothing failed,
+     * so this is the only sign. */
+    << "\"ctrl_queued\":" << queued_control_messages() << ',' << "\"cc\":\""
     << (cc_ != nullptr ? cc_->name() : "none") << "\","
     << "\"cc_window_bytes\":"
     << (cc_ != nullptr ? cc_->window_bytes(CcDirection::kWrite) : 0)
@@ -791,6 +809,7 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
   int nodelay = 1;
   ::setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
   conn->ctrl_fd = sock;
+  conn->outbox.reset(sock);
   for (auto& q : conn->queue_pairs()) register_conn(q.qp->qp_num, conn.get());
   {
     std::lock_guard<std::mutex> g(conn_mu_);
@@ -1223,28 +1242,19 @@ Status RdmaProvider::send_control(ProviderConnection* conn, uint16_t type,
   ControlHeader h;
   h.type = static_cast<ControlType>(type);
   h.payload_len = static_cast<uint32_t>(payload.size());
-  uint8_t hdr[kControlHeaderBytes];
-  encode_control_header(h, hdr);
+  std::vector<uint8_t> msg(kControlHeaderBytes + payload.size());
+  encode_control_header(h, msg.data());
+  if (!payload.empty())
+    std::memcpy(msg.data() + kControlHeaderBytes, payload.data(),
+                payload.size());
 
-  /* Header and payload go out under one lock. Interleaving them with another
-   * message would leave the peer's reader permanently out of step, and it
-   * would not find out until the next malformed length. */
-  std::lock_guard<std::mutex> g(c->send_mu_);
-  if (!send_all(c->ctrl_fd, hdr, kControlHeaderBytes)) {
-    /* Nothing of this message reached the peer, so the stream is still in
-     * step and the connection can carry the next one. */
-    return Status::kPeerDisconnected;
-  }
-  if (!payload.empty() &&
-      !send_all(c->ctrl_fd, payload.data(), payload.size())) {
-    /* The header did arrive and the payload did not. The peer's reader is
-     * now waiting for bytes that will never come and would take the next
-     * message's header as this one's body -- the stream cannot be used
-     * again, whatever the socket's state. */
-    c->mark_peer_closed();
-    return Status::kPeerDisconnected;
-  }
-  return Status::kOk;
+  /* One buffer, so header and payload cannot be separated by another
+   * message or by a partial write: either is enough to leave the peer's
+   * reader permanently out of step, taking the next header as this one's
+   * body, and it would not find out until some length came back absurd. */
+  Status const s = c->outbox.post(std::move(msg));
+  if (s == Status::kPeerDisconnected) c->mark_peer_closed();
+  return s;
 }
 
 Status RdmaProvider::poll_control(uint32_t max_items,
@@ -1268,6 +1278,10 @@ Status RdmaProvider::poll_control(uint32_t max_items,
 
   for (auto& c : conns) {
     if (c->ctrl_fd < 0) continue;
+    /* Anything the send path could not push out goes now. This loop is what
+     * drives progress, so it is the only place a backlog can drain -- a
+     * handoff left queued here is one the peer never hears about. */
+    if (c->outbox.flush() == Status::kPeerDisconnected) c->mark_peer_closed();
     /* Reads what is available and keeps any partial message for next time: a
      * header split across two reads must not be parsed as if it were whole. */
     uint8_t buf[4096];

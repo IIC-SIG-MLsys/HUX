@@ -420,7 +420,12 @@ int run_server(Options const& o) {
   }
 
   EngineConfig ecfg;
-  ecfg.progress = ProgressMode::kExplicit;
+  /* The receiving side has no work of its own to drive progress with: it
+   * registers memory and waits. Without a thread nothing ever reads the
+   * control channel, so every handoff the sender produces stays in the
+   * socket -- which is a benchmark that does not exercise the protocol it
+   * is benchmarking, and which stalled the sender once the socket filled. */
+  ecfg.progress = ProgressMode::kThread;
   if (o.chunk > 0) ecfg.chunk_bytes = o.chunk;
   uint64_t const biggest =
       *std::max_element(o.sizes.begin(), o.sizes.end());
@@ -1260,6 +1265,15 @@ int run_client(std::string const& ip, Options const& o) {
               (unsigned long long)st.subops_posted,
               (unsigned long long)st.subops_completed,
               (unsigned long long)st.subops_failed);
+  /* Only when there are any. A refused handoff means the peer was not
+   * reading its control channel fast enough and now does not know which
+   * bytes arrived -- the bytes did land, so nothing fails, and this counter
+   * is the only place it shows. Silence here is the normal case. */
+  if (st.ready_handoffs_failed != 0 || st.notification_acks_failed != 0)
+    std::printf("control messages the peer did not take: handoffs=%llu "
+                "acks=%llu  (it was not reading fast enough)\n",
+                (unsigned long long)st.ready_handoffs_failed,
+                (unsigned long long)st.notification_acks_failed);
 
   send_blob(fd, "x", 1);
   ::close(fd);
