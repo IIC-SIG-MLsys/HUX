@@ -154,7 +154,11 @@ int run_server(Options const& o) {
   buf.fill(seed);
 
   EngineConfig ecfg;
-  ecfg.progress = ProgressMode::kExplicit;
+  /* A thread, because this side has nothing of its own to drive progress
+   * with and the wait below is a blocking read. The control channel carries
+   * the ready handoff for every write that lands here, and a peer whose
+   * messages nobody reads fills it and starts losing them. */
+  ecfg.progress = ProgressMode::kThread;
   std::unique_ptr<Engine> engine;
   if (make_engine(ecfg, buf.dev, prov, &engine) != Status::kOk) return 1;
 
@@ -186,14 +190,17 @@ int run_server(Options const& o) {
   std::printf("[server :%u] connected; holding memory\n", o.port);
   std::fflush(stdout);
 
-  /* The client drives everything; this side only has to stay alive and keep
-   * its memory registered. Progress still has to run: the write-side ready
-   * handoff and notifications arrive on the control channel. */
+  /* The client drives the transfers; this side stays alive, keeps its memory
+   * registered, and waits to be told the run is over.
+   *
+   * The waiting used to be this loop with engine->progress() in its body,
+   * which never ran: recv_blob blocks until the client sends, so the body
+   * was reached once, at the end. The comment said progress had to run and
+   * the line above it stopped it -- for a whole run, until a counter for
+   * refused handoffs made it visible. Progress is on its own thread now and
+   * this only waits. */
   std::vector<uint8_t> bye;
-  while (!recv_blob(fd, &bye)) {
-    engine->progress();
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  }
+  recv_blob(fd, &bye);
   std::printf("[server :%u] client finished\n", o.port);
   engine->close(5000);
   return 0;
