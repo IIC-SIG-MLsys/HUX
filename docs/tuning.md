@@ -202,12 +202,13 @@ instead, which settles it.
 ## The two adapters on this host are not equal, and the reason is not the network
 
 Both are 100 Gb/s Ethernet and both reach the same peer, but not at the same
-rate. Three passes each in alternating order, 2000 transfers of 4 MiB:
+rate. Three passes each in alternating order, 2000 transfers of 4 MiB,
+each adapter selected by giving `--local` its own address:
 
-| adapter | advertise as | write | the three |
-| --- | --- | --- | --- |
-| `mlx5_3` | 192.168.2.235 | 51.38 Gb/s | 51.45, 51.38, 51.08 |
-| `mlx5_0` | 192.168.2.243 | 24.00 Gb/s | 24.02, 23.79, 24.00 |
+| adapter | write | the three |
+| --- | --- | --- |
+| `mlx5_3` | 51.38 Gb/s | 51.45, 51.38, 51.08 |
+| `mlx5_0` | 24.00 Gb/s | 24.02, 23.79, 24.00 |
 
 A factor of 2.14, repeatable to within 1%. It is not the link: `ethtool`
 reports 100000 Mb/s on both. It is the slot.
@@ -291,18 +292,19 @@ the floor row is still needed to see it.
 ## Striping across machines, and what stopped it
 
 Splitting a transfer needs two usable adapters at *each* end. Between the
-host measured above and the peer at 192.168.2.252, there is only one at the
-far end, and finding that out took longer than it should have.
+host measured above and the peer -- a Cambricon MLU370-X8 machine -- there
+is only one at the far end, and finding that out took longer than it should
+have.
 
 All four pairings, 200 transfers of 1 MiB each, the server waited for rather
-than slept for:
+than slept for, this host's adapter first:
 
 | from | to | |
 | --- | --- | --- |
-| `.235` | `.252` | 49.97 Gb/s |
-| `.243` | `.252` | 23.62 Gb/s |
-| `.235` | `.251` | connects, no transfer completes |
-| `.243` | `.251` | connects, no transfer completes |
+| `mlx5_3` | the peer's first adapter | 49.97 Gb/s |
+| `mlx5_0` | the peer's first adapter | 23.62 Gb/s |
+| `mlx5_3` | the peer's second | connects, no transfer completes |
+| `mlx5_0` | the peer's second | connects, no transfer completes |
 
 The peer's second adapter reports `PORT_ACTIVE`, accepts a TCP connection,
 completes the endpoint exchange and brings its queue pair to ready. It simply
@@ -339,8 +341,9 @@ rather than giving up because one did not.
 
 An earlier version of this section blamed the fabric on the strength of a
 test whose client started three seconds after the server, whether or not the
-server was listening. That test reported `.243` to `.252` as failing, which
-is the pairing measured at 24 Gb/s twice on either side of it. Waiting for
+server was listening. That test reported `mlx5_0` to the peer's first
+adapter as failing, which is the pairing measured at 24 Gb/s twice on either
+side of it. Waiting for
 the server to say it was ready changed three of the four answers.
 
 ## Why TIMELY delivered 2.97 Gb/s on a path that carries 91

@@ -20,13 +20,14 @@ most of them are not blocked on writing code.
 blocked either -- an earlier version of this entry said it was, on the
 grounds that only `mlx5_0` was active here. That was read off the first
 three adapters. `mlx5_1` and `mlx5_2` are indeed down; `mlx5_3` is up, and
-so this host has two. The peer at 192.168.2.252 has two as well.
+so this host has two. The peer used for this -- a Cambricon MLU370-X8
+machine -- has two as well.
 
 Checked rather than assumed, since the claim had already been wrong once: a
 transfer runs over each of this host's adapters independently, chosen by the
-address the provider is told to advertise -- `--local 192.168.2.243` comes
-out on `mlx5_0` and `--local 192.168.2.235` on `mlx5_3`, both reaching the
-same peer.
+address the provider is told to advertise. Giving `--local` the address on
+`mlx5_0` sends over `mlx5_0`, giving it the one on `mlx5_3` sends over
+`mlx5_3`, and both reach the same peer.
 
 The ceiling was measured before writing any of it: two flows, one per
 adapter, reach 75.38 Gb/s against 51.56 for the better adapter alone, a

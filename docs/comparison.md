@@ -152,10 +152,11 @@ spare GPU. A comparison over host memory needs no such thing, and is worth
 running on its own terms -- but the pair of hosts is the same either way.
 
 What it does need is two NVIDIA hosts on the RoCE fabric, and there are
-exactly two: the ones at .243 and .250 on 192.168.2.0/24. The other NVIDIA
-machines available have no adapter on that fabric at all -- no `ibv_devinfo`
-output, no address on the subnet, no `nvidia_peermem`. So there is no third
-host to substitute.
+exactly two: the machine these measurements were taken on, five RTX 4090s
+and an A40, and a second with four 4090s and an A40. The other NVIDIA
+machines available -- two with RTX 5090s -- have no adapter on that fabric
+at all: no `ibv_devinfo` output, no address on the subnet, no
+`nvidia_peermem`. So there is no third host to substitute.
 
 The second of the two carries a sustained load average of 101, which is the
 blocker. That is not only a matter of leaving it alone: a benchmark whose
