@@ -1251,10 +1251,18 @@ Status EngineImpl::progress() {
           if (queued && m.conn != nullptr) {
             std::vector<uint8_t> ack;
             encode_u64(id, &ack);
-            /* Back over the transport it arrived on. */
-            prov->send_control(
-                m.conn, static_cast<uint16_t>(ControlType::kNotificationAck),
-                ack);
+            /* Back over the transport it arrived on. Counted when it
+             * fails, because the comment above is the whole point: the
+             * sender's notify() completes on this acknowledgement, and an
+             * acknowledgement that never left is indistinguishable here
+             * from one that did unless somebody looks. */
+            if (prov->send_control(
+                    m.conn,
+                    static_cast<uint16_t>(ControlType::kNotificationAck),
+                    ack) != Status::kOk) {
+              std::lock_guard<std::mutex> g(stats_mu_);
+              ++stats_.notification_acks_failed;
+            }
           }
         } else if (static_cast<ControlType>(m.type) ==
                    ControlType::kRegionInvalidate) {
@@ -1379,11 +1387,19 @@ Status EngineImpl::progress() {
                                       ? req->provider()
                                       : providers_.front().get();
         if (conn != nullptr) {
-          prov->send_control(conn.get(),
-                             static_cast<uint16_t>(ControlType::kReadyHandoff),
-                             payload);
+          /* Counted by what happened, not by having tried. The request is
+           * about to succeed either way -- the bytes did land -- so a
+           * handoff the transport refused leaves the peer waiting for a
+           * signal that is never coming, and this counter is the only place
+           * it shows. */
+          Status const sent = prov->send_control(
+              conn.get(), static_cast<uint16_t>(ControlType::kReadyHandoff),
+              payload);
           std::lock_guard<std::mutex> g(stats_mu_);
-          ++stats_.ready_handoffs_sent;
+          if (sent == Status::kOk)
+            ++stats_.ready_handoffs_sent;
+          else
+            ++stats_.ready_handoffs_failed;
         }
       }
       {

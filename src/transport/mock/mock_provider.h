@@ -36,6 +36,11 @@ struct MockConfig {
   bool shuffle_completions = false;
   /* Makes completions report an error. */
   bool fail_subops = false;
+  /* Makes the control channel refuse everything while data still flows.
+   * That is the shape a ready handoff fails in: the transfer lands and the
+   * peer is never told, so the request succeeds and only a counter says
+   * otherwise. */
+  bool fail_control = false;
   Status subop_error = Status::kTransportError;
   /* Actually move bytes so tests can verify content end to end. */
   bool move_data = true;
@@ -136,6 +141,7 @@ class MockProvider : public TransportProvider {
      * is enough to exercise framing and dispatch. The connection is carried
      * through, because a reply has to go back the way it came -- dropping it
      * here would make replies untestable without hardware. */
+    if (cfg_.fail_control) return Status::kTransportError;
     control_.push_back(ControlMessage{0, type, payload, conn});
     return Status::kOk;
   }

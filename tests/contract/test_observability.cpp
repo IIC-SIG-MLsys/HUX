@@ -205,3 +205,51 @@ HUX_TEST(the_report_covers_both_halves_of_the_configuration) {
   /* A provider-side setting the engine knows nothing about. */
   CHECK(contains(full, "\"move_data\":"));
 }
+
+HUX_TEST(a_refused_handoff_is_counted_rather_than_lost) {
+  /* The write succeeds -- the bytes did land -- so nothing in the request
+   * says the peer was never told the data was ready. A consumer waiting for
+   * the handoff waits for ever, and this counter is the only place it
+   * shows. */
+  EngineConfig cfg;
+  cfg.progress = ProgressMode::kExplicit;
+  MockConfig mc;
+  mc.move_data = true;
+  /* The transport refuses control messages while still carrying data. */
+  mc.fail_control = true;
+  auto provider = std::make_shared<MockProvider>(mc);
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(cfg, nullptr, provider, &engine), Status::kOk);
+
+  constexpr uint64_t kSpan = 4096;
+  std::vector<uint8_t> src(kSpan, 0x5A), dst(kSpan, 0);
+  MemoryRegionPtr src_reg, dst_reg;
+  CHECK_STATUS(engine->register_memory(src.data(), kSpan,
+                                       AccessFlags::kLocalRead, &src_reg),
+               Status::kOk);
+  CHECK_STATUS(engine->register_memory(dst.data(), kSpan,
+                                       AccessFlags::kRemoteWrite, &dst_reg),
+               Status::kOk);
+  std::vector<uint8_t> meta, desc;
+  CHECK_STATUS(engine->local_metadata(&meta), Status::kOk);
+  PeerPtr peer;
+  CHECK_STATUS(engine->add_peer(meta, &peer), Status::kOk);
+  CHECK_STATUS(dst_reg->export_descriptor(&desc), Status::kOk);
+  RemoteRegionPtr remote;
+  CHECK_STATUS(peer->import_region(desc, &remote), Status::kOk);
+
+  RegionView lv, rv;
+  CHECK_STATUS(src_reg->view(0, kSpan, &lv), Status::kOk);
+  CHECK_STATUS(remote->view(0, kSpan, &rv), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(engine->write(peer.get(), lv, rv, {}, &req), Status::kOk);
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 500 && !is_terminal(req->state()); ++i)
+    engine->poll_completions(16, &done);
+
+  /* The request succeeded: this is precisely why the counter is needed. */
+  CHECK_STATUS(req->wait(0), Status::kOk);
+  EngineStats const st = engine->stats();
+  CHECK_EQ(st.ready_handoffs_sent, uint64_t{0});
+  CHECK(st.ready_handoffs_failed > 0);
+}

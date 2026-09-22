@@ -536,6 +536,17 @@ class PyEngine {
     d["registrations_created"] = s.registrations_created;
     d["registrations_reused"] = s.registrations_reused;
     d["peak_inflight_requests"] = s.peak_inflight_requests;
+    /* The control-plane counters, which nothing here exposed. Two of them
+     * are the only place a failure shows at all: a ready handoff or an
+     * acknowledgement the transport refused leaves the peer waiting while
+     * the local request succeeds. */
+    d["notifications_sent"] = s.notifications_sent;
+    d["notifications_received"] = s.notifications_received;
+    d["notifications_dropped"] = s.notifications_dropped;
+    d["notification_acks_failed"] = s.notification_acks_failed;
+    d["ready_handoffs_sent"] = s.ready_handoffs_sent;
+    d["ready_handoffs_failed"] = s.ready_handoffs_failed;
+    d["ready_handoffs_received"] = s.ready_handoffs_received;
     return d;
   }
 

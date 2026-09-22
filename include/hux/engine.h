@@ -61,7 +61,16 @@ struct EngineStats {
   uint64_t notifications_received = 0;
   uint64_t notifications_dropped = 0; /* queue full, so not acknowledged */
   uint64_t ready_handoffs_sent = 0;
+  /* Handoffs the transport refused. The write itself succeeded -- the bytes
+   * are on the peer -- but the peer was never told, so a consumer waiting
+   * for the handoff waits for ever. Counted separately because the local
+   * caller has no other way to find out: its request completed. */
+  uint64_t ready_handoffs_failed = 0;
   uint64_t ready_handoffs_received = 0;
+  /* Acknowledgements this engine could not send back. The peer's notify()
+   * then never completes, and back-pressure depends on it learning the
+   * truth. */
+  uint64_t notification_acks_failed = 0;
 
   /* Peak in-flight requests, which is what sizing max_inflight_requests
    * needs; the current value says nothing about what the run demanded. */
