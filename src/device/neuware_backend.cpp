@@ -277,7 +277,9 @@ Status NeuwareBackend::close_ipc(void* mapped) {
 
   auto rec = imports_by_handle_.find(it->second);
   if (rec == imports_by_handle_.end()) return Status::kNotFound;
-  if (addr - it->first > rec->second.bytes) return Status::kNotFound;
+  /* Half-open: base + bytes is the first address outside the mapping, and
+   * the next mapping can start exactly there. */
+  if (addr - it->first >= rec->second.bytes) return Status::kNotFound;
 
   if (--rec->second.refs > 0) return Status::kOk;
 
