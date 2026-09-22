@@ -5,10 +5,12 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <sstream>
@@ -34,13 +36,43 @@ uint32_t get_u32(uint8_t const* p) {
   return v;
 }
 
-bool send_all(int fd, void const* buf, size_t n) {
+/* Writes all of it, or says it could not.
+ *
+ * Two things this has to get right that the obvious loop does not.
+ *
+ * MSG_NOSIGNAL, because a peer that has closed its end turns a write into
+ * SIGPIPE, and nothing here installs a handler: the process would die of a
+ * peer disconnecting. The IPC provider passes it; this one did not.
+ *
+ * And EAGAIN is not a disconnect. The control channel is non-blocking once
+ * the handshake is done, so a full send buffer -- a peer whose progress
+ * thread has not run for a while, which is exactly what a loaded machine
+ * does -- came back as the peer having gone away. It waits for room
+ * instead, up to the deadline. */
+bool send_all(int fd, void const* buf, size_t n, int timeout_ms = 30000) {
   auto* p = static_cast<uint8_t const*>(buf);
+  auto const deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (n > 0) {
-    ssize_t k = ::send(fd, p, n, 0);
-    if (k <= 0) return false;
-    p += k;
-    n -= static_cast<size_t>(k);
+    ssize_t k = ::send(fd, p, n, MSG_NOSIGNAL);
+    if (k > 0) {
+      p += k;
+      n -= static_cast<size_t>(k);
+      continue;
+    }
+    if (k < 0 && errno == EINTR) continue;
+    if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      auto const left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            deadline - std::chrono::steady_clock::now())
+                            .count();
+      if (left <= 0) return false;
+      pollfd pfd{};
+      pfd.fd = fd;
+      pfd.events = POLLOUT;
+      if (::poll(&pfd, 1, static_cast<int>(left)) <= 0) return false;
+      continue;
+    }
+    return false;
   }
   return true;
 }
@@ -1198,10 +1230,20 @@ Status RdmaProvider::send_control(ProviderConnection* conn, uint16_t type,
    * message would leave the peer's reader permanently out of step, and it
    * would not find out until the next malformed length. */
   std::lock_guard<std::mutex> g(c->send_mu_);
-  if (!send_all(c->ctrl_fd, hdr, kControlHeaderBytes))
+  if (!send_all(c->ctrl_fd, hdr, kControlHeaderBytes)) {
+    /* Nothing of this message reached the peer, so the stream is still in
+     * step and the connection can carry the next one. */
     return Status::kPeerDisconnected;
-  if (!payload.empty() && !send_all(c->ctrl_fd, payload.data(), payload.size()))
+  }
+  if (!payload.empty() &&
+      !send_all(c->ctrl_fd, payload.data(), payload.size())) {
+    /* The header did arrive and the payload did not. The peer's reader is
+     * now waiting for bytes that will never come and would take the next
+     * message's header as this one's body -- the stream cannot be used
+     * again, whatever the socket's state. */
+    c->mark_peer_closed();
     return Status::kPeerDisconnected;
+  }
   return Status::kOk;
 }
 
