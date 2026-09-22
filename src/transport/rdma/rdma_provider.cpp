@@ -1289,15 +1289,23 @@ Status RdmaProvider::poll_control(uint32_t max_items,
     while (true) {
       ssize_t n = ::recv(c->ctrl_fd, buf, sizeof(buf), 0);
       if (n == 0) {
-        /* End of file: the peer closed. Distinct from -1, which only means
-         * nothing has arrived yet, and treating the two alike is why a peer
-         * that exited was never noticed here. Whatever already arrived is
+        /* End of file: the peer closed cleanly. Whatever already arrived is
          * still parsed below -- its last message may be the one that
          * explains the departure. */
         c->mark_peer_closed();
         break;
       }
-      if (n < 0) break; /* EAGAIN: nothing more right now */
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+          break; /* nothing more right now */
+        /* Anything else ended the connection. A peer killed rather than
+         * closed resets it, which arrives as ECONNRESET and not as end of
+         * file -- so treating every -1 as "nothing yet" left exactly the
+         * departure this loop is here to notice unnoticed. */
+        c->mark_peer_closed();
+        break;
+      }
       c->rx.insert(c->rx.end(), buf, buf + n);
       if (n < static_cast<ssize_t>(sizeof(buf))) break;
     }

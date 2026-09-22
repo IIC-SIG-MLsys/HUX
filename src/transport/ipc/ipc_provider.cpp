@@ -530,8 +530,16 @@ Status IpcProvider::pump(int fd) {
     }
     /* Whatever already arrived is still parsed below: the peer's last frame
      * before it went away may be the withdrawal that explains why. */
-    if (k == 0) closed = true;
-    break; /* EAGAIN, or the peer closed */
+    if (k == 0) {
+      closed = true;
+      break;
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+    /* Anything else ended the connection. A peer killed rather than closed
+     * resets it, which arrives as ECONNRESET and not as end of file. */
+    closed = true;
+    break;
   }
 
   std::lock_guard<std::mutex> g(mu_);
