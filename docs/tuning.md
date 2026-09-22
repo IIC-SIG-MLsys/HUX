@@ -396,3 +396,95 @@ paper specifies, with the same probe:
 
 The sizes that already worked are unchanged, which is the check that matters:
 a fix that bought the large case by spending the small one would not be one.
+
+## What a ready handoff costs, and why the earlier number was flattering
+
+A write that lands sends the peer a notice saying which bytes arrived. It
+travels on the control channel, which is a TCP socket with Nagle off, so a
+notice per write is a packet per write.
+
+This looked at first like a clear cost. The head-of-line page's "alone"
+figure for a 16 KiB write moved from about 19 us to about 32 between two
+runs of the same benchmark on the same pair of machines, and the only thing
+that changed was the build. Four alternating rounds of old against new put
+the old tree at 18.9, 19.0, 20.0, 20.1 us and the new one at 31.9, 33.0,
+21.1, 23.1 -- with the 4 MiB figure unmoved at 2941 to 2946, so whatever it
+was, it was a cost per request and not per byte.
+
+It was not a regression. Varying both ends separately, three rounds each:
+
+| server | client | read | write |
+|---|---|---|---|
+| old | old | 19.0 | 16.8 |
+| old | new | 19.0 | 17.0 |
+| new | old | 19.0 | 46.0 |
+| new | new | 19.0 | 23.4 |
+
+The read is 19.0 in all twelve runs; it carries no handoff. Changing the
+client barely moves the write. The server is the whole difference -- and
+what changed on the server is that it now runs a progress thread, so it
+reads its control channel. The old one never did: the socket filled and the
+handoffs stopped being delivered. **The 19 us baseline was fast because the
+notices were being dropped.**
+
+How much delivering them actually costs is not a number this fabric will
+give. The write measurement is not repeatable to anything like the
+precision needed: the same configuration that measured 23.4 us above
+measured 34.5 us an hour later, and a set of twelve runs with a draining
+receiver spread from 19.4 to 53.1 while the read alongside them stayed at
+19.0 in every one. So: delivering the handoff raises the write's latency
+and, more clearly, its variance. Any figure for how much is fiction.
+
+Batching was tried on the strength of the packet-per-write argument --
+queue a completion batch's notices and send them in one `sendmsg` instead
+of one each. It could not be shown to help: old 38.4, one-at-a-time 34.5,
+batched 34.2, against a within-configuration spread of 27 to 53. It also
+made a control message wait for the next progress call, which is a trap for
+any caller that sends one and then stops polling -- five IPC tests failed on
+exactly that, because a peer that publishes a region and waits to be read
+from has no progress loop to flush it. Reverted. Worth revisiting only with
+a way to measure the control channel that the data path's variance does not
+swamp.
+
+## Incast: what a controller does when more is offered than the link carries
+
+Every congestion-control measurement before this one ran on a link that was
+full but not oversubscribed, which is the condition a controller is least
+able to improve. Three machines writing to one changes that: they offer 162
+Gb/s into a receiver that absorbs about 93.
+
+Read the shares against what each sender can do alone, or they say nothing.
+The three are not the same hardware -- 88.05, 50.93 and 23.37 Gb/s measured
+one at a time against the same receiver, three passes each, spread under 0.5%
+-- so a gap between them under load is mostly a gap in what they are.
+
+Twelve runs, four controllers, overlap 0.99 or better in every one (the gate
+that the windows really coincided; a first attempt without it reported 158
+Gb/s over a 100 Gb/s adapter by adding up runs that did not overlap):
+
+| cc | total Gb/s | fastest/slowest | median us |
+|---|---|---|---|
+| off | 93.54 | 2.26x | 1022.8 |
+| fixed 1 MiB | 93.63 | 2.27x | 1046.7 |
+| timely (paper) | 93.11 | 1.99x | 1073.2 |
+| timely, 1000x increase | 93.33 | 1.84x | 1086.7 |
+
+The ratio between fastest and slowest is the wrong way to read this. Most of
+it is capability: the fastest sender is getting 47.9% of what it can do
+alone and the slowest is getting 80.0%, which is the opposite of one taking
+the link from the other.
+
+Against max-min fairness -- the share each would get if the capacity were
+divided as evenly as their ceilings allow, which here is 23.37, 35.07 and
+35.07 -- there is a real effect, and it is modest:
+
+| sender | alone | no control | of fair share | timely:1000 | of fair share |
+|---|---|---|---|---|---|
+| hygon1 | 88.05 | 42.2 | 120% | 40.2 | 115% |
+| 232 | 50.93 | 32.4 | 92% | 31.2 | 89% |
+| 233 | 23.37 | 18.7 | 80% | 21.9 | 94% |
+
+So the controller takes the slowest sender from 80% of its fair share to
+94%, and the fastest from 120% down to 115%, for 0.2% of the aggregate and
+6% of the median latency. That is what a window is worth under overload
+here: real, small, and nothing like what the raw spread suggests.

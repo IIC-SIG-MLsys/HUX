@@ -1,15 +1,16 @@
 # What is left, and what each piece needs
 
 The roadmap numbers 23 required tasks, plus six conditional ENV items that
-are not counted here. Four of the 23 are outstanding and listed below --
-CC-02, REL-01, TST-02 and SCH-02 -- so nineteen are done.
+are not counted here. Two of the 23 are outstanding and listed below --
+REL-01 and SCH-02 -- so twenty-one are done.
 
 An earlier version of this page said nineteen of twenty-six, which was wrong
 in both halves by the same three -- the denominator was never counted from
-the roadmap and the numerator was carried along with it. Counted from the
-list: API-01, BACK-01, CC-01, COR-01, CTL-01, DEV-01, FAIL-01, MEM-01,
-MEM-02, MIG-01, NET-01, NET-02, NET-03, NTF-01, PY-01, SCH-01,
-TOP-01, TST-01, BENCH-01.
+the roadmap and the numerator was carried along with it. So both sides are
+named, and the arithmetic can be checked. Done: API-01, BACK-01, CC-01,
+CC-02, COR-01, CTL-01, DEV-01, FAIL-01, MEM-01, MEM-02, MIG-01, NET-01,
+NET-02, NET-03, NTF-01, PY-01, SCH-01, TOP-01, TST-01, TST-02, BENCH-01 --
+twenty-one. Outstanding: REL-01, SCH-02 -- two. Twenty-three.
 
 What is left is below, with what each one is actually blocked on, because
 most of them are not blocked on writing code.
@@ -59,18 +60,25 @@ on the same pair and hangs instead of degrading. Fixing it means changing
 network configuration on shared machines, which is not this library's to
 change.
 
-**Incast, part of TST-02.** Not blocked on machines: four hosts sit on this
+**Incast, part of TST-02. Done.** Not blocked on machines: four hosts sit on this
 RoCE fabric, not the two the earlier version of this entry assumed. Three
 senders at one receiver is the only way to overload it -- depth cannot, it
 only queues -- so this is also the first condition under which the
 congestion controllers are asked what they exist for.
 
-Measured once as a baseline, with the senders lined up on a wall clock and
-run for a fixed duration rather than a fixed count: 93.77 Gb/s arriving,
-shared 2.24x unevenly, the three overlapping 99% of the time. Getting that
-right took four attempts -- the first reported 166 Gb/s over a 100 Gb/s
-adapter by adding rates measured at different moments. The comparison across
-congestion-control settings is what remains.
+**Done.** With the senders lined up on a wall clock and run for a fixed
+duration rather than a fixed count: 93.5 Gb/s arriving, the three
+overlapping 99% of the time, across twelve runs and four controllers. Getting
+that right took four attempts -- the first reported 166 Gb/s over a 100 Gb/s
+adapter by adding rates measured at different moments.
+
+A fifth attempt was thrown away for a different reason: it reported one
+sender at 3.4 Gb/s with an eighteen-fold spread, which was a stall in this
+library and not the fabric. A ready handoff was being sent from the
+completion path with a send that waited for room, and the benchmark's
+receiver never read its control channel, so one send sat in poll() for its
+whole 30 s timeout with the engine stopped behind it. Fixed, and the run
+repeated. The numbers and what they mean are in [tuning.md](tuning.md).
 
 **REL-01, the 24-hour verification.** The harness exists --
 `tests/manual/soak.cpp`, built as `hux_soak` -- and crosses every dimension
@@ -125,7 +133,7 @@ re-imported anyway -- the check above is precisely what stops the old
 descriptors being reused -- so the application is already doing the work a
 preserved id was meant to save.
 
-**CC-02, an adaptive controller that meets a target.** Measured where it can
+**CC-02, an adaptive controller that meets a target. Done.** Measured where it can
 matter -- short writes behind long ones, which is the harm a controller
 exists to prevent, and not the uniform stream where every request is the
 same size and nobody is stuck behind anybody.
@@ -136,12 +144,23 @@ controller, with its increase scaled to this fabric, reaches the same median
 and has a tail 158 times worse. Left at the paper's increase it is worse on
 everything. See [tuning.md](tuning.md).
 
-So the answer so far is that the adaptive one does not earn its complexity
-against the simplest thing with a window. What that has not been asked under
-is overload -- more offered than the link can carry -- and incast is the
-only way to produce it here. That run is what remains.
+So the adaptive one does not earn its complexity against the simplest thing
+with a window.
 
-**TST-02, the integration matrix.** Most dimensions are covered
+**And now under overload too, so CC-02 is done.** Three machines offering
+162 Gb/s into a receiver that absorbs 93, twelve runs, every one of them
+with the senders' windows overlapping by 0.99 or better. The aggregate does
+not move: 93.11 to 93.63 Gb/s across all four controllers. What moves is the
+share, and reading it needs what each sender can do alone -- 88.05, 50.93
+and 23.37 Gb/s -- because they are not the same hardware and most of the
+gap between them under load is the gap between those. Against max-min
+fairness the adaptive controller takes the slowest sender from 80% of its
+fair share to 94% and the fastest from 120% to 115%, for 0.2% of the
+aggregate and 6% of the median latency. Real, small, and nothing like what
+the raw ratio between fastest and slowest suggests. See
+[tuning.md](tuning.md).
+
+**TST-02, the integration matrix. Done.** Most dimensions are covered
 individually: several queue pairs, both directions, host and device memory,
 registration reuse, notification back-pressure, failure paths, six threads
 issuing mixed sizes at once, and several peers served concurrently with the
@@ -149,8 +168,10 @@ bytes checked per peer. Crossing them rather than taking them one at a time
 is what `hux_soak` does, so that half is no longer missing -- only the run
 length is, and that is REL-01's problem above.
 
-What remains is the part that needs hardware this pair does not have:
-incast, and one request striped across several NICs.
+**Done.** The two parts that needed more than this pair are both measured
+now: one request striped across several NICs under NET-03, and incast under
+CC-02. Nothing of TST-02's own is left -- how long the crossed dimensions
+are held under load is REL-01's question, not this one's.
 
 **BENCH-01. Done.** `hux-bench` measures latency and bandwidth at fixed sizes
 across two machines, with a chosen number of requests in flight, a stream of
@@ -200,9 +221,12 @@ there.
 this in the negative for this fabric: one setting moves anything, its useful
 range is a single step, and that step is now the default. A profiler would be
 a mechanism for rediscovering a constant. Aging and load-aware queue-pair
-selection remain unimplemented, and would only start to matter under the
-contention that has not been measured yet — so they should be decided after
-incast, not before.
+selection remain unimplemented. They would only start to matter under
+contention, and now that incast has been measured there is an answer: the
+aggregate does not move between any of the four controllers, and what does
+move -- how the capacity is shared -- a fixed window already handles as well
+as the adaptive one. A queue-pair policy is a smaller lever than the window,
+applied to the same thing. Nothing in the incast numbers asks for it.
 
 ## Where the numbers came from
 
