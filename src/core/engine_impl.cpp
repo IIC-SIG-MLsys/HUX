@@ -346,9 +346,18 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
   }
   for (auto& p : peers) {
     if (!p->connected()) continue;
-    p->provider()->send_control(
+    /* Counted by what happened. The local handle goes either way, so a
+     * notice the transport would not take leaves the peer holding a
+     * descriptor for memory that is no longer there, and this counter is
+     * the only place that shows. */
+    Status const sent = p->provider()->send_control(
         p->conn(), static_cast<uint16_t>(ControlType::kRegionInvalidate),
         payload);
+    std::lock_guard<std::mutex> g(stats_mu_);
+    if (sent == Status::kOk)
+      ++stats_.region_invalidates_sent;
+    else
+      ++stats_.region_invalidates_failed;
   }
 
   /* The underlying registration is released when the last reference to it

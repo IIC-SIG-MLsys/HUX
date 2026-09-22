@@ -67,6 +67,14 @@ struct EngineStats {
    * caller has no other way to find out: its request completed. */
   uint64_t ready_handoffs_failed = 0;
   uint64_t ready_handoffs_received = 0;
+  /* Notices that a region is going away. A peer that does not get one goes
+   * on holding a descriptor for memory that has been taken back, and finds
+   * out when the hardware refuses a transfer -- far from here, and with
+   * nothing to say why. Counted because deregistering still succeeds
+   * locally, so there is no other sign. */
+  uint64_t region_invalidates_sent = 0;
+  uint64_t region_invalidates_failed = 0;
+
   /* Acknowledgements this engine could not send back. The peer's notify()
    * then never completes, and back-pressure depends on it learning the
    * truth. */

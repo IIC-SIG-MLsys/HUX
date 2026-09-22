@@ -206,6 +206,60 @@ HUX_TEST(the_report_covers_both_halves_of_the_configuration) {
   CHECK(contains(full, "\"move_data\":"));
 }
 
+HUX_TEST(a_notice_the_peer_never_got_is_counted) {
+  /* Deregistering tells every connected peer the region is going away, so
+   * that a descriptor for memory that has been taken back is refused at the
+   * peer rather than failing later in the hardware. The local handle goes
+   * whether or not the notice left, so nothing in the return value says the
+   * peer was never told -- the send used to be issued and its answer thrown
+   * away. */
+  EngineConfig cfg;
+  cfg.progress = ProgressMode::kExplicit;
+  MockConfig mc;
+  mc.fail_control = true;
+  auto provider = std::make_shared<MockProvider>(mc);
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(cfg, nullptr, provider, &engine), Status::kOk);
+
+  std::vector<uint8_t> buf(4096, 0);
+  MemoryRegionPtr reg;
+  CHECK_STATUS(engine->register_memory(buf.data(), buf.size(),
+                                       AccessFlags::kRemoteRead, &reg),
+               Status::kOk);
+  std::vector<uint8_t> meta;
+  CHECK_STATUS(engine->local_metadata(&meta), Status::kOk);
+  PeerPtr peer;
+  CHECK_STATUS(engine->add_peer(meta, &peer), Status::kOk);
+
+  CHECK_STATUS(engine->deregister_memory(reg), Status::kOk);
+  EngineStats const st = engine->stats();
+  CHECK_EQ(st.region_invalidates_failed, uint64_t(1));
+  CHECK_EQ(st.region_invalidates_sent, uint64_t(0));
+}
+
+HUX_TEST(a_notice_the_peer_did_get_is_counted_too) {
+  EngineConfig cfg;
+  cfg.progress = ProgressMode::kExplicit;
+  auto provider = std::make_shared<MockProvider>(MockConfig{});
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(cfg, nullptr, provider, &engine), Status::kOk);
+
+  std::vector<uint8_t> buf(4096, 0);
+  MemoryRegionPtr reg;
+  CHECK_STATUS(engine->register_memory(buf.data(), buf.size(),
+                                       AccessFlags::kRemoteRead, &reg),
+               Status::kOk);
+  std::vector<uint8_t> meta;
+  CHECK_STATUS(engine->local_metadata(&meta), Status::kOk);
+  PeerPtr peer;
+  CHECK_STATUS(engine->add_peer(meta, &peer), Status::kOk);
+
+  CHECK_STATUS(engine->deregister_memory(reg), Status::kOk);
+  EngineStats const st = engine->stats();
+  CHECK_EQ(st.region_invalidates_sent, uint64_t(1));
+  CHECK_EQ(st.region_invalidates_failed, uint64_t(0));
+}
+
 HUX_TEST(a_refused_handoff_is_counted_rather_than_lost) {
   /* The write succeeds -- the bytes did land -- so nothing in the request
    * says the peer was never told the data was ready. A consumer waiting for

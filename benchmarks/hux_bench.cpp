@@ -1269,11 +1269,14 @@ int run_client(std::string const& ip, Options const& o) {
    * reading its control channel fast enough and now does not know which
    * bytes arrived -- the bytes did land, so nothing fails, and this counter
    * is the only place it shows. Silence here is the normal case. */
-  if (st.ready_handoffs_failed != 0 || st.notification_acks_failed != 0)
+  if (st.ready_handoffs_failed != 0 || st.notification_acks_failed != 0 ||
+      st.region_invalidates_failed != 0)
     std::printf("control messages the peer did not take: handoffs=%llu "
-                "acks=%llu  (it was not reading fast enough)\n",
+                "acks=%llu invalidates=%llu  (it was not reading fast"
+                " enough)\n",
                 (unsigned long long)st.ready_handoffs_failed,
-                (unsigned long long)st.notification_acks_failed);
+                (unsigned long long)st.notification_acks_failed,
+                (unsigned long long)st.region_invalidates_failed);
 
   send_blob(fd, "x", 1);
   ::close(fd);
