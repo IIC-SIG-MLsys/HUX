@@ -206,7 +206,9 @@ incast, not before.
 
 ## Where the numbers came from
 
-Seventeen done, seven partial, two untouched. Weighted by effort rather than
-counted, roughly three quarters. The remaining quarter is not evenly
-distributed: two of the largest items are untouched, and three of the
-partial ones are waiting on machines rather than on work.
+From the roadmap's list of 23, counted item by item at the top of this page:
+nineteen named as done, four named as outstanding. Nothing is weighted or
+estimated here, because the last two versions of this paragraph were --
+"seventeen done, seven partial, two untouched" summed to the twenty-six that
+the top of the page had already corrected, and a leftover count is how the
+wrong one comes back.

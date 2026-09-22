@@ -61,7 +61,13 @@ int run_server(char const* bind_ip) {
   if (s != Status::kOk) return fail("RdmaProvider::create", s);
 
   EngineConfig cfg;
-  cfg.progress = ProgressMode::kExplicit;
+  /* The receiving side has no work of its own to drive progress with: it
+   * registers memory and waits. Something has to read the control channel
+   * while the peer is transferring -- that is where the notice saying which
+   * bytes arrived comes in, and a peer whose messages nobody reads fills the
+   * channel and starts losing them. So this side runs a progress thread,
+   * while the client below drives progress itself from its own loop. */
+  cfg.progress = ProgressMode::kThread;
   std::unique_ptr<Engine> engine;
   s = make_engine(cfg, nullptr, provider, &engine);
   if (s != Status::kOk) return fail("make_engine", s);
@@ -112,13 +118,19 @@ int run_server(char const* bind_ip) {
   std::vector<uint8_t> ack;
   recv_blob(fd, &ack);
 
-  std::vector<ReadyEventPtr> ready;
-  engine->poll_ready_events(8, &ready);
-  for (auto const& r : ready) {
-    std::printf("peer wrote region %llu, bytes [%llu,%llu)\n",
-                (unsigned long long)r->region(),
-                (unsigned long long)r->span().offset,
-                (unsigned long long)(r->span().offset + r->span().length));
+  /* Collected in a loop: one call returns at most what it was asked for,
+   * and stopping there would report some of the transfers and quietly drop
+   * the rest. */
+  while (true) {
+    std::vector<ReadyEventPtr> ready;
+    engine->poll_ready_events(8, &ready);
+    if (ready.empty()) break;
+    for (auto const& r : ready) {
+      std::printf("peer wrote region %llu, bytes [%llu,%llu)\n",
+                  (unsigned long long)r->region(),
+                  (unsigned long long)r->span().offset,
+                  (unsigned long long)(r->span().offset + r->span().length));
+    }
   }
 
   ::close(fd);
