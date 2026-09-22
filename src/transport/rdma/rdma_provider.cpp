@@ -575,7 +575,8 @@ std::string RdmaProvider::describe() const {
     << "\"sq_depth\":" << cfg_.sq_depth << ','
     << "\"rq_depth\":" << cfg_.rq_depth << ','
     << "\"cq_depth\":" << cfg_.cq_depth << ','
-    << "\"signal_period\":" << cfg_.signal_period << ','
+    << "\"signal_period\":" << cfg_.signal_period
+    << ','
     /* Control messages written but not yet taken by the peer. Non-zero at
      * the end of a run means the peer was not reading its control channel
      * and these never arrived: the transfers succeeded and nothing failed,

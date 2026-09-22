@@ -23,8 +23,8 @@
 #include <vector>
 
 #include "control/identity.h"
-#include "transport/control_outbox.h"
 #include "hux/device.h"
+#include "transport/control_outbox.h"
 #include "transport/provider.h"
 
 namespace hux {

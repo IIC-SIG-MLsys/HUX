@@ -17,7 +17,6 @@
 #define HUX_TRANSPORT_RDMA_PROVIDER_H
 
 #include <infiniband/verbs.h>
-#include "transport/control_outbox.h"
 
 #include <atomic>
 #include <cstdint>
@@ -30,6 +29,7 @@
 
 #include "device/topology.h"
 #include "transport/cc/controller.h"
+#include "transport/control_outbox.h"
 #include "transport/provider.h"
 
 namespace hux {

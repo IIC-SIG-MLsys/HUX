@@ -27,8 +27,8 @@ Status ControlOutbox::flush_locked() {
      * and nothing here installs a handler. MSG_DONTWAIT because the socket
      * is not required to be non-blocking -- during the handshake it is
      * not, and this must not wait there either. */
-    ssize_t const k = ::send(fd_, m.data() + front_off_, left,
-                             MSG_NOSIGNAL | MSG_DONTWAIT);
+    ssize_t const k =
+        ::send(fd_, m.data() + front_off_, left, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (k > 0) {
       front_off_ += static_cast<size_t>(k);
       bytes_ -= static_cast<size_t>(k);
