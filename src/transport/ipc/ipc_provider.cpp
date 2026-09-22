@@ -210,7 +210,12 @@ std::string IpcProvider::describe() const {
     << "\"peer_process\":" << peer_identity_.process << ','
     << "\"exported_regions\":" << exported_.size() << ','
     << "\"imported_regions\":" << imported_.size() << ','
-    << "\"mappings_held\":" << mapped << ',';
+    << "\"mappings_held\":" << mapped
+    << ','
+    /* Mappings the device would not release on teardown. Each one keeps its
+     * allocation pinned with nobody left to free it, and nothing fails when
+     * it happens, so this is the only sign. */
+    << "\"mappings_not_released\":" << mappings_not_released_ << ',';
   /* Addresses, because a mapping that resolved to the wrong allocation looks
    * exactly like a transfer that moved nothing. */
   o << "\"exported\":[";
@@ -349,7 +354,8 @@ Status IpcProvider::disconnect(ProviderConnectionPtr) {
    * nobody left to release it. */
   for (auto& kv : imported_) {
     if (kv.second.mapped != nullptr) {
-      dev_->close_ipc(kv.second.mapped);
+      if (dev_->close_ipc(kv.second.mapped) != Status::kOk)
+        ++mappings_not_released_;
       kv.second.mapped = nullptr;
     }
   }
@@ -496,7 +502,8 @@ void IpcProvider::peer_is_gone_locked() {
   peer_gone_ = true;
   for (auto& kv : imported_) {
     if (kv.second.mapped != nullptr) {
-      dev_->close_ipc(kv.second.mapped);
+      if (dev_->close_ipc(kv.second.mapped) != Status::kOk)
+        ++mappings_not_released_;
       kv.second.mapped = nullptr;
     }
   }

@@ -120,6 +120,8 @@ class IpcProvider : public TransportProvider {
    * moment stopped the whole provider for as long as the socket's timeout,
    * and was then declared gone. */
   ControlOutbox outbox_;
+  /* Counted, not returned: teardown has nobody to report to. */
+  uint64_t mappings_not_released_ = 0;
   void publish_all(int fd);
   /* Maps a published region, or returns the mapping already held. */
   Status ensure_mapped(uint64_t key, Imported** out);
