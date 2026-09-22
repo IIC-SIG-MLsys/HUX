@@ -66,33 +66,42 @@ The first measurement of depth 1 came out at 58.1 Gb/s against 89.8 and 90.0
 for the other two: a cold start, caught only because the passes alternate.
 Run in order it would have made depth look like the cause.
 
-## Congestion control under contention
+## Congestion control where it can matter: a short write behind a long one
 
-Four concurrent flows, 4 MiB writes, 1500 per flow, two passes alternating
-the order. Off, a fixed 1 MiB window, and TIMELY.
+A uniform stream gives a controller nothing to do -- every request is the
+same size, so nobody is stuck behind anybody, and fairness is already 1.00x
+because RC transport provides it. Interleaving 16 KiB and 4 MiB writes at
+depth 8 puts about four large transfers ahead of each small one, which is
+the harm a controller exists to prevent.
 
-| | median | slowest/fastest flow |
-| --- | --- | --- |
-| off | 1763 us | 1.00x |
-| fixed 1 MiB | 2427 us | 1.01x |
-| TIMELY | 1773 us | 1.01x |
+Four passes rotating the order so each configuration runs in each position,
+2000 transfers a point, each size also measured alone for reference:
 
-**Fairness is the column that repeats**: six measurements, every one between
-1.00 and 1.03. Four flows divide the link evenly **with congestion control
-off**, because RC transport already does that in the adapter. There is no
-unfairness here for a controller to improve.
+| | small p50 | small p99 | large p50 | rate | behind |
+| --- | --- | --- | --- | --- | --- |
+| off | 1295.6 us | 1481.3 | 1483.0 | **91.23 Gb/s** | 68.4x |
+| fixed 1 MiB window | **8.0 us** | **8.4** | 2925.5 | 83.84 | 0.4x |
+| TIMELY, the paper's increase | 241.9 | 3038.2 | 5191.6 | 43.06 | 15.8x |
+| TIMELY, increase scaled to this fabric | 8.2 | 1325.7 | 2877.1 | 80.69 | 0.4x |
 
-Latency separates nothing. The same configuration varied by up to 1.43x
-between passes -- off measured 2077 and 1450 us -- which is as large as the
-gap between configurations.
+"behind" is how much longer a small write takes with large ones ahead of it
+than it takes alone at the same depth.
 
-**The link was saturated while this ran**, which an earlier version of this
-page got wrong. It claimed four flows reached only 36.8 Gb/s of a 100GE
-fabric and therefore created no congestion. That figure divided the bytes by
-a wall clock that included process startup; the per-flow latency tells the
-real story, at 1763 us against 373 us for a single flow -- four flows each
-getting about a quarter of a link that is full. The experiment did have
-contention. What it does not have is a difference between the controllers.
+**A window is worth 8% of the throughput and takes 162x off the small
+write's latency.** That is the trade, and it is a large one: without it a
+16 KiB write waits 1.3 ms behind traffic it has nothing to do with.
+
+**The adaptive controller does not beat the fixed window.** Scaled to this
+fabric it reaches the same median -- 8.2 us against 8.0 -- and its tail is
+158 times worse, 1325.7 against 8.4. Left at the paper's increase it is
+worse on everything. CC-02 asks for an adaptive controller that meets a
+target; measured against the simplest thing that has a window at all, it
+does not earn its complexity here.
+
+These numbers replace an earlier run in which TIMELY managed 2.97 Gb/s and a
+head-of-line factor of 818. That was a defect rather than a result: its rate
+was raised once per completion, so large operations produced few completions
+and it never climbed. See below.
 
 ## What this means for automatic tuning
 

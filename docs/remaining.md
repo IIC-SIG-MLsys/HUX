@@ -125,17 +125,21 @@ re-imported anyway -- the check above is precisely what stops the old
 descriptors being reused -- so the application is already doing the work a
 preserved id was meant to save.
 
-**CC-02, an adaptive controller that meets a target.** Compared against off
-and a fixed window under four concurrent flows on a saturated link, and they
-cannot be told apart: see [tuning.md](tuning.md). Fairness is 1.00x with
-control off, since RC transport provides it, so there is nothing there to
-improve; latency varies more between passes of one configuration than
-between configurations.
+**CC-02, an adaptive controller that meets a target.** Measured where it can
+matter -- short writes behind long ones, which is the harm a controller
+exists to prevent, and not the uniform stream where every request is the
+same size and nobody is stuck behind anybody.
 
-What is not covered is overload rather than saturation -- more offered load
-than the link can carry, which is where a controller earns its place. The
-benchmark can now hold many requests in flight, so this is reachable on this
-pair; incast from more machines is not.
+A fixed window is worth 8% of the throughput and takes 162x off the small
+write's latency: 8.0 us against 1295.6 with no control at all. The adaptive
+controller, with its increase scaled to this fabric, reaches the same median
+and has a tail 158 times worse. Left at the paper's increase it is worse on
+everything. See [tuning.md](tuning.md).
+
+So the answer so far is that the adaptive one does not earn its complexity
+against the simplest thing with a window. What that has not been asked under
+is overload -- more offered than the link can carry -- and incast is the
+only way to produce it here. That run is what remains.
 
 **TST-02, the integration matrix.** Most dimensions are covered
 individually: several queue pairs, both directions, host and device memory,
