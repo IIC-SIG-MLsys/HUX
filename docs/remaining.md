@@ -1,24 +1,24 @@
 # What is left, and what each piece needs
 
 The roadmap numbers 23 required tasks, plus six conditional ENV items that
-are not counted here. Five of the 23 are outstanding and listed below, so
-eighteen are done.
+are not counted here. Four of the 23 are outstanding and listed below --
+CC-02, REL-01, TST-02 and SCH-02 -- so nineteen are done.
 
 An earlier version of this page said nineteen of twenty-six, which was wrong
 in both halves by the same three -- the denominator was never counted from
 the roadmap and the numerator was carried along with it. Counted from the
 list: API-01, BACK-01, CC-01, COR-01, CTL-01, DEV-01, FAIL-01, MEM-01,
-MEM-02, MIG-01, NET-01, NET-02, NTF-01, PY-01, SCH-01, TOP-01,
-TST-01, BENCH-01.
+MEM-02, MIG-01, NET-01, NET-02, NET-03, NTF-01, PY-01, SCH-01,
+TOP-01, TST-01, BENCH-01.
 
 What is left is below, with what each one is actually blocked on, because
 most of them are not blocked on writing code.
 
 ## Blocked on hardware or machine time
 
-**NET-03, several NICs carrying one transfer.** Not started, and not
-blocked either -- an earlier version of this entry said it was, on the
-grounds that only `mlx5_0` was active here. That was read off the first
+**NET-03, several NICs carrying one transfer. Done.** An earlier version of
+this entry called it blocked, on the grounds that only `mlx5_0` was active
+here. That was read off the first
 three adapters. `mlx5_1` and `mlx5_2` are indeed down; `mlx5_3` is up, and
 so this host has two. The peer used for this -- a Cambricon MLU370-X8
 machine -- has two as well.
@@ -49,15 +49,28 @@ complete until every lane's share is. `connect` now ends by sending a few
 bytes and waiting for its own completion, so returning ok means the queue
 pair has carried something rather than that the endpoints were exchanged.
 See [tuning.md](tuning.md).
-Registration, keys and queue pairs are all per device today; striping one
-request means a protection domain per adapter, a key per adapter in the
-descriptor, and a decision about which adapter each sub-operation goes to.
-The per-provider key list in a descriptor is the shape that would extend to
-it.
 
-**Incast, part of TST-02.** Needs three or more machines pushing at one
-target at the same time, and by local convention that kind of run happens
-between 00:00 and 06:00 so it does not disturb anyone.
+What is not demonstrated is striping between two machines, and that is the
+fabric rather than the feature: both hosts here put two adapters on one
+subnet without `arp_ignore` or `arp_announce`, so each machine's second
+adapter is unreachable -- replies leave by the first interface with the
+wrong source and the queue pair never matches them. UCCL meets the same wall
+on the same pair and hangs instead of degrading. Fixing it means changing
+network configuration on shared machines, which is not this library's to
+change.
+
+**Incast, part of TST-02.** Not blocked on machines: four hosts sit on this
+RoCE fabric, not the two the earlier version of this entry assumed. Three
+senders at one receiver is the only way to overload it -- depth cannot, it
+only queues -- so this is also the first condition under which the
+congestion controllers are asked what they exist for.
+
+Measured once as a baseline, with the senders lined up on a wall clock and
+run for a fixed duration rather than a fixed count: 93.77 Gb/s arriving,
+shared 2.24x unevenly, the three overlapping 99% of the time. Getting that
+right took four attempts -- the first reported 166 Gb/s over a 100 Gb/s
+adapter by adding rates measured at different moments. The comparison across
+congestion-control settings is what remains.
 
 **REL-01, the 24-hour verification.** The harness exists --
 `tests/manual/soak.cpp`, built as `hux_soak` -- and crosses every dimension
