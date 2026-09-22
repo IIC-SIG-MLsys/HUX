@@ -138,11 +138,17 @@ matter -- short writes behind long ones, which is the harm a controller
 exists to prevent, and not the uniform stream where every request is the
 same size and nobody is stuck behind anybody.
 
-A fixed window is worth 8% of the throughput and takes 162x off the small
-write's latency: 8.0 us against 1295.6 with no control at all. The adaptive
-controller, with its increase scaled to this fabric, reaches the same median
-and has a tail 158 times worse. Left at the paper's increase it is worse on
-everything. See [tuning.md](tuning.md).
+A fixed window is worth 8% of the throughput and takes two orders of
+magnitude off the small write's latency, against no control at all. The
+adaptive controller, with its increase scaled to this fabric, reaches the
+same median and has a tail two orders of magnitude worse. Left at the
+paper's increase it is worse on everything.
+
+The figures are being re-measured and are not repeated here: the run they
+came from had a receiver that never read its control channel, so the notice
+each write produces was dropped rather than delivered, and every small-write
+number was lower than it should have been. The shape of the answer does not
+change. See [tuning.md](tuning.md).
 
 So the adaptive one does not earn its complexity against the simplest thing
 with a window.

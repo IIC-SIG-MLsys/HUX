@@ -74,6 +74,16 @@ because RC transport provides it. Interleaving 16 KiB and 4 MiB writes at
 depth 8 puts about four large transfers ahead of each small one, which is
 the harm a controller exists to prevent.
 
+**These are being re-measured.** They were taken against a receiver that
+never read its control channel, so the handoff each write produces was being
+dropped rather than delivered, and every small-write figure below is lower
+than it should be -- the re-run puts the fixed window's median at 11.1 us
+rather than 8.0. The conclusions do not move: a window still takes two
+orders of magnitude off the small write, and the adaptive controller still
+matches its median and loses badly on the tail. The table is replaced when
+the machines are free. See "What a ready handoff costs" below for how this
+came to light.
+
 Four passes rotating the order so each configuration runs in each position,
 2000 transfers a point, each size also measured alone for reference:
 
