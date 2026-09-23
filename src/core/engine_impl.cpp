@@ -728,6 +728,15 @@ Status EngineImpl::build_subops(PeerId peer,
     auto rr = find_remote(peer, remote[i].region);
     if (rr == nullptr) return Status::kNotFound;
     if (!rr->valid()) return Status::kStaleGeneration;
+    /* What its owner exported it for. An adapter enforces that at the far
+     * end, as a remote access error that moves the queue pair to error and
+     * fails every request on the connection with it; the local and IPC
+     * paths not at all, and wrote into a region exported for reading. So it
+     * is refused here, before anything is posted. */
+    AccessFlags const needed = kind == SubOp::Kind::kWrite
+                                   ? AccessFlags::kRemoteWrite
+                                   : AccessFlags::kRemoteRead;
+    if (!has_flag(rr->access(), needed)) return Status::kInvalidArgument;
 
     /* Segments pair up by index and must have equal lengths. */
     if (local[i].span.length != remote[i].span.length)

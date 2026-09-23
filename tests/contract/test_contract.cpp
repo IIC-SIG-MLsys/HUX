@@ -255,6 +255,27 @@ HUX_TEST(metadata_cut_short_after_its_version_is_refused) {
   }
 }
 
+HUX_TEST(a_write_into_a_region_exported_for_reading_is_refused) {
+  /* A regression. Nothing checked what a region was exported for: over RDMA
+   * the far adapter refused the write, as an error that fails every request
+   * on the connection; over the local and IPC paths it simply landed. */
+  Fixture f;
+  CHECK(f.setup(explicit_cfg()));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 4096, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->write(f.peer.get(), local, remote, {}, &req),
+               Status::kInvalidArgument);
+  CHECK(req == nullptr);
+  CHECK_EQ(f.provider->submitted_subops(), 0u);
+
+  /* Reading from it, which is what it was exported for, still works. */
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kOk);
+  CHECK_STATUS(f.drain(req), Status::kOk);
+}
+
 /* ---- Out-of-order completions ---- */
 
 HUX_TEST(out_of_order_completions_aggregate_correctly) {
@@ -518,9 +539,14 @@ HUX_TEST(subop_error_marks_may_have_modified_target) {
   mock.move_data = false;
   Fixture f;
   CHECK(f.setup(cfg, mock));
+  /* Into the region exported for writing. */
+  std::vector<uint8_t> desc;
+  CHECK_STATUS(f.dst_region->export_descriptor(&desc), Status::kOk);
+  RemoteRegionPtr target;
+  CHECK_STATUS(f.peer->import_region(desc, &target), Status::kOk);
   RegionView local, remote;
   CHECK_STATUS(f.src_region->view(0, 256, &local), Status::kOk);
-  CHECK_STATUS(f.remote_src->view(0, 256, &remote), Status::kOk);
+  CHECK_STATUS(target->view(0, 256, &remote), Status::kOk);
   RequestPtr req;
   CHECK_STATUS(f.engine->write(f.peer.get(), local, remote, {}, &req),
                Status::kOk);

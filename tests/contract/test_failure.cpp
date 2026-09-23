@@ -32,8 +32,12 @@ struct FailFixture {
       return false;
     src.assign(4096, 0xAB);
     dst.assign(4096, 0);
-    if (engine->register_memory(src.data(), 4096, AccessFlags::kRemoteRead,
-                                &src_region) != Status::kOk)
+    /* Exported for both, since the failure tests below write to it as well
+     * as reading from it. */
+    if (engine->register_memory(
+            src.data(), 4096,
+            AccessFlags::kRemoteRead | AccessFlags::kRemoteWrite,
+            &src_region) != Status::kOk)
       return false;
     if (engine->register_memory(dst.data(), 4096, AccessFlags::kLocalWrite,
                                 &dst_region) != Status::kOk)
