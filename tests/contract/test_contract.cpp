@@ -437,6 +437,25 @@ HUX_TEST(a_transfer_of_nothing_is_refused_and_leaves_nothing_behind) {
   CHECK_STATUS(f.engine->deregister_memory(f.dst_region), Status::kOk);
 }
 
+HUX_TEST(a_transfer_asking_for_a_notification_is_refused) {
+  /* Nothing sends one. Accepted, the transfer went ahead and the peer was
+   * never told, which looks exactly like a notification lost on the way. */
+  EngineConfig cfg = explicit_cfg();
+  Fixture f;
+  CHECK(f.setup(cfg, MockConfig{}));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 256, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 256, &remote), Status::kOk);
+  TransferOptions opts;
+  opts.notify = true;
+  opts.notify_payload = {1, 2, 3};
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, opts, &req),
+               Status::kUnsupported);
+  CHECK(req == nullptr);
+  CHECK_EQ(f.provider->submitted_subops(), 0u);
+}
+
 /* ---- Submission queue bound ---- */
 
 HUX_TEST(queue_full_returns_would_block) {

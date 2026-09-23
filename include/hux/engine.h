@@ -22,8 +22,10 @@ struct TransferOptions {
   /* The NIC may touch the buffers only after these events complete. */
   std::vector<DeviceEventPtr> after;
 
-  /* Published once the request reaches target_ready. A failed or cancelled
-   * request never sends a success notification. */
+  /* Reserved for a notification sent once the request reaches target_ready.
+   * Not implemented: a request that sets notify is refused with
+   * kUnsupported, not accepted with the notification never sent. Send one
+   * with Engine::notify() once the request has succeeded. */
   std::vector<uint8_t> notify_payload;
   bool notify = false;
 

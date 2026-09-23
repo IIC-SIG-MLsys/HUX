@@ -27,9 +27,9 @@ enum class Stage : uint8_t {
 
 char const* to_string(Stage s);
 
-/* QUEUED -> WAIT_DEPENDENCY -> INFLIGHT -> WAIT_TARGET_READY -> SUCCEEDED,
- * with WAIT_NOTIFY_ACK inserted when a notification is attached. Errors and
- * accepted cancellations pass through DRAINING first. */
+/* QUEUED -> WAIT_DEPENDENCY -> INFLIGHT -> WAIT_TARGET_READY -> SUCCEEDED for
+ * a transfer; a notification waits in WAIT_NOTIFY_ACK. Errors and accepted
+ * cancellations pass through DRAINING first. */
 enum class RequestState : uint8_t {
   kQueued = 0,
   kWaitDependency,

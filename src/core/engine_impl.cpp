@@ -1056,6 +1056,9 @@ Status EngineImpl::submit_vector(Peer* peer,
   if (closed_.load(std::memory_order_acquire)) return Status::kInvalidArgument;
   if (local.empty() || local.size() != remote.size())
     return Status::kInvalidArgument;
+  /* Not implemented. Accepted, the request went ahead and the notification
+   * it asked for was never sent, with nothing to say so. */
+  if (opts.notify) return Status::kUnsupported;
 
   auto* p = static_cast<PeerImpl*>(peer);
   if (!p->connected()) return Status::kPeerDisconnected;
