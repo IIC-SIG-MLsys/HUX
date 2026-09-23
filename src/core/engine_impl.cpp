@@ -1025,6 +1025,7 @@ Status EngineImpl::submit_vector(Peer* peer,
     ps.req = req;
     ps.ops = std::move(per_lane[k]);
     ps.conn = p->lanes()[k].conn;
+    req->hold_lane(ps.conn);
     ps.peer = p->id();
     ps.provider = p->lanes()[k].provider.get();
     ps.after = opts.after;

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <vector>
 
+#include "core/engine_impl.h"
 #include "core/factory.h"
 #include "hux/engine.h"
 #include "test_main.h"
@@ -128,6 +129,29 @@ HUX_TEST(a_lane_refused_after_another_went_out_waits_for_it) {
   CHECK_EQ(t.first->submitted_subops(), 1u);
   CHECK(!is_terminal(req->state()));
   CHECK_STATUS(req->wait(20), Status::kTimeout);
+}
+
+HUX_TEST(a_request_keeps_every_lane_it_went_out_on) {
+  /* A regression. A request held the first lane's connection and only the
+   * peer held the others, so removing and dropping the peer destroyed the
+   * second lane's queue pairs with the request's work still on them: none
+   * of it could complete, and the request never ended. */
+  MockConfig hold;
+  hold.never_complete = true;
+  TwoLanes t;
+  CHECK(t.make(hold, hold));
+  RequestPtr req;
+  CHECK_STATUS(t.write_both_lanes(&req), Status::kOk);
+  CHECK_EQ(t.second->submitted_subops(), 1u);
+
+  std::weak_ptr<ProviderConnection> second =
+      static_cast<PeerImpl*>(t.peer.get())->lanes()[1].conn;
+  CHECK_STATUS(t.engine->remove_peer(t.peer), Status::kOk);
+  t.peer.reset();
+
+  /* The work is still on it, so the connection must be too. */
+  CHECK(!second.expired());
+  CHECK(!is_terminal(req->state()));
 }
 
 HUX_TEST(cancelling_a_request_waiting_on_a_dependency_ends_it) {

@@ -93,6 +93,13 @@ class RequestImpl : public Request {
 
   void hold_region(MemoryRegionPtr r) { held_regions_.push_back(std::move(r)); }
   void hold_connection(ProviderConnectionPtr c) { held_conn_ = std::move(c); }
+  /* Every lane the request went out on, not only the first. Only the peer
+   * held the others, so removing and dropping a peer destroyed their queue
+   * pairs with this request's work still on them: nothing completed it,
+   * and nothing ever ended it. */
+  void hold_lane(ProviderConnectionPtr c) {
+    held_lanes_.push_back(std::move(c));
+  }
   /* Which peer this belongs to. A transfer split across a peer's adapters
    * has chunks on more than one connection, so "did this request go out on
    * the connection that just died" is the wrong question -- the right one is
@@ -145,7 +152,10 @@ class RequestImpl : public Request {
   ErrorInfo error_;
 
   std::vector<MemoryRegionPtr> held_regions_;
+  /* Declared after the regions so they go first: a connection's teardown
+   * reaches its provider, which the regions' registrations keep alive. */
   ProviderConnectionPtr held_conn_;
+  std::vector<ProviderConnectionPtr> held_lanes_;
   PeerId peer_ = 0;
   TransportProvider* provider_ = nullptr;
   DeviceBackend* device_ = nullptr;
