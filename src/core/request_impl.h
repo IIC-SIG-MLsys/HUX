@@ -120,15 +120,30 @@ class RequestImpl : public Request {
 
   /* Where a write landed on the peer. Sent once the transfer completes, so
    * the target owner can build a dependency on exactly those bytes -- the
-   * 32-bit immediate that signals arrival cannot describe them. */
-  void set_remote_target(RegionId region, Generation gen, Span span) {
-    remote_region_ = region;
-    remote_gen_ = gen;
-    remote_span_ = span;
+   * 32-bit immediate that signals arrival cannot describe them. One range
+   * per place a vector write landed, with ranges that follow on in the same
+   * region merged: a single range, the first segment's offset with every
+   * segment's length, named bytes that were never written and left out the
+   * other regions altogether. */
+  struct RemoteTarget {
+    RegionId region = 0;
+    Generation generation = 0;
+    Span span;
+  };
+  void add_remote_target(RegionId region, Generation gen, Span span) {
+    if (!remote_targets_.empty()) {
+      RemoteTarget& last = remote_targets_.back();
+      if (last.region == region && last.generation == gen &&
+          last.span.offset + last.span.length == span.offset) {
+        last.span.length += span.length;
+        return;
+      }
+    }
+    remote_targets_.push_back(RemoteTarget{region, gen, span});
   }
-  RegionId remote_region() const { return remote_region_; }
-  Generation remote_generation() const { return remote_gen_; }
-  Span remote_span() const { return remote_span_; }
+  std::vector<RemoteTarget> const& remote_targets() const {
+    return remote_targets_;
+  }
 
  private:
   bool terminal_locked() const;
@@ -168,9 +183,7 @@ class RequestImpl : public Request {
   DeviceBackend* device_ = nullptr;
   void* target_addr_ = nullptr;
   uint64_t target_bytes_ = 0;
-  RegionId remote_region_ = 0;
-  Generation remote_gen_ = 0;
-  Span remote_span_;
+  std::vector<RemoteTarget> remote_targets_;
 };
 
 using RequestImplPtr = std::shared_ptr<RequestImpl>;

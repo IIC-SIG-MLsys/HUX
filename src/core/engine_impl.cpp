@@ -1048,11 +1048,14 @@ Status EngineImpl::submit_vector(Peer* peer,
   req->set_peer(p->id());
   req->set_device_backend(device_.get());
   req->set_target(target_addr, target_bytes);
-  if (kind == SubOp::Kind::kWrite && !remote.empty()) {
-    auto rr = find_remote(p->id(), remote[0].region);
-    if (rr != nullptr) {
-      req->set_remote_target(remote[0].region, rr->generation(),
-                             Span{remote[0].span.offset, target_bytes});
+  if (kind == SubOp::Kind::kWrite) {
+    /* Every segment's own range, so the handoff names the bytes written and
+     * no others. */
+    for (auto const& seg : remote) {
+      if (seg.span.length == 0) continue;
+      auto rr = find_remote(p->id(), seg.region);
+      if (rr != nullptr)
+        req->add_remote_target(seg.region, rr->generation(), seg.span);
     }
   }
 
@@ -1549,16 +1552,16 @@ Status EngineImpl::progress() {
          * kernel on its own. */
         req->mark_stage(Stage::kTargetReady);
       }
-      if (req->kind() == SubOp::Kind::kWrite && req->remote_region() != 0) {
+      for (auto const& t : req->remote_targets()) {
         /* The peer knows bytes arrived from the immediate value, but not
          * which ones. This says so, and travels on the control channel so a
-         * congested data path cannot delay it. */
+         * congested data path cannot delay it. One per range written. */
         ReadyHandoffBody b;
         b.request = req->id();
-        b.region = req->remote_region();
-        b.generation = req->remote_generation();
-        b.offset = req->remote_span().offset;
-        b.length = req->remote_span().length;
+        b.region = t.region;
+        b.generation = t.generation;
+        b.offset = t.span.offset;
+        b.length = t.span.length;
         std::vector<uint8_t> payload;
         encode_ready_handoff(b, &payload);
         ProviderConnectionPtr conn = req->connection();
