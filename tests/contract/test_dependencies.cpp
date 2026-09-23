@@ -258,6 +258,31 @@ HUX_TEST(waiting_request_can_still_be_cancelled) {
   CHECK_EQ(f.provider->submitted_subops(), 0u);
 }
 
+HUX_TEST(a_request_that_ended_cancelled_waits_as_cancelled) {
+  /* wait() answers straight away for a request that has already ended, and
+   * that answer did not look for a cancellation: a transfer cancelled before
+   * it was waited on reported success, with nothing moved. */
+  Fixture f;
+  CHECK(f.setup());
+  RegionView lv, rv;
+  f.views(&lv, &rv);
+
+  auto ev = std::make_shared<FakeEvent>(true, false);
+  TransferOptions opts;
+  opts.after.push_back(ev);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), lv, rv, opts, &req), Status::kOk);
+  CHECK_STATUS(req->cancel(), Status::kOk);
+
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 20 && !is_terminal(req->state()); ++i)
+    f.engine->poll_completions(16, &done);
+  CHECK(req->state() == RequestState::kCancelled);
+
+  CHECK_STATUS(req->wait(0), Status::kCancelled);
+  CHECK_STATUS(req->wait(-1), Status::kCancelled);
+}
+
 /* ---- Copy accounting ---- */
 
 /* A zero in payload_bytes_copied only means something if the counter can also

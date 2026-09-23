@@ -121,7 +121,10 @@ Status RequestImpl::test(bool* done) {
 
 Status RequestImpl::wait(int64_t timeout_ms) {
   std::unique_lock<std::mutex> lk(mu_);
-  if (terminal_locked()) return error_.ok() ? Status::kOk : error_.status;
+  /* The same answer however the wait began. This path used to skip the
+   * cancelled case, so a request cancelled before its wait reported
+   * success -- and one cancelled during it, kCancelled. */
+  if (terminal_locked()) return outcome_locked();
 
   if (timeout_ms < 0) {
     cv_.wait(lk, [this] { return terminal_locked(); });
@@ -132,8 +135,15 @@ Status RequestImpl::wait(int64_t timeout_ms) {
      * is cancelled or deregistered, and DMA may well be running. */
     if (!got) return Status::kTimeout;
   }
+  return outcome_locked();
+}
+
+Status RequestImpl::outcome_locked() const {
   if (state_ == RequestState::kCancelled) return Status::kCancelled;
-  return error_.ok() ? Status::kOk : error_.status;
+  if (!error_.ok()) return error_.status;
+  /* A failure always carries a reason; one without is a defect, and must not
+   * read as success. */
+  return state_ == RequestState::kFailed ? Status::kInternal : Status::kOk;
 }
 
 Status RequestImpl::cancel() {

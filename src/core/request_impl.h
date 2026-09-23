@@ -147,6 +147,8 @@ class RequestImpl : public Request {
 
  private:
   bool terminal_locked() const;
+  /* What wait() returns for a request that has ended. */
+  Status outcome_locked() const;
   /* kOk once the request has reached s. Before that nothing is installed and
    * the answer is kWouldBlock: ordering device work behind a transfer still
    * on the network needs a stream-side wait, which is not implemented, and
