@@ -1117,6 +1117,12 @@ Status EngineImpl::submit_vector(Peer* peer,
 
   {
     std::lock_guard<std::mutex> g(mu_);
+    /* Checked again where close() looks: checked only on the way in, a
+     * transfer submitted while the engine closed could be admitted after
+     * close() had found nothing in flight and returned -- and then posted,
+     * into memory its caller was free to release. */
+    if (closed_.load(std::memory_order_acquire))
+      return Status::kInvalidArgument;
     inflight_[req_id] = req;
   }
   {

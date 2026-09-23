@@ -283,6 +283,54 @@ HUX_TEST(a_request_that_ended_cancelled_waits_as_cancelled) {
   CHECK_STATUS(req->wait(-1), Status::kCancelled);
 }
 
+namespace {
+
+/* Closes the engine the first time it is asked whether it has completed,
+ * which a submission does after its first look at whether the engine is
+ * closed and before admitting the request. */
+class ClosingEvent : public DeviceEvent {
+ public:
+  explicit ClosingEvent(Engine* e) : engine_(e) {}
+  DeviceId device() const override { return DeviceId{}; }
+  bool recorded() const override { return true; }
+  void* native_handle() const override { return nullptr; }
+  Status query(bool* complete) override {
+    if (engine_ != nullptr) {
+      closed_with = engine_->close(0);
+      engine_ = nullptr;
+    }
+    *complete = true;
+    return Status::kOk;
+  }
+  Status closed_with = Status::kInternal;
+
+ private:
+  Engine* engine_;
+};
+
+}  // namespace
+
+HUX_TEST(a_transfer_submitted_while_the_engine_closes_is_not_admitted) {
+  /* close() returning ok says nothing is in flight, and its caller may
+   * release memory straight afterwards. A submission that looked before
+   * close() began and was admitted after it ended was posted into that
+   * memory. */
+  Fixture f;
+  CHECK(f.setup());
+  RegionView lv, rv;
+  f.views(&lv, &rv);
+
+  auto ev = std::make_shared<ClosingEvent>(f.engine.get());
+  TransferOptions opts;
+  opts.after.push_back(ev);
+  RequestPtr req;
+  Status const s = f.engine->read(f.peer.get(), lv, rv, opts, &req);
+
+  CHECK_STATUS(ev->closed_with, Status::kOk);
+  CHECK_STATUS(s, Status::kInvalidArgument);
+  CHECK_EQ(f.provider->submitted_subops(), 0u);
+}
+
 /* ---- Copy accounting ---- */
 
 /* A zero in payload_bytes_copied only means something if the counter can also
