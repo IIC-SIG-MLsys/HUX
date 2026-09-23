@@ -160,9 +160,19 @@ Five passes of 3000, the arms rotated through the order:
 | | p50 us | p90 us | p99 us | p99 of each pass |
 | --- | ---: | ---: | ---: | --- |
 | UCX put | 343.6 | 351.7 | **359.2** | 358 353 360 359 365 |
-| UCX tagged send | 349.7 | 358.0 | 369.0 | 364 **31133 28732** 367 369 |
 | HUX write | 362.6 | 373.0 | 1534.3 | 1554 1461 1534 1560 1504 |
 | UCCL write | 366.0 | 1513.0 | 3352.4 | 3212 4010 3184 3352 3372 |
+
+UCX's tagged send was in this rotation too, but its row is withdrawn: the
+server then reposted only receives that finished later, not ones that
+finished in place, so its pool of posted receives could shrink and a sender
+wait for one that was not there. Measured again with that fixed, six passes
+alternating with the put, the receiver at load 134:
+
+| | p50 us | p90 us | p99 us | p99 of each pass |
+| --- | ---: | ---: | ---: | --- |
+| UCX tagged send | 356.1 | 585.4 | 2285.9 | 1655 4104 1886 2686 1174 3772 |
+| UCX put | 349.4 | 354.9 | 360.9 | 363 360 361 363 361 359 |
 
 Against UCCL, HUX keeps the tail: 4.1x lower at p90 and 2.2x at p99. The 54x
 reported earlier came from 600 samples, in which UCCL's p99 was 21 ms; with
@@ -184,9 +194,10 @@ says nothing either way about congestion in a fabric.
 Against UCX's put it does not: UCX's p99 is 4.3x lower and its median 5%.
 
 The tails that blow up belong to the protocols that need the receiving
-host's CPU -- UCX's tagged rendezvous, at about 30 ms in two passes of five,
-and UCCL, whose receiver advertises the slots written into. UCX's put needs
-nothing from the receiver and has the tightest distribution of the four. So
+host's CPU -- UCX's tagged rendezvous, 1.2-4.1 ms at p99 in every pass while
+the put beside it stays at 359-363 us, and UCCL, whose receiver advertises
+the slots written into. UCX's put needs nothing from the receiver and has
+the tightest distribution of any arm. So
 the earlier explanation of the UCCL gap, that a one-sided write does not wait
 for a loaded receiver, holds. What it does not explain is why HUX's write,
 which is just as one-sided, has a tail at all.
@@ -230,9 +241,10 @@ Rate-matched, neither loses a packet and neither has the tail. So the tail
 needs a sender faster than its receiver -- common enough in practice, with
 adapters of different generations or slots of different widths, which is
 why the feature is still worth having -- and on matched hardware HUX's write
-tail is as clean as UCX's. What the load on the hosts does explain is the
+tail is as clean as UCX's. The load on the hosts is left to account for the
 other two tails, UCX's tagged rendezvous and UCCL's, whose protocols need
-the receiving CPU to run.
+the receiving CPU to run; a shared host cannot be unloaded to test that, so
+it is inferred rather than measured.
 
 Ruled out on the way, each by measurement rather than argument: the ready
 handoff (its send never took more than 37 us, and a build that skips it kept

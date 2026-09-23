@@ -771,7 +771,18 @@ int run_client(std::string const& ip, Options const& o) {
         /* Would-block is the engine saying its queue is full, which is the
          * normal way a deep pipeline finds the bottom. Not an error: stop
          * adding and let completions make room. */
-        if (s != Status::kOk) break;
+        if (s == Status::kWouldBlock) break;
+        if (s != Status::kOk) {
+          /* Anything else does not clear by waiting, and retrying it was a
+           * loop with nothing in flight and nothing ever submitted -- the
+           * run spun until killed. Give up the rest of the schedule, as the
+           * deadline does, so what is in flight drains and the run ends. */
+          std::printf("submit failed: %s; stopping this run\n", to_string(s));
+          stopping = true;
+          finished += schedule.size() - submitted;
+          submitted = schedule.size();
+          break;
+        }
         live.push_back({std::move(req), at, bytes});
         ++submitted;
       }

@@ -285,11 +285,12 @@ int run_server(Options const& o) {
   no_delay(fd);
   uint64_t const base = reinterpret_cast<uintptr_t>(u.buf);
   std::vector<uint8_t> peer_addr;
+  uint8_t const api = o.tag ? 1 : 0;
   if (!send_blob(fd, u.addr.data(), static_cast<uint32_t>(u.addr.size())) ||
       !send_blob(fd, u.rkey.data(), static_cast<uint32_t>(u.rkey.size())) ||
       !send_blob(fd, &base, sizeof(base)) ||
       !send_blob(fd, &u.bytes, sizeof(u.bytes)) ||
-      !recv_blob(fd, &peer_addr)) {
+      !send_blob(fd, &api, sizeof(api)) || !recv_blob(fd, &peer_addr)) {
     std::printf("[server] exchange failed\n");
     return 1;
   }
@@ -325,12 +326,17 @@ int run_server(Options const& o) {
     u.progress();
     if (o.tag) {
       for (auto& h : posted) {
+        /* A receive that finished in place comes back null, and one that
+         * failed comes back as an error; both leave the slot empty and both
+         * need reposting. Reposting only the ones finished later let the
+         * pool of posted receives shrink, and a sender then waited for a
+         * receive that was not there -- a tail the harness made. */
         ucs_status_t st;
-        if (h != nullptr && !UCS_PTR_IS_ERR(h) && finished(h, &st)) {
-          release(h);
-          ucp_request_param_t rp = u.param();
-          h = ucp_tag_recv_nbx(u.worker, u.buf, u.bytes, 1, 0, &rp);
-        }
+        bool const free = h == nullptr || UCS_PTR_IS_ERR(h) || finished(h, &st);
+        if (!free) continue;
+        if (h != nullptr && !UCS_PTR_IS_ERR(h)) release(h);
+        ucp_request_param_t rp = u.param();
+        h = ucp_tag_recv_nbx(u.worker, u.buf, u.bytes, 1, 0, &rp);
       }
     }
     if (::poll(&pfd, 1, 0) > 0) break; /* the client said it is done */
@@ -394,11 +400,19 @@ int run_client(Options const& o) {
   }
   no_delay(fd);
 
-  std::vector<uint8_t> saddr, srkey, sbase, sbytes;
+  std::vector<uint8_t> saddr, srkey, sbase, sbytes, sapi;
   if (!recv_blob(fd, &saddr) || !recv_blob(fd, &srkey) ||
       !recv_blob(fd, &sbase) || !recv_blob(fd, &sbytes) ||
+      !recv_blob(fd, &sapi) ||
       !send_blob(fd, u.addr.data(), static_cast<uint32_t>(u.addr.size()))) {
     std::printf("exchange failed\n");
+    return 1;
+  }
+  /* A tagged send to a server that posts no receives waits for ever, with
+   * nothing to say why, so a mismatch is refused here instead. */
+  if (sapi.size() != 1 || (sapi[0] != 0) != o.tag) {
+    std::printf("the server runs --api %s and this client --api %s\n",
+                !sapi.empty() && sapi[0] ? "tag" : "put", o.tag ? "tag" : "put");
     return 1;
   }
   Peer peer;
@@ -543,9 +557,14 @@ int run_client(Options const& o) {
           h = ucp_get_nbx(e, u.buf, n, peer.base, k, &rp);
         }
         if (UCS_PTR_IS_ERR(h)) {
-          std::printf("submit failed: %s\n",
+          std::printf("submit failed: %s; stopping this run\n",
                       ucs_status_string(UCS_PTR_STATUS(h)));
+          /* Give up the rest, as the deadline does. Only stopping would
+           * leave the loop waiting for work that was never going to be
+           * submitted. */
           stopping = true;
+          finished_n += schedule.size() - submitted;
+          submitted = schedule.size();
           break;
         }
         void* f = nullptr;
@@ -559,10 +578,12 @@ int run_client(Options const& o) {
           ucp_request_param_t fp{};
           f = ucp_ep_flush_nbx(e, &fp);
           if (UCS_PTR_IS_ERR(f)) {
-            std::printf("flush failed: %s\n",
+            std::printf("flush failed: %s; stopping this run\n",
                         ucs_status_string(UCS_PTR_STATUS(f)));
             release(h);
             stopping = true;
+            finished_n += schedule.size() - submitted;
+            submitted = schedule.size();
             break;
           }
         }
@@ -633,7 +654,14 @@ int run_client(Options const& o) {
 
   /* The same mixed stream as hux-bench: each size alone at the depth, then
    * round robin so every long operation has short ones on both sides. */
-  if (o.mix.size() >= 2 && !o.tag) {
+  bool mix_fits = true;
+  for (uint64_t b : o.mix)
+    if (b > peer.bytes) mix_fits = false;
+  if (o.mix.size() >= 2 && !o.tag && !mix_fits)
+    std::printf("\nmixed stream skipped: a size is larger than the peer's"
+                " region (%llu B). Start the server with the same --mix.\n",
+                (unsigned long long)peer.bytes);
+  if (o.mix.size() >= 2 && !o.tag && mix_fits) {
     std::printf("\nmixed stream, %d in flight, write\n", o.inflight);
     std::printf("%-10s %12s %12s %12s %12s\n", "size", "alone_p50",
                 "mixed_p50", "alone_p99", "mixed_p99");
