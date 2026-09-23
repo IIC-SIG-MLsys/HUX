@@ -65,6 +65,17 @@ struct EngineConfig {
   uint32_t notify_queue_depth = 1024;
   uint32_t notify_max_payload = 4096;
 
+  /* Finished requests kept for poll_completions, and ready events kept for
+   * poll_ready_events. Past these the oldest are dropped and counted.
+   *
+   * Without a bound, an application that only waits on its requests -- and
+   * so never polls -- had every one of them kept for it: about 400 bytes a
+   * request, 1.2 GiB an hour in the 24-hour run. The same held for ready
+   * events on a receiver that never asked for them. Zero keeps none, which
+   * is the choice for an application that only waits. */
+  uint32_t completion_queue_depth = 16384;
+  uint32_t ready_queue_depth = 16384;
+
   std::string preferred_provider; /* Empty selects automatically. */
 
   /* Reports conflicting parameters instead of silently rewriting them. */

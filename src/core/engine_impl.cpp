@@ -851,10 +851,11 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
       std::lock_guard<std::mutex> g(stats_mu_);
       ++stats_.requests_failed;
     }
+    RequestPtr evicted; /* released after mu_, see keep_completed_locked */
     {
       std::lock_guard<std::mutex> g(mu_);
       inflight_.erase(p->req->id());
-      completed_.push_back(p->req);
+      evicted = keep_completed_locked(p->req);
     }
     p->req->fail(e);
     return true;
@@ -1114,6 +1115,35 @@ Status EngineImpl::poll_notifications(uint32_t max_items,
   return Status::kOk;
 }
 
+RequestPtr EngineImpl::keep_completed_locked(RequestPtr req) {
+  /* Kept only for poll_completions, and bounded, because an application
+   * that waits on its requests never collects them here: unbounded, this
+   * queue held every request such an application ever made. */
+  if (cfg_.completion_queue_depth == 0) {
+    completions_dropped_.fetch_add(1, std::memory_order_relaxed);
+    return req;
+  }
+  completed_.push_back(std::move(req));
+  if (completed_.size() <= cfg_.completion_queue_depth) return nullptr;
+  RequestPtr oldest = std::move(completed_.front());
+  completed_.pop_front();
+  completions_dropped_.fetch_add(1, std::memory_order_relaxed);
+  return oldest;
+}
+
+void EngineImpl::keep_ready_locked(ReadyEventPtr ev) {
+  /* The same for a receiver that never asks for its ready events. These
+   * hold no references, so dropping one under the lock is harmless. */
+  if (cfg_.ready_queue_depth == 0) {
+    ready_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  ready_events_.push_back(std::move(ev));
+  if (ready_events_.size() <= cfg_.ready_queue_depth) return;
+  ready_events_.pop_front();
+  ready_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+}
+
 Status EngineImpl::poll_completions(uint32_t max_items,
                                     std::vector<RequestPtr>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
@@ -1191,9 +1221,10 @@ void EngineImpl::reap_departed_peers() {
       e.detail = "peer disconnected while the request was in flight";
       req->seal_accepted();
       req->fail(e);
+      RequestPtr evicted;
       {
         std::lock_guard<std::mutex> g(mu_);
-        completed_.push_back(req);
+        evicted = keep_completed_locked(req);
       }
       std::lock_guard<std::mutex> g(stats_mu_);
       ++stats_.requests_failed;
@@ -1242,7 +1273,7 @@ Status EngineImpl::progress() {
             ++stats_.ready_handoffs_received;
           }
           std::lock_guard<std::mutex> g(mu_);
-          ready_events_.push_back(std::make_shared<ReadyEventImpl>(
+          keep_ready_locked(std::make_shared<ReadyEventImpl>(
               b.request, m.peer, device_.get(), addr, b.length, b.region,
               b.generation, Span{b.offset, b.length}));
         } else if (static_cast<ControlType>(m.type) ==
@@ -1326,8 +1357,10 @@ Status EngineImpl::progress() {
           if (req != nullptr) {
             req->mark_stage(Stage::kTransferComplete);
             req->finish_success();
+            RequestPtr
+                evicted; /* declared first, so released after the guard */
             std::lock_guard<std::mutex> g(mu_);
-            completed_.push_back(req);
+            evicted = keep_completed_locked(req);
           }
         }
       }
@@ -1340,7 +1373,7 @@ Status EngineImpl::progress() {
         !arrivals.empty()) {
       std::lock_guard<std::mutex> g(mu_);
       for (auto const& a : arrivals) {
-        ready_events_.push_back(std::make_shared<ReadyEventImpl>(
+        keep_ready_locked(std::make_shared<ReadyEventImpl>(
             a.token, a.from, device_.get(), nullptr, 0));
       }
     }
@@ -1438,10 +1471,11 @@ Status EngineImpl::progress() {
       }
       req->finish_success();
     }
+    RequestPtr evicted;
     {
       std::lock_guard<std::mutex> g(mu_);
       inflight_.erase(ev.request);
-      completed_.push_back(req);
+      evicted = keep_completed_locked(req);
     }
   }
   return Status::kOk;
@@ -1477,6 +1511,9 @@ EngineStats EngineImpl::stats() const {
     std::lock_guard<std::mutex> g(stats_mu_);
     s = stats_;
   }
+  s.completions_dropped = completions_dropped_.load(std::memory_order_relaxed);
+  s.ready_events_dropped =
+      ready_events_dropped_.load(std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> g(mu_);
     s.requests_waiting_on_dependency = pending_.size();

@@ -187,6 +187,8 @@ std::string describe_config(EngineConfig const& cfg) {
     << ',' << "\"cc\":\"" << cc_name(cfg.cc) << "\","
     << "\"cc_window_bytes\":" << cfg.cc_window_bytes << ','
     << "\"notify_queue_depth\":" << cfg.notify_queue_depth << ','
+    << "\"completion_queue_depth\":" << cfg.completion_queue_depth << ','
+    << "\"ready_queue_depth\":" << cfg.ready_queue_depth << ','
     << "\"notify_max_payload\":" << cfg.notify_max_payload << ','
     << "\"preferred_provider\":\"" << cfg.preferred_provider << "\""
     << "}";

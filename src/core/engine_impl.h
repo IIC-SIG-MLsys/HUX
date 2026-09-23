@@ -219,6 +219,14 @@ class EngineImpl : public Engine {
   std::unordered_map<PeerId, std::shared_ptr<PeerImpl>> peers_;
   std::unordered_map<RequestId, RequestImplPtr> inflight_;
   std::deque<RequestPtr> completed_;
+  /* Both called with mu_ held. The first returns whatever it pushed off the
+   * front, for the caller to release once mu_ is not held: a finished
+   * request can hold the last reference to a region, and releasing that
+   * deregisters it. */
+  RequestPtr keep_completed_locked(RequestPtr req);
+  void keep_ready_locked(ReadyEventPtr ev);
+  std::atomic<uint64_t> completions_dropped_{0};
+  std::atomic<uint64_t> ready_events_dropped_{0};
   std::deque<PendingSubmit> pending_;
   /* Where the next scheduling pass starts, so no request is permanently
    * first. */

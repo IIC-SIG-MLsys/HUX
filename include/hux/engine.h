@@ -86,6 +86,13 @@ struct EngineStats {
    * truth. */
   uint64_t notification_acks_failed = 0;
 
+  /* Finished requests and ready events dropped because nobody collected
+   * them and their queue was at its depth, oldest first. Zero for an
+   * application that polls; for one that only waits it rises with every
+   * request, which is harmless there and is what keeps its memory flat. */
+  uint64_t completions_dropped = 0;
+  uint64_t ready_events_dropped = 0;
+
   /* Peak in-flight requests, which is what sizing max_inflight_requests
    * needs; the current value says nothing about what the run demanded. */
   uint64_t peak_inflight_requests = 0;
