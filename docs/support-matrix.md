@@ -62,7 +62,7 @@ above transfers to it.
 | --- | --- | --- |
 | Native RDMA | measured | Multiple queue pairs, congestion control, per-queue accounting, NIC affinity, out-of-order placement on mlx5 |
 | Same-process | measured | Copies directly, reports those copies |
-| UCX | measured, with a caveat | Works under `UCX_TLS=self,sm`; default transport selection aborts inside the library on this host (see [ucx.md](ucx.md)) |
+| UCX | measured, with caveats | In one process, under `UCX_TLS=self,sm` and over RC; both ends must share one provider, and default transport selection aborts inside the library on this host (see [ucx.md](ucx.md)) |
 | Choosing among them by where the peer is | measured | One engine holds several in preference order; a peer is reached over the first that suits its location and that the peer also offers ([decision](decisions/0003-path-selection.md)) |
 | IPC between processes on one host | measured | Maps the peer's allocation and copies across it, counting the copy; device memory only, and releasing a region waits for the peer to unmap ([decision](decisions/0002-ipc-path.md)) |
 

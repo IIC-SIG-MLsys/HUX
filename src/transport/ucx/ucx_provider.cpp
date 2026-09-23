@@ -25,11 +25,22 @@ struct UcxRequest {
   bool done = false;
   Status status = Status::kOk;
   UcxProvider* owner = nullptr;
+  /* The endpoint a finished write still has to be flushed on. */
+  UcxConnection* conn = nullptr;
 };
 
 void request_init(void* r) {
   auto* u = static_cast<UcxRequest*>(r);
   new (u) UcxRequest();
+}
+
+/* UCX initializes a request's memory only the first time it allocates it,
+ * not each time it hands it out again, so a request goes back reset: freed
+ * as it was, the next operation to get it would start out done, and a read
+ * -- or a flush -- would be reported finished before it had begun. */
+void release(void* req) {
+  *static_cast<UcxRequest*>(req) = UcxRequest();
+  ucp_request_free(req);
 }
 
 }  // namespace
@@ -40,6 +51,7 @@ class UcxConnection : public ProviderConnection {
  public:
   UcxConnection(UcxProvider* owner, ucp_ep_h ep) : owner_(owner), ep_(ep) {}
   ~UcxConnection() {
+    std::lock_guard<std::mutex> w(owner_->worker_mu_);
     for (auto& kv : rkeys_) ucp_rkey_destroy(kv.second);
   }
 
@@ -49,7 +61,7 @@ class UcxConnection : public ProviderConnection {
   ucp_ep_h ep() const { return ep_; }
 
   /* Unpacks once per remote key and keeps it: unpacking per transfer would
-   * repeat work UCX does not make cheap. */
+   * repeat work UCX does not make cheap. Caller holds the worker lock. */
   ucp_rkey_h rkey_for(uint64_t key, std::vector<uint8_t> const& blob) {
     std::lock_guard<std::mutex> g(mu_);
     auto it = rkeys_.find(key);
@@ -100,9 +112,8 @@ Status UcxProvider::init(UcxConfig const& cfg) {
   ucp_worker_params_t wparams;
   std::memset(&wparams, 0, sizeof(wparams));
   wparams.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-  /* Single thread mode, and the provider keeps that promise: every UCX call
-   * for this worker goes through one thread. UCX does not serialize them, and
-   * a worker driven from two threads corrupts quietly. */
+  /* Serialized mode, and the provider keeps that promise: every UCX call for
+   * this worker is made under worker_mu_. */
   wparams.thread_mode = UCS_THREAD_MODE_SERIALIZED;
   if (ucp_worker_create(context_, &wparams, &worker_) != UCS_OK) {
     ucp_cleanup(context_);
@@ -129,9 +140,9 @@ ProviderCaps UcxProvider::caps() const {
   c.supports_write = true;
   c.supports_vector = false;
   c.supports_multi_qp = false;
-  /* The one capability that changes how the engine has to treat this
-   * provider: a put completing means the source is reusable, not that the
-   * data arrived. */
+  /* The one capability that changes how this provider has to report a write:
+   * a put completing means the source is reusable, not that the data
+   * arrived. poll() flushes before it says so. */
   c.needs_explicit_flush = true;
   c.supports_peer_signal = false;
   c.max_segment_bytes = 0;
@@ -165,6 +176,7 @@ Status UcxProvider::register_region(void* addr, uint64_t length, DeviceId,
   mp.address = addr;
   mp.length = static_cast<size_t>(length);
 
+  std::lock_guard<std::mutex> w(worker_mu_);
   ucp_mem_h mem = nullptr;
   if (ucp_mem_map(context_, &mp, &mem) != UCS_OK) return Status::kDeviceError;
 
@@ -189,6 +201,7 @@ Status UcxProvider::register_region(void* addr, uint64_t length, DeviceId,
 }
 
 Status UcxProvider::deregister_region(uint64_t local_key) {
+  std::lock_guard<std::mutex> w(worker_mu_);
   ucp_mem_h mem = nullptr;
   {
     std::lock_guard<std::mutex> g(mu_);
@@ -232,8 +245,11 @@ Status UcxProvider::connect(std::vector<uint8_t> const& peer_metadata,
       reinterpret_cast<ucp_address_t const*>(peer_metadata.data());
 
   ucp_ep_h ep = nullptr;
-  if (ucp_ep_create(worker_, &ep_params, &ep) != UCS_OK)
-    return Status::kPeerDisconnected;
+  {
+    std::lock_guard<std::mutex> w(worker_mu_);
+    if (ucp_ep_create(worker_, &ep_params, &ep) != UCS_OK)
+      return Status::kPeerDisconnected;
+  }
   *out = std::make_shared<UcxConnection>(this, ep);
   return Status::kOk;
 }
@@ -249,6 +265,10 @@ SubmitResult UcxProvider::submit(ProviderConnection* conn,
   }
   auto* c = static_cast<UcxConnection*>(conn);
 
+  std::lock_guard<std::mutex> w(worker_mu_);
+  /* Writes that completed inline. Their data may still be in flight, so they
+   * are reported after one flush for the lot rather than one each. */
+  std::vector<CompletionEvent> inline_writes;
   for (auto const& op : ops) {
     std::vector<uint8_t> blob;
     {
@@ -288,14 +308,12 @@ SubmitResult UcxProvider::submit(ProviderConnection* conn,
       /* Completed inline. For a get that is the whole story; for a put the
        * data may still be in flight, and only a flush settles it. */
       if (op.kind == SubOp::Kind::kWrite) {
-        Status fs = flush(conn);
-        ev.status = fs;
-        ev.may_have_modified_target = fs != Status::kOk;
+        inline_writes.push_back(ev);
       } else {
         ev.status = Status::kOk;
+        std::lock_guard<std::mutex> g(mu_);
+        completions_.push_back(ev);
       }
-      std::lock_guard<std::mutex> g(mu_);
-      completions_.push_back(ev);
     } else if (UCS_PTR_IS_ERR(req)) {
       r.status = Status::kTransportError;
       r.provider_errno = static_cast<int32_t>(UCS_PTR_STATUS(req));
@@ -307,6 +325,7 @@ SubmitResult UcxProvider::submit(ProviderConnection* conn,
       u->bytes = op.length;
       u->is_write = op.kind == SubOp::Kind::kWrite;
       u->owner = this;
+      u->conn = c;
       std::lock_guard<std::mutex> g(mu_);
       inflight_.push_back(req);
     }
@@ -319,6 +338,16 @@ SubmitResult UcxProvider::submit(ProviderConnection* conn,
       /* UCX moves the caller's memory directly; nothing is staged here. */
     }
   }
+
+  if (!inline_writes.empty()) {
+    Status const fs = flush_locked(c);
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto& ev : inline_writes) {
+      ev.status = fs;
+      ev.may_have_modified_target = fs != Status::kOk;
+      completions_.push_back(ev);
+    }
+  }
   return r;
 }
 
@@ -327,25 +356,51 @@ Status UcxProvider::poll(uint32_t max_events,
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
 
+  std::lock_guard<std::mutex> w(worker_mu_);
   /* Progress first: UCX makes no headway unless the worker is driven. */
   ucp_worker_progress(worker_);
 
-  std::lock_guard<std::mutex> g(mu_);
-  for (auto it = inflight_.begin(); it != inflight_.end();) {
-    auto* u = static_cast<UcxRequest*>(*it);
-    if (!u->done) {
-      ++it;
-      continue;
-    }
+  struct Finished {
     CompletionEvent ev;
-    ev.request = u->request;
-    ev.sub_id = u->sub_id;
-    ev.bytes = u->bytes;
-    ev.status = u->status;
-    ev.may_have_modified_target = u->status != Status::kOk && u->is_write;
-    completions_.push_back(ev);
-    ucp_request_free(*it);
-    it = inflight_.erase(it);
+    bool is_write = false;
+    UcxConnection* conn = nullptr;
+  };
+  std::vector<Finished> finished;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto it = inflight_.begin(); it != inflight_.end();) {
+      auto* u = static_cast<UcxRequest*>(*it);
+      if (!u->done) {
+        ++it;
+        continue;
+      }
+      Finished f;
+      f.ev.request = u->request;
+      f.ev.sub_id = u->sub_id;
+      f.ev.bytes = u->bytes;
+      f.ev.status = u->status;
+      f.is_write = u->is_write;
+      f.conn = u->conn;
+      finished.push_back(f);
+      release(*it);
+      it = inflight_.erase(it);
+    }
+  }
+
+  /* A finished put has freed its source; the peer having the bytes takes a
+   * flush. One per endpoint settles every write on it that came before, and
+   * until it has, none of them is reported. */
+  std::map<UcxConnection*, Status> flushed;
+  for (auto const& f : finished)
+    if (f.is_write && f.ev.status == Status::kOk &&
+        flushed.find(f.conn) == flushed.end())
+      flushed[f.conn] = flush_locked(f.conn);
+
+  std::lock_guard<std::mutex> g(mu_);
+  for (auto& f : finished) {
+    if (f.is_write && f.ev.status == Status::kOk) f.ev.status = flushed[f.conn];
+    f.ev.may_have_modified_target = f.ev.status != Status::kOk && f.is_write;
+    completions_.push_back(f.ev);
   }
 
   while (!completions_.empty() && out->size() < max_events) {
@@ -360,10 +415,7 @@ Status UcxProvider::poll(uint32_t max_events,
   return Status::kOk;
 }
 
-Status UcxProvider::flush(ProviderConnection* conn) {
-  if (conn == nullptr) return Status::kInvalidArgument;
-  auto* c = static_cast<UcxConnection*>(conn);
-
+Status UcxProvider::flush_locked(UcxConnection* c) {
   ucp_request_param_t param;
   std::memset(&param, 0, sizeof(param));
   param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK;
@@ -379,8 +431,14 @@ Status UcxProvider::flush(ProviderConnection* conn) {
   auto* u = static_cast<UcxRequest*>(req);
   while (!u->done) ucp_worker_progress(worker_);
   Status const s = u->status;
-  ucp_request_free(req);
+  release(req);
   return s;
+}
+
+Status UcxProvider::flush(ProviderConnection* conn) {
+  if (conn == nullptr) return Status::kInvalidArgument;
+  std::lock_guard<std::mutex> w(worker_mu_);
+  return flush_locked(static_cast<UcxConnection*>(conn));
 }
 
 Status UcxProvider::send_control(ProviderConnection*, uint16_t type,
@@ -412,6 +470,7 @@ Status UcxProvider::drain(ProviderConnection* conn, int64_t) {
 
 Status UcxProvider::local_metadata(std::vector<uint8_t>* out) const {
   if (out == nullptr) return Status::kInvalidArgument;
+  std::lock_guard<std::mutex> w(worker_mu_);
   ucp_address_t* addr = nullptr;
   size_t len = 0;
   if (ucp_worker_get_address(worker_, &addr, &len) != UCS_OK)

@@ -8,8 +8,15 @@
  * caller consume data the peer has not received, so this provider does not
  * report transfer_complete until the flush says so.
  *
- * All UCX calls for one worker happen on one thread. The library does not
- * serialize them, and a worker driven from two threads corrupts quietly. */
+ * All UCX calls for one worker are serialized here, under worker_mu_. The
+ * library does not serialize them, and a worker driven from two threads
+ * corrupts quietly -- and two do drive it: submissions come from the caller,
+ * completions from the progress thread.
+ *
+ * A remote key is looked up among this provider's own registrations, so the
+ * two engines of a transfer have to share one UcxProvider. A peer in another
+ * process cannot be reached until the packed key travels in the region
+ * descriptor. */
 #ifndef HUX_TRANSPORT_UCX_PROVIDER_H
 #define HUX_TRANSPORT_UCX_PROVIDER_H
 
@@ -71,13 +78,19 @@ class UcxProvider : public TransportProvider {
   ucp_context_h context() const { return context_; }
 
  private:
+  friend class UcxConnection;
   UcxProvider() = default;
   Status init(UcxConfig const& cfg);
+  /* Waits for everything posted on the endpoint to reach the peer. Caller
+   * holds worker_mu_. */
+  Status flush_locked(UcxConnection* c);
 
   UcxConfig cfg_;
   ucp_context_h context_ = nullptr;
   ucp_worker_h worker_ = nullptr;
 
+  /* Every call into UCX. Taken before mu_. */
+  mutable std::mutex worker_mu_;
   mutable std::mutex mu_;
   ProviderStats stats_;
   std::map<uint64_t, ucp_mem_h> memories_;

@@ -76,6 +76,15 @@ if(TARGET hux_transport_rdma)
   endforeach()
 endif()
 
+# The UCX provider end to end. Its result depends on which transports UCX
+# selects on the host (docs/ucx.md), so ctest builds it and never runs it.
+if(TARGET hux_transport_ucx)
+  add_executable(hux_ucx_loopback manual/ucx_loopback.cpp)
+  target_include_directories(hux_ucx_loopback PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(hux_ucx_loopback PRIVATE hux_transport_ucx)
+  target_compile_options(hux_ucx_loopback PRIVATE -Wall -Wextra)
+endif()
+
 # Two processes and a device that can export an allocation, so it is built
 # but never run by ctest. Built for whichever vendor backend is present.
 if(TARGET hux_device_cuda OR TARGET hux_device_rocm OR TARGET hux_device_neuware)
