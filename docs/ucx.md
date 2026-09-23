@@ -57,8 +57,10 @@ would need probing the protocols UCX actually selected, which it does not
 expose before the first operation.
 
 Not yet done: control messages over UCX active messages. `send_control`
-returns `kUnsupported` rather than dropping them silently, and the engine uses
-its own channel.
+returns `kUnsupported` rather than dropping them silently, and there is no
+other channel to fall back to. To a peer reached over UCX a notification is
+refused, a ready handoff is counted in `ready_handoffs_failed`, and a notice
+that a region has gone in `region_invalidates_failed`.
 
 ## Compared with the native RDMA provider
 

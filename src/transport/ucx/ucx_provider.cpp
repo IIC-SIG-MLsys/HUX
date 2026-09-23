@@ -443,9 +443,9 @@ Status UcxProvider::flush(ProviderConnection* conn) {
 
 Status UcxProvider::send_control(ProviderConnection*, uint16_t type,
                                  std::vector<uint8_t> const& payload) {
-  /* Control messages over UCX active messages are not wired up yet; the
-   * engine falls back to its own channel. Reported honestly rather than
-   * silently dropping. */
+  /* Control messages over UCX active messages are not wired up yet, and the
+   * engine has no other channel: what it would send is refused here and
+   * counted as refused there, rather than silently dropped. */
   (void)type;
   (void)payload;
   return Status::kUnsupported;
