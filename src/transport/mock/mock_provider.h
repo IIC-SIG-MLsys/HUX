@@ -50,6 +50,10 @@ struct MockConfig {
   /* Accept work and never complete it, so a close that must report a timeout
    * has something outstanding to wait on. */
   bool never_complete = false;
+  /* Refuse every submission outright and accept nothing, the way a transport
+   * whose connection has broken does. accept_limit cannot stage this: zero
+   * there means no limit. */
+  bool reject_all = false;
 };
 
 class MockConnection : public ProviderConnection {

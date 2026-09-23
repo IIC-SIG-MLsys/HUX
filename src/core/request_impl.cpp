@@ -35,6 +35,11 @@ bool RequestImpl::cancel_requested() const {
 
 void RequestImpl::set_state(RequestState s) {
   std::lock_guard<std::mutex> g(mu_);
+  /* Terminal is final, and a cancellation in progress stays draining. A
+   * lane posted after either used to move the request back to in-flight, so
+   * a failed request stopped reading as done and a wait on it ran to its
+   * timeout. */
+  if (terminal_locked() || cancel_requested_) return;
   state_ = s;
 }
 
@@ -56,6 +61,28 @@ void RequestImpl::seal_accepted() {
 bool RequestImpl::sealed() const {
   std::lock_guard<std::mutex> g(mu_);
   return sealed_;
+}
+
+void RequestImpl::set_parts(uint32_t n) {
+  std::lock_guard<std::mutex> g(mu_);
+  parts_left_ = n;
+}
+
+bool RequestImpl::part_finished() {
+  std::lock_guard<std::mutex> g(mu_);
+  if (parts_left_ > 0) --parts_left_;
+  return parts_left_ == 0;
+}
+
+bool RequestImpl::abandoning() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return terminal_locked() || cancel_requested_ || !error_.ok();
+}
+
+bool RequestImpl::seal_if_idle() {
+  std::lock_guard<std::mutex> g(mu_);
+  sealed_ = true;
+  return !terminal_locked() && completed_subops_ >= accepted_subops_;
 }
 
 uint32_t RequestImpl::accepted_subops() const {

@@ -9,6 +9,11 @@ SubmitResult MockProvider::submit(ProviderConnection*,
                                   std::vector<SubOp> const& ops) {
   std::lock_guard<std::mutex> g(mu_);
   SubmitResult r;
+  if (cfg_.reject_all) {
+    r.accepted = 0;
+    r.status = cfg_.submit_status_on_partial;
+    return r;
+  }
   uint32_t const limit =
       cfg_.accept_limit == 0
           ? static_cast<uint32_t>(ops.size())

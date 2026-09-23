@@ -224,6 +224,10 @@ class EngineImpl : public Engine {
    * request can hold the last reference to a region, and releasing that
    * deregisters it. */
   RequestPtr keep_completed_locked(RequestPtr req);
+  /* A lane of req has nothing left to post; ends req if it was the last lane
+   * of a request that cannot succeed and nothing is outstanding. */
+  void part_done(RequestImplPtr const& req);
+  void end_abandoned(RequestImplPtr const& req);
   void keep_ready_locked(ReadyEventPtr ev);
   std::atomic<uint64_t> completions_dropped_{0};
   std::atomic<uint64_t> ready_events_dropped_{0};

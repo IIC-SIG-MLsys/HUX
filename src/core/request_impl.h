@@ -61,6 +61,24 @@ class RequestImpl : public Request {
    * completions that are never coming. */
   void seal_accepted();
   bool sealed() const;
+
+  /* How many of this request's lanes still have work to post. A request
+   * split across adapters is posted lane by lane, and one lane failing must
+   * not end the request while another could still post: ending it publishes
+   * FailedSafe, and a lane posted afterwards would have the NIC reading a
+   * source the caller was just told it may reuse. */
+  void set_parts(uint32_t n);
+  /* One lane has nothing left to post -- all of it went out, or it was
+   * given up. True when it was the last. */
+  bool part_finished();
+  /* The request has failed, or been cancelled, or ended: whatever of it has
+   * not been posted yet should not be. */
+  bool abandoning() const;
+  /* For once no lane will post again and the request cannot succeed. Seals
+   * it, and says whether nothing is outstanding either -- in which case no
+   * completion is coming to end it, and the caller has to. Atomic with
+   * on_subop_complete, so exactly one of the two ends the request. */
+  bool seal_if_idle();
   uint32_t total_subops() const { return total_subops_; }
 
   /* Records why this request will fail, without ending it. Submission can
@@ -120,6 +138,7 @@ class RequestImpl : public Request {
   uint32_t completed_subops_ = 0;
   uint32_t accepted_subops_ = 0;
   bool sealed_ = false;
+  uint32_t parts_left_ = 0;
   bool cancel_requested_ = false;
   /* One bit per Stage, so reached() is stable across repeated queries. */
   uint32_t stages_ = 0;

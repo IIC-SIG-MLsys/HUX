@@ -798,6 +798,16 @@ bool EngineImpl::dependencies_met(
 bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
   if (p->ops.empty()) return true;
 
+  /* Another lane of this request failed, or it was cancelled, or it has
+   * ended: what is left of this lane must not go out. Posting it would put
+   * the NIC on a source that the request may already have told its caller
+   * is safe to reuse. */
+  if (p->req->abandoning()) {
+    p->ops.clear();
+    part_done(p->req);
+    return true;
+  }
+
   /* Take whole sub-operations up to the quantum, and always at least one:
    * a quantum smaller than a chunk must still make progress rather than
    * stall. */
@@ -827,15 +837,16 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
     return false;
   }
 
-  if (sr.accepted == slice.size()) return p->ops.empty();
+  if (sr.accepted == slice.size()) {
+    if (!p->ops.empty()) return false; /* the rest of this lane, next turn */
+    part_done(p->req);
+    return true;
+  }
 
   /* Submission has stopped for a reason that is not back-pressure, so no
-   * more of this request will ever be posted. */
-  p->req->seal_accepted();
-  /* Across every quantum, not just this call: a request posted in several
-   * goes can have sub-operations outstanding from an earlier one. */
+   * more of this lane will be posted -- and none of the request's other
+   * lanes either, which see the error and give up what they have left. */
   uint32_t const outstanding = p->req->accepted_subops();
-
   ErrorInfo e;
   e.status = sr.status == Status::kOk ? Status::kTransportError : sr.status;
   e.provider = prov->caps().name;
@@ -843,37 +854,52 @@ bool EngineImpl::post_ops(PendingSubmit* p, uint64_t max_bytes) {
   e.provider_errno = sr.provider_errno;
   e.may_have_modified_target = outstanding > 0;
   e.detail = outstanding == 0 ? "submit rejected" : "partial submit";
-
-  if (outstanding == 0) {
-    /* Nothing reached the NIC, so local DMA never started and the request
-     * can end here. */
-    {
-      std::lock_guard<std::mutex> g(stats_mu_);
-      ++stats_.requests_failed;
-    }
-    RequestPtr evicted; /* released after mu_, see keep_completed_locked */
-    {
-      std::lock_guard<std::mutex> g(mu_);
-      inflight_.erase(p->req->id());
-      evicted = keep_completed_locked(p->req);
-    }
-    p->req->fail(e);
-    return true;
-  }
-
-  /* Sub-operations are still reading the source. Failing here would publish
-   * FailedSafe -- local DMA has stopped -- while it has not, and a caller
-   * that reuses its buffer on that word hands the NIC memory it no longer
-   * owns. It would also leave the request in inflight_ for good: the
-   * completion path skips anything already terminal, so the entry, the
-   * request and the regions it holds would never be released.
-   *
-   * So the reason is recorded and the request drains. The last accepted
-   * sub-operation ends it through the ordinary path, which counts it,
-   * releases it, and publishes FailedSafe when it is true. */
   p->req->note_error(e);
   p->req->set_state(RequestState::kDraining);
+  p->ops.clear();
+  part_done(p->req);
   return true;
+}
+
+void EngineImpl::part_done(RequestImplPtr const& req) {
+  /* Only the last lane to finish decides, and only for a request that
+   * cannot succeed. Before the last, another lane may still post; and a
+   * request with nothing wrong completes through its sub-operations.
+   *
+   * Deciding any earlier is how a request split across adapters used to be
+   * failed -- FailedSafe published, the entry dropped from inflight_ --
+   * while a second lane was still to be posted, and then was posted: the
+   * NIC read a source its caller had been told was free, and the completions
+   * that followed were thrown away for belonging to nothing. */
+  if (!req->part_finished() || !req->abandoning()) return;
+  /* Outstanding sub-operations end the request through the completion path,
+   * which measures against what was accepted now that it is sealed. With
+   * none, no completion is coming, so it ends here. */
+  if (req->seal_if_idle()) end_abandoned(req);
+}
+
+void EngineImpl::end_abandoned(RequestImplPtr const& req) {
+  /* Nothing of it is in flight, so local DMA has stopped -- or never
+   * started -- and FailedSafe or CancelledSafe is true. Counted before it
+   * is released, as every other ending is. */
+  bool const cancelled = req->cancel_requested();
+  {
+    std::lock_guard<std::mutex> g(stats_mu_);
+    if (cancelled)
+      ++stats_.requests_cancelled;
+    else
+      ++stats_.requests_failed;
+  }
+  RequestPtr evicted; /* released after mu_, see keep_completed_locked */
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    inflight_.erase(req->id());
+    evicted = keep_completed_locked(req);
+  }
+  if (cancelled)
+    req->finish_cancelled();
+  else
+    req->fail(req->error());
 }
 
 /* One scheduling pass: every waiting request gets a turn of at most a
@@ -897,7 +923,11 @@ void EngineImpl::drain_pending() {
 
   std::vector<PendingSubmit> still_waiting;
   for (auto& p : turn) {
-    if (!dependencies_met(p.after)) {
+    /* A request that has failed or been cancelled gives up what it has not
+     * posted without waiting for its dependencies: they may never be met,
+     * and it is not going to run. Left waiting, a cancelled request stayed
+     * in the queue until its producer finished, and then ran in full. */
+    if (!p.req->abandoning() && !dependencies_met(p.after)) {
       still_waiting.push_back(std::move(p));
       continue;
     }
@@ -995,6 +1025,9 @@ Status EngineImpl::submit_vector(Peer* peer,
     ps.after = opts.after;
     parts.push_back(std::move(ps));
   }
+  /* Counted before any is posted, so the first lane to fail cannot end the
+   * request while another is still to go. */
+  req->set_parts(static_cast<uint32_t>(parts.size()));
   /* The first lane, for what belongs to a single connection: a ready handoff
    * travels back over one channel, not over whichever carried a chunk. */
   req->set_provider(p->provider());

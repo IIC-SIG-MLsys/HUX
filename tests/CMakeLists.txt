@@ -1,6 +1,7 @@
 # Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0.
 add_executable(hux_contract_tests
   test_main.cpp
+  contract/test_lane_failure.cpp
   contract/test_queue_bounds.cpp
   contract/test_control_outbox.cpp
   contract/test_striping.cpp
