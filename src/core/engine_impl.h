@@ -172,10 +172,11 @@ class EngineImpl : public Engine {
     std::vector<DeviceEventPtr> after;
   };
 
-  /* Returns true once every event has been recorded and completed. An
-   * unrecorded event captures no work, so treating it as satisfied would
-   * release the NIC against data that does not exist yet. */
-  bool dependencies_met(std::vector<DeviceEventPtr> const& after) const;
+  /* kOk once every event has completed, kWouldBlock while any is still
+   * pending, and the reason when one never can: never recorded -- it
+   * captures no work, and treating it as satisfied would release the NIC
+   * against data that does not exist yet -- or its query failing. */
+  Status dependency_state(std::vector<DeviceEventPtr> const& after) const;
   /* Submits at most max_bytes worth of sub-operations, leaving the rest for a
    * later turn. Returns true when the request has nothing left to submit. */
   bool post_ops(PendingSubmit* p, uint64_t max_bytes);

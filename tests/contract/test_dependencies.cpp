@@ -125,6 +125,9 @@ class HipLikeEvent : public DeviceEvent {
 };
 
 HUX_TEST(unrecorded_event_never_satisfies_a_dependency) {
+  /* And is refused outright. It used to be accepted and waited on, which
+   * released nothing against it -- and never ended: an event captures no
+   * work until recorded and is not a promise of work to come. */
   Fixture f;
   CHECK(f.setup());
   RegionView lv, rv;
@@ -135,13 +138,61 @@ HUX_TEST(unrecorded_event_never_satisfies_a_dependency) {
   opts.after.push_back(ev);
 
   RequestPtr req;
-  CHECK_STATUS(f.engine->read(f.peer.get(), lv, rv, opts, &req), Status::kOk);
-
-  std::vector<RequestPtr> done;
-  for (int i = 0; i < 200; ++i) f.engine->poll_completions(16, &done);
-
-  CHECK(req->state() == RequestState::kWaitDependency);
+  CHECK_STATUS(f.engine->read(f.peer.get(), lv, rv, opts, &req),
+               Status::kInvalidArgument);
+  CHECK(req == nullptr);
   CHECK_EQ(f.provider->submitted_subops(), 0u);
+  CHECK_EQ(f.engine->stats().requests_accepted, uint64_t(0));
+}
+
+/* Recorded, pending, and then its query starts failing -- a sticky device
+ * error does exactly this. */
+class BreakingEvent : public DeviceEvent {
+ public:
+  DeviceId device() const override { return DeviceId{}; }
+  bool recorded() const override { return true; }
+  void* native_handle() const override { return nullptr; }
+  Status query(bool* complete) override {
+    *complete = false;
+    return broken_ ? Status::kDeviceError : Status::kOk;
+  }
+  void break_it() { broken_ = true; }
+
+ private:
+  bool broken_ = false;
+};
+
+HUX_TEST(a_dependency_that_can_no_longer_complete_fails_the_request) {
+  /* A regression: a query that failed read the same as one still pending,
+   * so the request waited for ever. Nothing of it was posted, so it can end
+   * failed and safe. */
+  Fixture f;
+  CHECK(f.setup());
+  RegionView lv, rv;
+  f.views(&lv, &rv);
+  auto ev = std::make_shared<BreakingEvent>();
+  TransferOptions opts;
+  opts.after.push_back(ev);
+
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), lv, rv, opts, &req), Status::kOk);
+  CHECK(req->state() == RequestState::kWaitDependency);
+
+  ev->break_it();
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 50 && !is_terminal(req->state()); ++i)
+    f.engine->poll_completions(16, &done);
+
+  CHECK(req->state() == RequestState::kFailed);
+  CHECK(req->reached(Stage::kFailedSafe));
+  CHECK_STATUS(req->error().status, Status::kDeviceError);
+  CHECK_EQ(f.provider->submitted_subops(), 0u);
+
+  /* And one already failing when submitted is refused on the way in. */
+  RequestPtr again;
+  CHECK_STATUS(f.engine->read(f.peer.get(), lv, rv, opts, &again),
+               Status::kDeviceError);
+  CHECK(again == nullptr);
 }
 
 HUX_TEST(met_dependency_submits_straight_away) {

@@ -771,18 +771,21 @@ Status EngineImpl::build_subops(PeerId peer,
   return Status::kOk;
 }
 
-bool EngineImpl::dependencies_met(
+Status EngineImpl::dependency_state(
     std::vector<DeviceEventPtr> const& after) const {
+  Status state = Status::kOk;
   for (auto const& e : after) {
     if (e == nullptr) continue;
     /* Never recorded means it captures no work at all; waiting on it would
-     * order nothing, so it can never count as satisfied. */
-    if (!e->recorded()) return false;
+     * order nothing, so it can never count as satisfied -- and it never
+     * will, since an event is not a promise of work to come. */
+    if (!e->recorded()) return Status::kInvalidArgument;
     bool complete = false;
-    if (e->query(&complete) != Status::kOk) return false;
-    if (!complete) return false;
+    Status const q = e->query(&complete);
+    if (q != Status::kOk) return q;
+    if (!complete) state = Status::kWouldBlock;
   }
-  return true;
+  return state;
 }
 
 /* Hands sub-operations to the provider and records how many it took.
@@ -927,9 +930,20 @@ void EngineImpl::drain_pending() {
      * posted without waiting for its dependencies: they may never be met,
      * and it is not going to run. Left waiting, a cancelled request stayed
      * in the queue until its producer finished, and then ran in full. */
-    if (!p.req->abandoning() && !dependencies_met(p.after)) {
-      still_waiting.push_back(std::move(p));
-      continue;
+    if (!p.req->abandoning()) {
+      Status const d = dependency_state(p.after);
+      if (d == Status::kWouldBlock) {
+        still_waiting.push_back(std::move(p));
+        continue;
+      }
+      if (d != Status::kOk) {
+        /* One that can no longer be met ends the request, failed: nothing
+         * of it was posted, so that is safe, where waiting on was for
+         * ever. */
+        ErrorInfo e;
+        e.status = d;
+        p.req->note_error(e);
+      }
     }
     if (!post_ops(&p, cfg_.scheduler_quantum_bytes))
       still_waiting.push_back(std::move(p));
@@ -953,6 +967,15 @@ Status EngineImpl::submit_vector(Peer* peer,
 
   auto* p = static_cast<PeerImpl*>(peer);
   if (!p->connected()) return Status::kPeerDisconnected;
+
+  /* A dependency that can never complete is refused before anything is
+   * admitted: an event never recorded captures no work, and one whose query
+   * fails will not start succeeding. Accepted, either left the request
+   * waiting on it for ever. */
+  {
+    Status const dep = dependency_state(opts.after);
+    if (dep != Status::kOk && dep != Status::kWouldBlock) return dep;
+  }
 
   /* Bounded submission queue. kWouldBlock means the request was not accepted
    * and had no network side effect, so it can be retried as is. */
@@ -1038,7 +1061,9 @@ Status EngineImpl::submit_vector(Peer* peer,
    * travels back over one channel, not over whichever carried a chunk. */
   req->set_provider(p->provider());
 
-  if (!opts.after.empty() && !dependencies_met(opts.after)) {
+  Status const dep =
+      opts.after.empty() ? Status::kOk : dependency_state(opts.after);
+  if (dep == Status::kWouldBlock) {
     /* The request is accepted and handed back now; only its submission waits,
      * so the calling thread never blocks on the device. */
     req->set_state(RequestState::kWaitDependency);
@@ -1048,6 +1073,13 @@ Status EngineImpl::submit_vector(Peer* peer,
     }
     *out = req;
     return Status::kOk;
+  }
+  if (dep != Status::kOk) {
+    /* Failed since it was checked on the way in. Posting below then gives
+     * the request up, with nothing sent. */
+    ErrorInfo e;
+    e.status = dep;
+    req->note_error(e);
   }
 
   for (auto& ps : parts) {
