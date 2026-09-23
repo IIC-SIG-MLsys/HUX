@@ -334,10 +334,15 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
   auto impl = std::static_pointer_cast<MemoryRegionImpl>(region);
   /* Step one: block new submissions. */
   impl->retire();
-  /* Step two: refuse while in-flight requests may still reference it. */
+  /* Step two: refuse while a request in flight uses this handle. Only one
+   * that does: refusing while anything at all was in flight meant a region
+   * could not be taken back from an engine that never went idle, and a
+   * caller that did not retry left it retired in regions_ for good. */
   {
     std::lock_guard<std::mutex> g(mu_);
-    if (!inflight_.empty()) return Status::kWouldBlock;
+    for (auto const& kv : inflight_)
+      for (auto const& r : kv.second->held_regions())
+        if (r.get() == impl.get()) return Status::kWouldBlock;
     regions_.erase(impl->id());
   }
   /* Peers holding a descriptor for this region are told to stop using it.
@@ -1156,6 +1161,13 @@ Status EngineImpl::submit_vector(Peer* peer,
      * into memory its caller was free to release. */
     if (closed_.load(std::memory_order_acquire))
       return Status::kInvalidArgument;
+    /* And the regions, for the same reason: checked only while building,
+     * one deregistered after that saw nothing in flight and returned, and
+     * the transfer was then posted against it. Retiring comes before
+     * deregistration looks here, so one or the other sees the other. */
+    for (auto const& r : req->held_regions())
+      if (static_cast<MemoryRegionImpl const*>(r.get())->retired())
+        return Status::kStaleGeneration;
     inflight_[req_id] = req;
   }
   {

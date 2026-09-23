@@ -92,6 +92,11 @@ class RequestImpl : public Request {
   void finish_cancelled();
 
   void hold_region(MemoryRegionPtr r) { held_regions_.push_back(std::move(r)); }
+  /* Set before the request is admitted and never after, so this can be read
+   * by whoever finds it in flight. */
+  std::vector<MemoryRegionPtr> const& held_regions() const {
+    return held_regions_;
+  }
   void hold_connection(ProviderConnectionPtr c) { held_conn_ = std::move(c); }
   /* Every lane the request went out on, not only the first. Only the peer
    * held the others, so removing and dropping a peer destroyed their queue

@@ -437,6 +437,54 @@ HUX_TEST(a_transfer_of_nothing_is_refused_and_leaves_nothing_behind) {
   CHECK_STATUS(f.engine->deregister_memory(f.dst_region), Status::kOk);
 }
 
+HUX_TEST(a_region_in_use_is_not_deregistered_until_it_is_not) {
+  /* A request in flight still has the NIC on this memory. Refused, and the
+   * handle takes nothing new meanwhile; once the request ends it can go. */
+  EngineConfig cfg = explicit_cfg();
+  Fixture f;
+  CHECK(f.setup(cfg, MockConfig{}));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 256, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 256, &remote), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kOk);
+
+  CHECK_STATUS(f.engine->deregister_memory(f.dst_region), Status::kWouldBlock);
+  RequestPtr more;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &more),
+               Status::kStaleGeneration);
+
+  CHECK_STATUS(f.drain(req), Status::kOk);
+  CHECK_STATUS(f.engine->deregister_memory(f.dst_region), Status::kOk);
+}
+
+HUX_TEST(deregistering_waits_only_for_what_uses_the_region) {
+  /* It used to refuse while anything at all was in flight, so an engine
+   * that never went idle could not take any region back. */
+  EngineConfig cfg = explicit_cfg();
+  MockConfig mock;
+  mock.never_complete = true;
+  Fixture f;
+  CHECK(f.setup(cfg, mock));
+  std::vector<uint8_t> other(4096, 0);
+  MemoryRegionPtr other_region;
+  CHECK_STATUS(
+      f.engine->register_memory(other.data(), other.size(),
+                                AccessFlags::kLocalWrite, &other_region),
+      Status::kOk);
+
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 256, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 256, &remote), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kOk);
+
+  CHECK_STATUS(f.engine->deregister_memory(other_region), Status::kOk);
+  CHECK_STATUS(f.engine->deregister_memory(f.dst_region), Status::kWouldBlock);
+}
+
 HUX_TEST(a_transfer_asking_for_a_notification_is_refused) {
   /* Nothing sends one. Accepted, the transfer went ahead and the peer was
    * never told, which looks exactly like a notification lost on the way. */
