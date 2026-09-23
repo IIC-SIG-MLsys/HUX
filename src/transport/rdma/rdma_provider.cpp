@@ -566,7 +566,8 @@ ProviderCaps RdmaProvider::caps() const {
    * over the control channel once every sub-operation is done. */
   c.supports_peer_signal = false;
   c.relative_capacity = cfg_.relative_capacity;
-  c.max_segment_bytes = 0;
+  /* The port's own limit on one message, which a chunk must not exceed. */
+  c.max_segment_bytes = port_attr_.max_msg_sz;
   c.max_sge = cfg_.max_sge;
   return c;
 }

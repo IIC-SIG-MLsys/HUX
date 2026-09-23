@@ -204,6 +204,10 @@ Status EngineConfig::validate(std::string* reason) const {
   };
   if (qp_per_peer == 0) return fail("qp_per_peer must be >= 1");
   if (chunk_bytes == 0) return fail("chunk_bytes must be > 0");
+  /* A work request carries a 32-bit length: a 4 GiB chunk went out as zero
+   * bytes, and was reported as having moved. */
+  if (chunk_bytes > 0xffffffffull)
+    return fail("chunk_bytes must fit in 32 bits");
   if (wr_batch == 0) return fail("wr_batch must be >= 1");
   if (cq_batch == 0) return fail("cq_batch must be >= 1");
   if (max_inflight_requests == 0)

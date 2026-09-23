@@ -63,6 +63,8 @@ struct MockConfig {
   /* What poll() reports alongside whatever it hands back, the way a real
    * one reports a failed poll after taking completions it had set aside. */
   Status poll_status = Status::kOk;
+  /* The longest single operation it takes, 0 for no limit. */
+  uint64_t max_segment_bytes = 0;
 };
 
 class MockConnection : public ProviderConnection {
@@ -112,6 +114,7 @@ class MockProvider : public TransportProvider {
     c.supports_multi_qp = cfg_.qp_count > 1;
     c.supports_peer_signal = true;
     c.max_sge = 16;
+    c.max_segment_bytes = cfg_.max_segment_bytes;
     return c;
   }
 

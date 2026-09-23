@@ -6,6 +6,7 @@
  * lkey exported in place of an rkey, a timeout mistaken for a cancellation --
  * so those show up as failing tests instead of during a code read. */
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -205,6 +206,38 @@ HUX_TEST(chunking_covers_whole_range) {
   CHECK_STATUS(f.drain(req), Status::kOk);
   CHECK_EQ(f.provider->submitted_subops(), 8u);
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
+}
+
+HUX_TEST(no_chunk_is_longer_than_a_transport_takes) {
+  /* The engine split by chunk_bytes alone, whatever a transport said the
+   * longest operation it takes was. */
+  EngineConfig cfg = explicit_cfg();
+  cfg.chunk_bytes = 4096;
+  MockConfig mock;
+  mock.max_segment_bytes = 1024;
+  Fixture f;
+  CHECK(f.setup(cfg, mock));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 4096, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kOk);
+  CHECK_STATUS(f.drain(req), Status::kOk);
+  CHECK_EQ(f.provider->submitted_subops(), 4u);
+  CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
+}
+
+HUX_TEST(a_chunk_longer_than_a_work_request_carries_is_refused) {
+  /* A work request carries a 32-bit length, so a 4 GiB chunk went out as
+   * zero bytes and was reported as moved. */
+  EngineConfig cfg = explicit_cfg();
+  cfg.chunk_bytes = 1ull << 32;
+  std::string why;
+  CHECK_STATUS(cfg.validate(&why), Status::kInvalidArgument);
+  CHECK(!why.empty());
+  cfg.chunk_bytes = 0xffffffffull;
+  CHECK_STATUS(cfg.validate(&why), Status::kOk);
 }
 
 HUX_TEST(metadata_cut_short_after_its_version_is_refused) {

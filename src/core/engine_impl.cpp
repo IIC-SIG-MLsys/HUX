@@ -700,6 +700,14 @@ Status EngineImpl::build_subops(PeerId peer,
    * assigned rather than fractions of one: a chunk is already the scheduling
    * unit, and splitting below it would trade balance for round trips. */
   std::vector<double> assigned(lanes.size(), 0.0);
+  /* No chunk longer than any lane can carry in one operation. The engine
+   * used to split by chunk_bytes alone, whatever a transport said its limit
+   * was. */
+  uint64_t chunk = cfg_.chunk_bytes;
+  for (auto const& l : lanes) {
+    uint64_t const most = l.provider->caps().max_segment_bytes;
+    if (most > 0 && most < chunk) chunk = most;
+  }
 
   uint64_t sub_id = 0;
   uint64_t total = 0;
@@ -725,7 +733,7 @@ Status EngineImpl::build_subops(PeerId peer,
     uint64_t off = 0;
     while (off < local[i].span.length) {
       uint64_t n = local[i].span.length - off;
-      if (n > cfg_.chunk_bytes) n = cfg_.chunk_bytes;
+      if (n > chunk) n = chunk;
       /* Whichever lane this chunk costs least, in proportion to what that
        * lane carries. With one lane this picks it every time and nothing
        * about the result changes. */
