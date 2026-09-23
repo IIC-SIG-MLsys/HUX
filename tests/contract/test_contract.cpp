@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "control/identity.h"
 #include "core/factory.h"
 #include "core/region_impl.h"
 #include "hux/engine.h"
@@ -204,6 +205,21 @@ HUX_TEST(chunking_covers_whole_range) {
   CHECK_STATUS(f.drain(req), Status::kOk);
   CHECK_EQ(f.provider->submitted_subops(), 8u);
   CHECK_EQ(std::memcmp(f.dst.data(), f.src.data(), 4096), 0);
+}
+
+HUX_TEST(metadata_cut_short_after_its_version_is_refused) {
+  /* A regression. The count after the version was read before checking that
+   * it was there: two bytes past the end of a blob cut at that point.
+   * AddressSanitizer is what sees it; the answer was a refusal either way. */
+  Fixture f;
+  CHECK(f.setup(explicit_cfg()));
+  std::vector<uint8_t> meta;
+  CHECK_STATUS(f.engine->local_metadata(&meta), Status::kOk);
+  for (size_t cut : {kIdentityBytes + 8, kIdentityBytes + 9}) {
+    std::vector<uint8_t> shortened(meta.begin(), meta.begin() + cut);
+    PeerPtr p;
+    CHECK_STATUS(f.engine->add_peer(shortened, &p), Status::kInvalidArgument);
+  }
 }
 
 /* ---- Out-of-order completions ---- */

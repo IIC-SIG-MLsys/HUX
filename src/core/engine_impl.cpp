@@ -488,9 +488,12 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
     locality = locality_of(mine, peer_id);
     provider_meta.assign(metadata.begin() + kIdentityBytes, metadata.end());
 
-    /* Past the identity, the magic and the version. */
+    /* Past the identity, the magic and the version. The count is checked
+     * for like every field after it: the envelope test above only proves
+     * the bytes before it are there. */
     size_t at = kIdentityBytes + 8;
     auto const& u16 = u16_at;
+    if (metadata.size() < at + 2) return Status::kInvalidArgument;
     {
       uint16_t const count = u16(at);
       at += 2;
