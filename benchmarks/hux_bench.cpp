@@ -877,11 +877,19 @@ int run_client(std::string const& ip, Options const& o) {
        * go; a replay asks whether it kept up with work that arrived on
        * somebody else's schedule, and the answer is how far behind each
        * request went out -- above the floor just measured. */
-      std::vector<double> late_us, lat_us;
+      std::vector<double> late_us;
       std::vector<RequestPtr> live;
       auto const start = Clock::now();
       size_t issued = 0;
       bool ok = true;
+      /* A request that failed ends the run, as one that could not be
+       * submitted does: a replay that carried on would report keeping up
+       * with work that never arrived. */
+      auto const settle = [&](RequestPtr const& q) {
+        if (q->state() == RequestState::kSucceeded) return;
+        std::printf("a request failed -> %s\n", to_string(q->error().status));
+        ok = false;
+      };
       while (issued < trace.size() && ok) {
         TraceRecord const& r = trace[issued];
         auto const due = start + std::chrono::microseconds(r.at_us);
@@ -924,17 +932,21 @@ int run_client(std::string const& ip, Options const& o) {
             ++it;
             continue;
           }
-          lat_us.push_back(
-              std::chrono::duration<double, std::micro>(Clock::now() - now)
-                  .count());
+          settle(*it);
           it = live.erase(it);
         }
       }
       while (!live.empty()) {
         std::vector<RequestPtr> done;
         engine->poll_completions(64, &done);
-        for (auto it = live.begin(); it != live.end();)
-          it = is_terminal((*it)->state()) ? live.erase(it) : ++it;
+        for (auto it = live.begin(); it != live.end();) {
+          if (!is_terminal((*it)->state())) {
+            ++it;
+            continue;
+          }
+          settle(*it);
+          it = live.erase(it);
+        }
       }
       double const wall =
           std::chrono::duration<double>(Clock::now() - start).count();
