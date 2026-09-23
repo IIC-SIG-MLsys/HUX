@@ -88,11 +88,11 @@ struct NotifyFixture {
   std::unique_ptr<Engine> engine;
   PeerPtr peer;
 
-  bool setup(uint32_t queue_depth = 1024) {
+  bool setup(uint32_t queue_depth = 1024, MockConfig mc = {}) {
     EngineConfig cfg;
     cfg.progress = ProgressMode::kExplicit;
     cfg.notify_queue_depth = queue_depth;
-    provider = std::make_shared<MockProvider>(MockConfig{});
+    provider = std::make_shared<MockProvider>(mc);
     if (make_engine(cfg, nullptr, provider, &engine) != Status::kOk)
       return false;
     std::vector<uint8_t> meta;
@@ -150,10 +150,11 @@ HUX_TEST(oversized_notification_is_refused_up_front) {
                Status::kInvalidArgument);
 }
 
-HUX_TEST(a_full_notification_queue_is_not_acknowledged) {
+HUX_TEST(a_notification_the_peer_cannot_queue_is_refused) {
   /* Depth 1: the second notification cannot be queued, so it must not be
-   * confirmed either. Acknowledging a dropped message would tell the sender
-   * something false, and back-pressure depends on it learning the truth. */
+   * confirmed either -- acknowledging a dropped message would tell the sender
+   * something false. Nor can it go unanswered: the sender then waited for
+   * good. It is refused, and fails saying why. */
   NotifyFixture f;
   CHECK(f.setup(1));
 
@@ -163,8 +164,88 @@ HUX_TEST(a_full_notification_queue_is_not_acknowledged) {
   CHECK_STATUS(f.engine->notify(f.peer.get(), payload, &second), Status::kOk);
 
   std::vector<RequestPtr> done;
-  for (int i = 0; i < 200; ++i) f.engine->poll_completions(8, &done);
+  for (int i = 0; i < 200 && !(is_terminal(first->state()) &&
+                               is_terminal(second->state()));
+       ++i)
+    f.engine->poll_completions(8, &done);
 
   CHECK(first->state() == RequestState::kSucceeded);
-  CHECK(second->state() == RequestState::kWaitNotifyAck);
+  CHECK(second->state() == RequestState::kFailed);
+  CHECK_STATUS(second->error().status, Status::kResourceExhausted);
+  CHECK_EQ(f.engine->stats().notifications_dropped, 1u);
+}
+
+namespace {
+
+/* A notification whose acknowledgement is never coming: the peer has stopped
+ * reading. What ends it has to be something on this side. */
+bool unacknowledged(NotifyFixture* f, RequestPtr* req) {
+  MockConfig mc;
+  mc.swallow_control = true;
+  if (!f->setup(1024, mc)) return false;
+  if (f->engine->notify(f->peer.get(), {7}, req) != Status::kOk) return false;
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 20; ++i) f->engine->poll_completions(8, &done);
+  return (*req)->state() == RequestState::kWaitNotifyAck;
+}
+
+}  // namespace
+
+HUX_TEST(a_peer_that_goes_fails_the_notifications_it_never_acknowledged) {
+  NotifyFixture f;
+  RequestPtr req;
+  CHECK(unacknowledged(&f, &req));
+
+  f.provider->retire_connections();
+  std::vector<RequestPtr> done;
+  f.engine->poll_completions(8, &done);
+
+  CHECK(req->state() == RequestState::kFailed);
+  CHECK_STATUS(req->error().status, Status::kPeerDisconnected);
+  /* Handed out like any other ending. */
+  CHECK_EQ(done.size(), 1u);
+  CHECK(done.size() == 1 && done[0] == req);
+}
+
+HUX_TEST(removing_a_peer_fails_the_notifications_it_never_acknowledged) {
+  NotifyFixture f;
+  RequestPtr req;
+  CHECK(unacknowledged(&f, &req));
+
+  CHECK_STATUS(f.engine->remove_peer(f.peer), Status::kOk);
+
+  CHECK(req->state() == RequestState::kFailed);
+  CHECK_STATUS(req->error().status, Status::kPeerDisconnected);
+}
+
+HUX_TEST(a_cancelled_notification_stops_waiting) {
+  /* Its bytes are gone and cannot be called back; what cancelling can stop
+   * is the wait, and a wait that ran on regardless was a request that never
+   * ended. */
+  NotifyFixture f;
+  RequestPtr req;
+  CHECK(unacknowledged(&f, &req));
+
+  CHECK_STATUS(req->cancel(), Status::kOk);
+  std::vector<RequestPtr> done;
+  f.engine->poll_completions(8, &done);
+
+  CHECK(req->state() == RequestState::kCancelled);
+  CHECK_STATUS(req->wait(0), Status::kCancelled);
+  CHECK(done.size() == 1 && done[0] == req);
+}
+
+HUX_TEST(close_cancels_the_notifications_still_unacknowledged) {
+  /* Nothing reads an acknowledgement once the engine has stopped, so a
+   * notification left waiting through close() never ended. */
+  NotifyFixture f;
+  RequestPtr req;
+  CHECK(unacknowledged(&f, &req));
+
+  CHECK_STATUS(f.engine->close(50), Status::kOk);
+
+  CHECK(req->state() == RequestState::kCancelled);
+  RequestPtr late;
+  CHECK_STATUS(f.engine->notify(f.peer.get(), {8}, &late),
+               Status::kInvalidArgument);
 }

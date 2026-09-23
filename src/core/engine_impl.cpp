@@ -658,6 +658,14 @@ Status EngineImpl::remove_peer(PeerPtr peer) {
     std::lock_guard<std::mutex> g(mu_);
     peers_.erase(p->id());
   }
+  /* No acknowledgement is read for a peer that is no longer here. */
+  ErrorInfo ne;
+  ne.status = Status::kPeerDisconnected;
+  ne.peer_id = p->id();
+  ne.detail =
+      "the peer was removed before acknowledging; whether it arrived "
+      "is not known";
+  end_notifications(p->id(), false, ne);
   /* Every lane. Leaving one connected would hold the peer's memory
    * registered on that adapter and keep a channel open that nothing will
    * ever read again. The first failure is reported and the rest are still
@@ -942,6 +950,45 @@ bool EngineImpl::claim(RequestId id) {
   return inflight_.erase(id) > 0;
 }
 
+RequestImplPtr EngineImpl::take_notification(uint64_t id) {
+  std::lock_guard<std::mutex> g(mu_);
+  auto it = notify_pending_.find(id);
+  if (it == notify_pending_.end()) return nullptr;
+  RequestImplPtr req = std::move(it->second);
+  notify_pending_.erase(it);
+  return req;
+}
+
+void EngineImpl::end_notifications(PeerId peer, bool only_cancelled,
+                                   ErrorInfo const& e) {
+  /* A notification ends on its acknowledgement, and there are ways for that
+   * never to come: the peer goes, or is removed, or the caller stops
+   * waiting. Each of them left the request -- and the entry holding it --
+   * for good. */
+  std::vector<RequestImplPtr> ended;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    for (auto it = notify_pending_.begin(); it != notify_pending_.end();) {
+      RequestImplPtr const& r = it->second;
+      bool const match = only_cancelled ? r->cancel_requested()
+                                        : (peer == 0 || r->peer() == peer);
+      if (match) {
+        ended.push_back(r);
+        it = notify_pending_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (auto& r : ended) {
+    if (e.ok() || r->cancel_requested())
+      r->finish_cancelled();
+    else
+      r->fail(e);
+    publish(r);
+  }
+}
+
 void EngineImpl::publish(RequestImplPtr const& req) {
   /* Queued for poll_completions only once it has ended: queued first, a
    * poller could be handed a request that was not yet done. */
@@ -1183,6 +1230,9 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
   auto req =
       std::make_shared<RequestImpl>(req_id, SubOp::Kind::kWrite, 0, nullptr);
   req->set_state(RequestState::kWaitNotifyAck);
+  /* So a peer that goes, or is removed, can take its unacknowledged
+   * notifications with it rather than leave them waiting. */
+  req->set_peer(p->id());
 
   std::vector<uint8_t> body(kNotificationHeaderBytes + payload.size());
   std::vector<uint8_t> idbuf;
@@ -1193,6 +1243,11 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
 
   {
     std::lock_guard<std::mutex> g(mu_);
+    /* Checked again where close() looks for what is left. Checked only on
+     * the way in, one sent while the engine closed was recorded after close()
+     * had ended the rest, and was never ended at all. */
+    if (closed_.load(std::memory_order_acquire))
+      return Status::kInvalidArgument;
     notify_pending_[id] = req;
   }
 
@@ -1201,12 +1256,9 @@ Status EngineImpl::notify(Peer* peer, std::vector<uint8_t> const& payload,
   if (s == Status::kOk) {
     std::lock_guard<std::mutex> g(stats_mu_);
     ++stats_.notifications_sent;
-  }
-  if (s != Status::kOk) {
-    {
-      std::lock_guard<std::mutex> g(mu_);
-      notify_pending_.erase(id);
-    }
+  } else if (take_notification(id) != nullptr) {
+    /* Unless it has ended already: once recorded, a departing peer can end
+     * it. */
     ErrorInfo e;
     e.status = s;
     e.provider = p->provider()->caps().name;
@@ -1351,6 +1403,14 @@ void EngineImpl::reap_departed_peers() {
       req->fail(e);
       publish(req);
     }
+
+    ErrorInfo ne;
+    ne.status = Status::kPeerDisconnected;
+    ne.peer_id = p->id();
+    ne.detail =
+        "the peer went before acknowledging; whether it arrived is "
+        "not known";
+    end_notifications(p->id(), false, ne);
   }
 }
 
@@ -1363,6 +1423,9 @@ Status EngineImpl::progress() {
   /* Before anything is polled: a connection that has gone cannot produce the
    * completions the requests on it are waiting for. */
   reap_departed_peers();
+  /* A cancelled notification has nothing to drain: its bytes have gone, and
+   * only the wait for the acknowledgement is left to stop. */
+  end_notifications(0, true, ErrorInfo{});
 
   /* Every transport in turn. A peer next door and a peer on another machine
    * are reached over different ones, and a control message left unread on
@@ -1445,6 +1508,15 @@ Status EngineImpl::progress() {
               std::lock_guard<std::mutex> g(stats_mu_);
               ++stats_.notification_acks_failed;
             }
+          } else if (!queued && m.conn != nullptr) {
+            /* And a dropped one is refused, so the sender fails it instead
+             * of waiting for an acknowledgement that is never coming. */
+            std::vector<uint8_t> refused;
+            encode_u64(id, &refused);
+            prov->send_control(
+                m.conn,
+                static_cast<uint16_t>(ControlType::kNotificationRefused),
+                refused);
           }
         } else if (static_cast<ControlType>(m.type) ==
                    ControlType::kRegionInvalidate) {
@@ -1468,22 +1540,24 @@ Status EngineImpl::progress() {
                    ControlType::kNotificationAck) {
           uint64_t id = 0;
           if (decode_u64(m.payload, &id) != Status::kOk) continue;
-          RequestImplPtr req;
-          {
-            std::lock_guard<std::mutex> g(mu_);
-            auto it = notify_pending_.find(id);
-            if (it != notify_pending_.end()) {
-              req = it->second;
-              notify_pending_.erase(it);
-            }
-          }
+          RequestImplPtr req = take_notification(id);
           if (req != nullptr) {
             req->mark_stage(Stage::kTransferComplete);
             req->finish_success();
-            RequestPtr
-                evicted; /* declared first, so released after the guard */
-            std::lock_guard<std::mutex> g(mu_);
-            evicted = keep_completed_locked(req);
+            publish(req);
+          }
+        } else if (static_cast<ControlType>(m.type) ==
+                   ControlType::kNotificationRefused) {
+          uint64_t id = 0;
+          if (decode_u64(m.payload, &id) != Status::kOk) continue;
+          RequestImplPtr req = take_notification(id);
+          if (req != nullptr) {
+            ErrorInfo e;
+            e.status = Status::kResourceExhausted;
+            e.peer_id = m.peer;
+            e.detail = "the peer's notification queue was full";
+            req->fail(e);
+            publish(req);
           }
         }
       }
@@ -1681,6 +1755,11 @@ Status EngineImpl::close(int64_t timeout_ms) {
     progress();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+  /* Notifications still waiting for their acknowledgement are cancelled
+   * rather than waited for: they hold no memory, and with the engine stopped
+   * nothing would read the acknowledgement, so a wait on one never returned.
+   * One sent after this finds closed_ set where it would be recorded. */
+  end_notifications(0, false, ErrorInfo{});
   stopping_.store(true, std::memory_order_release);
   if (progress_thread_.joinable()) progress_thread_.join();
   return Status::kOk;

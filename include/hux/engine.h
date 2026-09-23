@@ -65,7 +65,7 @@ struct EngineStats {
    * outright is counted here. */
   uint64_t notifications_sent = 0;
   uint64_t notifications_received = 0;
-  uint64_t notifications_dropped = 0; /* queue full, so not acknowledged */
+  uint64_t notifications_dropped = 0; /* queue full, so refused */
   uint64_t ready_handoffs_sent = 0;
   /* Handoffs the transport refused. The write itself succeeded -- the bytes
    * are on the peer -- but the peer was never told, so a consumer waiting
@@ -181,7 +181,10 @@ class Engine {
                         TransferOptions const& opts, RequestPtr* out) = 0;
 
   /* Success means the peer engine queued it -- not that the peer application
-   * handled it, and not that any data transfer completed. */
+   * handled it, and not that any data transfer completed. A peer whose queue
+   * is full refuses it (kResourceExhausted). A peer that goes, or is removed,
+   * before acknowledging fails it with kPeerDisconnected, and whether it
+   * arrived is then not known. Cancelling stops only the wait. */
   virtual Status notify(Peer* peer, std::vector<uint8_t> const& payload,
                         RequestPtr* out) = 0;
   virtual Status poll_notifications(uint32_t max_items,
@@ -205,7 +208,9 @@ class Engine {
   virtual std::string describe() const = 0;
 
   /* Stops accepting work and drains. On timeout it keeps the resources and
-   * reports the incomplete state; it never destroys objects still under DMA. */
+   * reports the incomplete state; it never destroys objects still under DMA.
+   * Notifications still unacknowledged once transfers have drained are
+   * cancelled. */
   virtual Status close(int64_t timeout_ms) = 0;
 };
 

@@ -38,6 +38,10 @@ enum class ControlType : uint16_t {
    * having accepted them, so the acknowledgement is what the sender's request
    * actually waits on. */
   kNotificationAck = 4,
+  /* The peer did not queue a notification: its queue was full. Without it
+   * the sender waited for an acknowledgement that was never coming. A peer
+   * that predates it ignores it, as it ignores any type it does not know. */
+  kNotificationRefused = 5,
 };
 
 /* Body of a kNotification: an id the sender chose, followed by its payload.

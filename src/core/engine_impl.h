@@ -234,6 +234,13 @@ class EngineImpl : public Engine {
   bool claim(RequestId id);
   /* Queues an ended request for poll_completions. Takes mu_. */
   void publish(RequestImplPtr const& req);
+  /* A notification awaiting its acknowledgement, taken out of
+   * notify_pending_ -- which claims it, as inflight_ does a transfer. */
+  RequestImplPtr take_notification(uint64_t id);
+  /* Ends the notifications still awaiting acknowledgement: those to a peer
+   * (every peer for 0), or only those whose caller cancelled them. Failed
+   * with e, or cancelled if e is ok or the caller asked. */
+  void end_notifications(PeerId peer, bool only_cancelled, ErrorInfo const& e);
   void keep_ready_locked(ReadyEventPtr ev);
   std::atomic<uint64_t> completions_dropped_{0};
   std::atomic<uint64_t> ready_events_dropped_{0};

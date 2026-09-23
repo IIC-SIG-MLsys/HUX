@@ -108,9 +108,10 @@ HUX_TEST(notification_counters_distinguish_delivered_from_dropped) {
   CHECK_EQ(st.notifications_sent, 2u);
   CHECK_EQ(st.notifications_received, 1u);
   CHECK_EQ(st.notifications_dropped, 1u);
-  /* And the counters match the outcomes: only the queued one succeeded. */
+  /* And the counters match the outcomes: only the queued one succeeded, and
+   * the dropped one was refused rather than left waiting. */
   CHECK(a->state() == RequestState::kSucceeded);
-  CHECK(b->state() == RequestState::kWaitNotifyAck);
+  CHECK(b->state() == RequestState::kFailed);
 }
 
 HUX_TEST(peak_inflight_records_the_high_water_mark) {

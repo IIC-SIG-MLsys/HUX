@@ -43,6 +43,10 @@ struct MockConfig {
    * peer is never told, so the request succeeds and only a counter says
    * otherwise. */
   bool fail_control = false;
+  /* Takes control messages and never delivers them, the way a peer that has
+   * stopped reading does: a notification then waits for an acknowledgement
+   * that is not coming. */
+  bool swallow_control = false;
   Status subop_error = Status::kTransportError;
   /* Actually move bytes so tests can verify content end to end. */
   bool move_data = true;
@@ -158,6 +162,7 @@ class MockProvider : public TransportProvider {
      * through, because a reply has to go back the way it came -- dropping it
      * here would make replies untestable without hardware. */
     if (cfg_.fail_control) return Status::kTransportError;
+    if (cfg_.swallow_control) return Status::kOk;
     control_.push_back(ControlMessage{0, type, payload, conn});
     return Status::kOk;
   }
