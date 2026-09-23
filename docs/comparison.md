@@ -168,6 +168,19 @@ Against UCCL, HUX keeps the tail: 4.1x lower at p90 and 2.2x at p99. The 54x
 reported earlier came from 600 samples, in which UCCL's p99 was 21 ms; with
 3000 its p99 sits at 3.2-4.0 ms in every pass.
 
+What this does not test is UCCL's own claim about congestion. That belongs to
+UCCL-collective, its replacement for NCCL, measured against NCCL, and comes
+from spraying packets in software across up to 256 network paths with
+latency-based or receiver-driven congestion control and selective-repeat
+recovery -- a remedy for flows colliding on one path through a multi-path
+fabric. The arm here is UCCL-P2P, the point-to-point engine comparable to
+HUX, whose own published comparison puts it level with NIXL over UCX. And
+this path gives spraying nothing to work with: one adapter each end, since
+the second is unreachable on these hosts (which also turns off UCCL-P2P's
+default use of several adapters), so one path, with the bottleneck in the
+receiving host's PCIe rather than in the network. So UCCL trailing UCX here
+says nothing either way about congestion in a fabric.
+
 Against UCX's put it does not: UCX's p99 is 4.3x lower and its median 5%.
 
 The tails that blow up belong to the protocols that need the receiving
