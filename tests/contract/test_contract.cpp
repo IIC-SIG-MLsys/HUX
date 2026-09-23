@@ -751,3 +751,28 @@ HUX_TEST(close_drains_then_succeeds) {
   RequestPtr req2;
   CHECK(f.engine->read(f.peer.get(), local, remote, {}, &req2) != Status::kOk);
 }
+
+HUX_TEST(a_request_that_fails_at_once_is_reported_once) {
+  /* Nothing could be posted. The call returned the error and handed the
+   * request back failed, and the same failure was already queued for
+   * poll_completions: reported twice, so a caller that releases its context
+   * on each released it twice. It is reported through the request alone. */
+  EngineConfig cfg = explicit_cfg();
+  MockConfig mock;
+  mock.reject_all = true;
+  Fixture f;
+  CHECK(f.setup(cfg, mock));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 4096, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kOk);
+  CHECK(req != nullptr && req->state() == RequestState::kFailed);
+  CHECK(req->wait(0) != Status::kOk);
+
+  std::vector<RequestPtr> done;
+  f.engine->poll_completions(16, &done);
+  CHECK(done.size() == 1 && done[0] == req);
+  CHECK_EQ(f.engine->stats().requests_failed, 1u);
+}

@@ -168,7 +168,12 @@ class Engine {
   /* Transfers, asynchronous by default. The scalar forms are single-segment
    * shortcuts over the same submission path. One vector operation targets one
    * peer; segments pair up by index with equal lengths. A transfer of no
-   * bytes at all is refused with kInvalidArgument. */
+   * bytes at all is refused with kInvalidArgument.
+   *
+   * kOk hands back a request that ends exactly once, and is queued for
+   * poll_completions when it does -- even one that failed before anything
+   * was posted, whose error its wait() reports. Any other return accepted
+   * nothing and leaves out untouched. */
   virtual Status read(Peer* peer, RegionView const& local,
                       RegionView const& remote, TransferOptions const& opts,
                       RequestPtr* out) = 0;

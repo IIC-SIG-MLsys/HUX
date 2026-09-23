@@ -1235,9 +1235,14 @@ Status EngineImpl::submit_vector(Peer* peer,
       pending_.push_back(std::move(ps));
     }
   }
+  /* Admitted, so it ends through the request like any other, and the call
+   * says kOk however soon it failed. Returning the error as well reported
+   * one failure twice -- here, and again in poll_completions, where it had
+   * already been queued -- and a caller that released its context on both
+   * released it twice. With a lane still waiting its turn it was worse: the
+   * error came back now and the ending later. */
   *out = req;
-  if (req->accepted_subops() > 0 || req->error().ok()) return Status::kOk;
-  return req->error().status;
+  return Status::kOk;
 }
 
 Status EngineImpl::read(Peer* peer, RegionView const& local,
