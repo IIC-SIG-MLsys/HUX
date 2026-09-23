@@ -229,6 +229,11 @@ class EngineImpl : public Engine {
    * of a request that cannot succeed and nothing is outstanding. */
   void part_done(RequestImplPtr const& req);
   void end_abandoned(RequestImplPtr const& req);
+  /* A request is ended by whoever takes it out of inflight_, and only by
+   * that one: true for the caller that did. */
+  bool claim(RequestId id);
+  /* Queues an ended request for poll_completions. Takes mu_. */
+  void publish(RequestImplPtr const& req);
   void keep_ready_locked(ReadyEventPtr ev);
   std::atomic<uint64_t> completions_dropped_{0};
   std::atomic<uint64_t> ready_events_dropped_{0};

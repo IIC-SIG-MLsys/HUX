@@ -905,6 +905,11 @@ void EngineImpl::part_done(RequestImplPtr const& req) {
 }
 
 void EngineImpl::end_abandoned(RequestImplPtr const& req) {
+  /* Ended by whoever takes it out of inflight_, here as on every other
+   * path. A submitter giving up and the peer reaper could both reach the
+   * same request, and each counted it and queued it for poll_completions --
+   * so a caller got it twice, and freed its context twice. */
+  if (!claim(req->id())) return;
   /* Nothing of it is in flight, so local DMA has stopped -- or never
    * started -- and FailedSafe or CancelledSafe is true. Counted before it
    * is released, as every other ending is. */
@@ -916,16 +921,24 @@ void EngineImpl::end_abandoned(RequestImplPtr const& req) {
     else
       ++stats_.requests_failed;
   }
-  RequestPtr evicted; /* released after mu_, see keep_completed_locked */
-  {
-    std::lock_guard<std::mutex> g(mu_);
-    inflight_.erase(req->id());
-    evicted = keep_completed_locked(req);
-  }
   if (cancelled)
     req->finish_cancelled();
   else
     req->fail(req->error());
+  publish(req);
+}
+
+bool EngineImpl::claim(RequestId id) {
+  std::lock_guard<std::mutex> g(mu_);
+  return inflight_.erase(id) > 0;
+}
+
+void EngineImpl::publish(RequestImplPtr const& req) {
+  /* Queued for poll_completions only once it has ended: queued first, a
+   * poller could be handed a request that was not yet done. */
+  RequestPtr evicted; /* released after mu_, see keep_completed_locked */
+  std::lock_guard<std::mutex> g(mu_);
+  evicted = keep_completed_locked(req);
 }
 
 /* One scheduling pass: every waiting request gets a turn of at most a
@@ -1289,6 +1302,8 @@ void EngineImpl::reap_departed_peers() {
      * that is no longer there. */
     p->bump_epoch();
 
+    /* Taking a request out of inflight_ is what claims it: whatever else was
+     * about to end one of these finds it gone and leaves it alone. */
     std::vector<RequestImplPtr> stranded;
     {
       std::lock_guard<std::mutex> g(mu_);
@@ -1316,14 +1331,13 @@ void EngineImpl::reap_departed_peers() {
       e.may_have_modified_target = req->kind() == SubOp::Kind::kWrite;
       e.detail = "peer disconnected while the request was in flight";
       req->seal_accepted();
-      req->fail(e);
-      RequestPtr evicted;
+      /* Counted before it is released, as every other ending is. */
       {
-        std::lock_guard<std::mutex> g(mu_);
-        evicted = keep_completed_locked(req);
+        std::lock_guard<std::mutex> g(stats_mu_);
+        ++stats_.requests_failed;
       }
-      std::lock_guard<std::mutex> g(stats_mu_);
-      ++stats_.requests_failed;
+      req->fail(e);
+      publish(req);
     }
   }
 }
@@ -1502,6 +1516,9 @@ Status EngineImpl::progress() {
     }
     bool last = req->on_subop_complete(ev);
     if (!last) continue;
+    /* Ended by whoever takes it out of inflight_: the reaper may have taken
+     * it since it was looked up. */
+    if (!claim(ev.request)) continue;
 
     /* Counted before the request is released, in all three cases.
      *
@@ -1572,12 +1589,7 @@ Status EngineImpl::progress() {
       }
       req->finish_success();
     }
-    RequestPtr evicted;
-    {
-      std::lock_guard<std::mutex> g(mu_);
-      inflight_.erase(ev.request);
-      evicted = keep_completed_locked(req);
-    }
+    publish(req);
   }
   return polled;
 }
