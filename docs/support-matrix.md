@@ -60,7 +60,7 @@ above transfers to it.
 
 | Provider | State | Notes |
 | --- | --- | --- |
-| Native RDMA | measured | Multiple queue pairs, congestion control, per-queue accounting, NIC affinity |
+| Native RDMA | measured | Multiple queue pairs, congestion control, per-queue accounting, NIC affinity, out-of-order placement on mlx5 |
 | Same-process | measured | Copies directly, reports those copies |
 | UCX | measured, with a caveat | Works under `UCX_TLS=self,sm`; default transport selection aborts inside the library on this host (see [ucx.md](ucx.md)) |
 | Choosing among them by where the peer is | measured | One engine holds several in preference order; a peer is reached over the first that suits its location and that the peer also offers ([decision](decisions/0003-path-selection.md)) |
@@ -96,6 +96,7 @@ which port was wrong. `ip route get <peer>` names the right one.
 | Write-side ready handoff with region and span | RDMA, loopback |
 | Acknowledged notifications | RDMA, loopback |
 | NIC selection by proximity | RDMA, two NICs on separate NUMA nodes |
+| Out-of-order placement of reads and writes | RDMA over RoCE v2, ConnectX-5 on PCIe x8 into ConnectX-5 on x4, host memory, 20-minute soak with every byte verified ([comparison](comparison.md#with-out-of-order-placement)) |
 | Registration reuse | mock and RDMA |
 | Python bindings | mock |
 

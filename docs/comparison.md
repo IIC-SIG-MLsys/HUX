@@ -191,7 +191,9 @@ default use of several adapters), so one path, with the bottleneck in the
 receiving host's PCIe rather than in the network. So UCCL trailing UCX here
 says nothing either way about congestion in a fabric.
 
-Against UCX's put it does not: UCX's p99 is 4.3x lower and its median 5%.
+Against UCX's put it did not, with the standard ordering it used then:
+UCX's p99 was 4.3x lower and its median 5%. With out-of-order placement,
+[below](#with-out-of-order-placement), the p99 is within 6%.
 
 The tails that blow up belong to the protocols that need the receiving
 host's CPU -- UCX's tagged rendezvous, 1.2-4.1 ms at p99 in every pass while
@@ -257,33 +259,80 @@ throughput (median 655-728 us), so that is not the fix.
 
 So, attributed: with the same ordering semantics HUX and UCX lose the same
 packets and show the same tail, and UCX's median is about 5% ahead. UCX's
-default advantage on this path is an adapter feature HUX does not yet turn
-on. rdma-core exposes it as `MLX5DV_QP_CREATE_OOO_DP`; it has to be set on
-both ends, and it relaxes the order in which a message's bytes land. HUX's
-completion contract does not depend on that order, but two things would have
-to be settled first: an application polling the last byte of a buffer would
-break, and HUX's inference that a signalled completion covers the unsignalled
-ones before it would need to be shown to still hold.
+advantage on this path was an adapter feature HUX did not turn on.
+
+### With out-of-order placement
+
+HUX now turns it on where both adapters can ([mlx5_ordering.h](
+../src/transport/rdma/mlx5_ordering.h)). rdma-core's
+`MLX5DV_QP_CREATE_OOO_DP` could not be used for it: that flag asks for
+out-of-order sends and receives as well, and the kernel refuses it on an
+adapter without them, which ConnectX-5 is. What these adapters have is
+out-of-order reads and writes, which is what UCX uses. So a queue pair is
+created and taken to INIT through verbs, then to RTR and RTS by the
+adapter's own commands, which carry the field; every other value is written
+as the kernel writes it for `ibv_modify_qp`, and the context is read back
+afterwards, the connection refused unless it holds what was asked. Each end
+offers the feature in the handshake and a connection uses it only when both
+do, so a peer that does not know about it connects as before.
+
+The x8 sender into the x4 receiver again, six passes of 3000 alternating the
+two settings, the adapters' counters read around each run:
+
+| x8 -> x4 | p50 us | p90 us | p99 us | p99 of each pass | packets lost per run |
+| --- | ---: | ---: | ---: | --- | --- |
+| out-of-order | 362.9 | 370.2 | **380.9** | 381 379 378 381 383 381 | 0 in every run |
+| standard | 362.4 | 375.6 | 1480.2 | 390 1503 1473 1471 1508 1488 | 961-1020 |
+
+Nothing lost, and the tail gone. The receiver counted 1025.7 write requests
+per write with it, one per packet, and 1.0 without. Rate-matched, x4 into
+x4, four passes, neither setting lost anything: medians 376.1 and 373.4 us,
+p99 396.8 and 405.7. The per-packet headers cost about 3 us, under 1%, where
+there is nothing to recover from.
+
+Against UCX, alternating the two in one hour, six passes:
+
+| | p50 us | p90 us | p99 us | p99 of each pass |
+| --- | ---: | ---: | ---: | --- |
+| HUX write | 363.1 | 374.1 | 387.4 | 381 407 379 389 386 405 |
+| UCX put | 345.2 | 356.6 | 364.9 | 365 365 363 365 366 366 |
+
+The p99 is 6% apart where it was 4.3x. What remains is the median's 5%,
+which the ordering never explained.
+
+What an application has to know: the bytes of one message can land in any
+order, so nothing may watch the last byte of a buffer to learn that the rest
+is there -- arrival is what the completion, or the ready handoff, says.
+Completions themselves are unchanged. They still arrive in the order work
+was posted, so a signalled completion still covers the unsignalled ones
+before it; `tests/manual/soak.cpp`, which verifies every byte in both
+directions, ran over this path with the feature on for 20 minutes -- three
+peers, four threads, 4 KiB to 4 MiB interleaved: 265,729 rounds and 264 GiB,
+every byte verified and none wrong, the receiver counting 46.9 million write
+requests, one per packet. `RdmaConfig::out_of_order = false` (or
+`hux-bench --ordering standard`) keeps the standard ordering.
 
 ### Short writes behind long ones
 
 16 KiB writes interleaved with 4 MiB ones, eight outstanding, 2000 of each,
-three passes:
+three passes, HUX with out-of-order placement:
 
 | | short, alone | short, mixed p50 | short, mixed p99 | long, mixed p50 | Gb/s |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| HUX, no control | 47.9 | 5890.6 | 6232.6 | 6291.8 | 22.46 |
-| HUX, 1 MiB window | 38.5 | **23.4** | **40.2** | 10963.3 | 21.73 |
-| UCX | 39.6 | 5653.1 | 5838.8 | 5653.4 | 23.94 |
-| UCX, standard ordering | 41.0 | 6041.3 | 6323.2 | 6042.1 | 22.31 |
-| UCX, second endpoint for short | 39.6 | **24.0** | **39.7** | 11085.4 | 24.24 |
+| HUX, no control | 48.4 | 4958.7 | 5654.3 | 5690.5 | 24.06 |
+| HUX, 1 MiB window | 62.9 | **23.7** | **32.7** | 10576.1 | 23.06 |
+| UCX | 40.0 | 5491.1 | 5564.5 | 5491.2 | 24.53 |
+| UCX, standard ordering | 42.8 | 5952.2 | 5994.7 | 5952.1 | 22.68 |
+| UCX, second endpoint for short | 39.6 | **23.7** | **34.7** | 10954.3 | 24.54 |
 
 Without a mitigation both are blocked alike, the short write waiting behind
-about 5.7 ms of long ones. HUX's window takes it to 23 us on one connection;
+about 5 ms of long ones. HUX's window takes it to 24 us on one connection;
 UCX gets the same by giving short messages an endpoint of their own. So what
 HUX offers here is that the application does not have to split its traffic
-across connections, not that it goes faster -- UCX moved 12% more over the
-same mix with its second endpoint, again from losing no packets.
+across connections, not that it goes faster: UCX moved 6% more over the mix
+with its second endpoint than HUX with its window. With the standard
+ordering, the last time this was measured, that gap was 12%, and HUX with no
+control moved 22.46 Gb/s where it now moves 24.06.
 
 ### Still to do
 

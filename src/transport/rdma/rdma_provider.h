@@ -91,6 +91,14 @@ struct RdmaConfig {
    * ProviderCaps::relative_capacity; the provider cannot measure this for
    * itself, so the caller states it. */
   double relative_capacity = 1.0;
+  /* Let RDMA reads and writes place their packets out of order, on a
+   * connection whose two adapters both can (mlx5, RoCE v2; see
+   * mlx5_ordering.h). A lost packet then costs its own retransmission
+   * rather than everything sent after it. Completions still arrive in the
+   * order work was posted; what is no longer ordered is the landing of a
+   * message's bytes, so nothing may infer arrival by watching the last byte
+   * of a buffer -- arrival is what the ready handoff says. */
+  bool out_of_order = true;
 };
 
 /* Wire format of the connection handshake. A major mismatch is refused rather
@@ -101,7 +109,13 @@ struct RdmaConfig {
  * layout changed, so an older peer must be refused rather than left to
  * misread it. */
 constexpr uint16_t kWireMajor = 2;
-constexpr uint16_t kWireMinor = 0;
+/* 1: after the endpoints, each end sends a feature word and reads the
+ * peer's -- but only to a peer at minor 1 or later, which says so in the
+ * endpoints it sent. An older peer is sent nothing it would not read, and
+ * the connection runs as it always did. */
+constexpr uint16_t kWireMinor = 1;
+/* Feature bits. Each is used only when both ends set it. */
+constexpr uint32_t kFeatureOooRw = 1u << 0;
 
 /* Identifies a request's sub-operation, so a completion can name what it
  * belongs to. */
@@ -147,6 +161,8 @@ class RdmaProvider : public TransportProvider {
   ProviderStats stats() const override;
   /* Control messages queued for peers that have not taken them yet. */
   size_t queued_control_messages() const;
+  /* Live connections whose two ends place reads and writes out of order. */
+  size_t out_of_order_connections() const;
   std::string describe() const override;
 
   Status register_region(void* addr, uint64_t length, DeviceId device,
@@ -207,6 +223,13 @@ class RdmaProvider : public TransportProvider {
   ibv_gid local_gid_{};
   int gid_index_ = 0;
   Proximity nic_proximity_ = Proximity::kUnknown;
+  /* Whether this end offers out-of-order placement, and when it does not,
+   * why. Shown by describe(): a connection without it looks exactly like one
+   * with it until a packet is lost. */
+  bool ooo_rw_ = false;
+  char const* ooo_why_ = "off";
+  uint32_t log_max_msg_ = 30;
+  uint8_t ooo_hop_limit_ = 64;
   int listen_fd_ = -1;
   uint16_t listen_port_ = 0;
   std::string local_ip_;
@@ -342,6 +365,9 @@ class RdmaConnection : public ProviderConnection {
    * traffic keeps moving when the data path is congested or broken. */
   std::atomic<bool> peer_closed_{false};
   int ctrl_fd = -1;
+  /* Both ends place reads and writes out of order. Fixed before the
+   * connection is handed out. */
+  bool ooo_rw = false;
   /* Outbound control messages never wait on the socket: they are produced
    * on the completion path, which drives every transfer on the engine. */
   ControlOutbox outbox;

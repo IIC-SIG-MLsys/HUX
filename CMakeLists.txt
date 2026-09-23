@@ -60,11 +60,24 @@ if(HUX_ENABLE_RDMA)
   endif()
   add_library(hux_transport_rdma
     src/transport/rdma/rdma_provider.cpp
+    src/transport/rdma/mlx5_ordering.cpp
     src/transport/cc/controller.cpp)
   target_include_directories(hux_transport_rdma PUBLIC ${IBVERBS_INCLUDE_DIR})
   target_link_libraries(hux_transport_rdma PUBLIC hux_core ${IBVERBS_LIBRARY})
   target_compile_options(hux_transport_rdma PRIVATE -Wall -Wextra)
   message(STATUS "HUX: RDMA provider enabled (${IBVERBS_LIBRARY})")
+
+  # mlx5 direct verbs, for out-of-order placement on adapters that have it.
+  # Optional: without it the provider runs every queue pair with the
+  # standard ordering, and describe() says it was built that way.
+  find_library(MLX5_LIBRARY NAMES mlx5)
+  if(EXISTS "${IBVERBS_INCLUDE_DIR}/infiniband/mlx5dv.h" AND MLX5_LIBRARY)
+    target_compile_definitions(hux_transport_rdma PRIVATE HUX_HAVE_MLX5DV)
+    target_link_libraries(hux_transport_rdma PUBLIC ${MLX5_LIBRARY})
+    message(STATUS "HUX: mlx5 direct verbs found; out-of-order placement available")
+  else()
+    message(STATUS "HUX: mlx5 direct verbs not found; standard ordering only")
+  endif()
 
 
 endif()

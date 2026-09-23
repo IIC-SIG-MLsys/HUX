@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "control/control_message.h"
+#include "transport/rdma/mlx5_ordering.h"
 
 namespace hux {
 namespace {
@@ -475,7 +476,9 @@ Status RdmaProvider::open_device() {
     return Status::kDeviceError;
   }
 
-  ctx_ = ibv_open_device(chosen);
+  bool commands = false;
+  char const* no_commands = "";
+  ctx_ = mlx5_open_device(chosen, &commands, &no_commands);
   ibv_free_device_list(list);
   if (ctx_ == nullptr) return Status::kDeviceError;
 
@@ -498,6 +501,27 @@ Status RdmaProvider::open_device() {
   }
   if (ibv_query_gid(ctx_, cfg_.ib_port, gid_index_, &local_gid_) != 0)
     return Status::kDeviceError;
+
+  /* Out-of-order placement is offered where this end can do it; whether a
+   * connection uses it is settled with each peer. RoCE v2 over IPv4 only:
+   * the address path it is brought up with is the Ethernet one, its hop
+   * limit is taken the way the kernel takes it for IPv4, and nothing here
+   * has run over an InfiniBand fabric. */
+  std::string v4;
+  if (!cfg_.out_of_order) {
+    ooo_why_ = "off";
+  } else if (!commands) {
+    ooo_why_ = no_commands;
+  } else if (port_attr_.link_layer != IBV_LINK_LAYER_ETHERNET ||
+             !gid_is_roce_v2(ibv_get_device_name(ctx_->device), cfg_.ib_port,
+                             gid_index_) ||
+             !gid_ipv4(local_gid_, &v4)) {
+    ooo_why_ = "not RoCE v2 over IPv4";
+  } else {
+    ooo_rw_ = mlx5_ooo_rw_supported(ctx_, &log_max_msg_, &ooo_why_) &&
+              mlx5_kernel_path(ibv_get_device_name(ctx_->device), cfg_.ib_port,
+                               &ooo_hop_limit_, &ooo_why_);
+  }
 
   pd_ = ibv_alloc_pd(ctx_);
   if (pd_ == nullptr) return Status::kDeviceError;
@@ -557,6 +581,16 @@ size_t RdmaProvider::queued_control_messages() const {
   return n;
 }
 
+size_t RdmaProvider::out_of_order_connections() const {
+  size_t n = 0;
+  std::lock_guard<std::mutex> g(conn_mu_);
+  for (auto const& w : ctrl_conns_) {
+    auto c = w.lock();
+    if (c != nullptr && c->ooo_rw) ++n;
+  }
+  return n;
+}
+
 std::string RdmaProvider::describe() const {
   std::ostringstream o;
   o << "{"
@@ -576,6 +610,11 @@ std::string RdmaProvider::describe() const {
     << "\"rq_depth\":" << cfg_.rq_depth << ','
     << "\"cq_depth\":" << cfg_.cq_depth << ','
     << "\"signal_period\":" << cfg_.signal_period
+    << ','
+    /* Offered by this end, and how many live connections have it: both
+     * ends have to offer it for a connection to use it. */
+    << "\"out_of_order\":\"" << (ooo_rw_ ? "offered" : ooo_why_) << "\","
+    << "\"out_of_order_connections\":" << out_of_order_connections()
     << ','
     /* Control messages written but not yet taken by the peer. Non-zero at
      * the end of a run means the peer was not reading its control channel
@@ -645,6 +684,16 @@ Status RdmaProvider::local_metadata(std::vector<uint8_t>* out) const {
   out->insert(out->end(), cfg_.advertise_ip.begin(), cfg_.advertise_ip.end());
   return Status::kOk;
 }
+
+/* What every queue pair is brought up with, through verbs or through the
+ * adapter's commands alike, so the two ways cannot drift apart. */
+namespace {
+constexpr uint8_t kRdAtomic = 16;
+constexpr uint8_t kMinRnrTimer = 12;
+constexpr uint8_t kAckTimeout = 14;
+constexpr uint8_t kRetryCount = 7;
+constexpr uint8_t kRnrRetry = 7;
+}  // namespace
 
 /* Brings a fresh QP through RESET -> INIT -> RTR -> RTS. Each transition is
  * checked: a QP left in the wrong state fails later at post time, where the
@@ -733,6 +782,22 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
     return vs;
   }
 
+  /* Features, with a peer that exchanges them. Both ends decide from the
+   * same two words, so they cannot come out differently. */
+  uint32_t peer_features = 0;
+  if (peers[0].minor >= 1) {
+    std::vector<uint8_t> mine;
+    put_u32(&mine, ooo_rw_ ? kFeatureOooRw : 0u);
+    uint8_t theirs[4];
+    if (!send_all(sock, mine.data(), mine.size()) ||
+        !recv_all(sock, theirs, sizeof(theirs))) {
+      destroy_all();
+      return Status::kPeerDisconnected;
+    }
+    peer_features = get_u32(theirs);
+  }
+  bool const ooo = ooo_rw_ && (peer_features & kFeatureOooRw) != 0;
+
   /* Each queue pair is taken through RESET -> INIT -> RTR -> RTS against its
    * own peer. One left in the wrong state fails later at post time, where the
    * cause is much harder to see. */
@@ -754,6 +819,34 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
       return Status::kDeviceError;
     }
 
+    if (ooo) {
+      /* The same transitions with the same values as below, made by the
+       * adapter's own commands so they can carry the ordering. A failure is
+       * returned rather than retried through verbs: the peer is bringing up
+       * its end out of order, and a connection whose two ends disagree is
+       * not one this has been run on. */
+      Mlx5Connect m;
+      m.remote_qpn = peer.qp_num;
+      m.path_mtu = std::min<uint32_t>(my_mtu, peer.mtu);
+      m.port = cfg_.ib_port;
+      m.sgid_index = static_cast<uint8_t>(gid_index_);
+      m.hop_limit = ooo_hop_limit_;
+      std::memcpy(m.dgid, peer.gid, 16);
+      m.max_dest_rd_atomic = kRdAtomic;
+      m.max_rd_atomic = kRdAtomic;
+      m.min_rnr_timer = kMinRnrTimer;
+      m.timeout = kAckTimeout;
+      m.retry_cnt = kRetryCount;
+      m.rnr_retry = kRnrRetry;
+      m.log_max_msg = log_max_msg_;
+      Status const ms = mlx5_connect_ooo_rw(qp, m);
+      if (ms != Status::kOk) {
+        destroy_all();
+        return ms;
+      }
+      continue;
+    }
+
     std::memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTR;
     /* The smaller of the two MTUs. Path MTU is not negotiated in hardware,
@@ -762,8 +855,8 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
     attr.path_mtu = static_cast<ibv_mtu>(std::min<uint32_t>(my_mtu, peer.mtu));
     attr.dest_qp_num = peer.qp_num;
     attr.rq_psn = 0;
-    attr.max_dest_rd_atomic = 16;
-    attr.min_rnr_timer = 12;
+    attr.max_dest_rd_atomic = kRdAtomic;
+    attr.min_rnr_timer = kMinRnrTimer;
     attr.ah_attr.port_num = cfg_.ib_port;
     attr.ah_attr.sl = 0;
     attr.ah_attr.src_path_bits = 0;
@@ -787,11 +880,11 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
 
     std::memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTS;
-    attr.timeout = 14;
-    attr.retry_cnt = 7;
-    attr.rnr_retry = 7;
+    attr.timeout = kAckTimeout;
+    attr.retry_cnt = kRetryCount;
+    attr.rnr_retry = kRnrRetry;
     attr.sq_psn = 0;
-    attr.max_rd_atomic = 16;
+    attr.max_rd_atomic = kRdAtomic;
     if (ibv_modify_qp(qp, &attr,
                       IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
                           IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
@@ -803,6 +896,7 @@ Status RdmaProvider::build_connection(int sock, ProviderConnectionPtr* out) {
 
   auto conn =
       std::make_shared<RdmaConnection>(this, std::move(qps), std::move(peers));
+  conn->ooo_rw = ooo;
   /* Hand the socket to the connection instead of closing it; it becomes the
    * control channel. Non-blocking so polling never stalls progress. */
   int flags = ::fcntl(sock, F_GETFL, 0);

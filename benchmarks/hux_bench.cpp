@@ -68,6 +68,11 @@ uint16_t g_meta_port = 18516;
 struct Options {
   uint32_t qp = 1;
   std::string cc = "off";
+  /* "standard" keeps every queue pair in the standard ordering even where
+   * both adapters could place out of order, which is the comparison point
+   * for the feature. Both ends have to offer it, so either side can turn it
+   * off. */
+  std::string ordering = "auto";
   /* The address peers dial back on, which across machines also selects the
    * port and the GID. It has to be the address the kernel routes to the peer:
    * a host with two ports on one subnet will otherwise connect and then fail
@@ -348,6 +353,7 @@ Status make_rdma_providers(Options const& o, RdmaConfig base,
   if (ips.empty()) ips.push_back(o.local_ip);
   for (size_t i = 0; i < ips.size(); ++i) {
     RdmaConfig cfg = base;
+    cfg.out_of_order = o.ordering != "standard";
     cfg.advertise_ip = ips[i];
     cfg.nic_ordinal = static_cast<uint32_t>(i);
     cfg.relative_capacity = i < o.weights.size() ? o.weights[i] : 1.0;
@@ -1308,7 +1314,8 @@ int main(int argc, char** argv) {
                 " [--gpu N] [--port P] [--inflight N] [--mix a,b]\n"
                 "       [--peers N] [--segments N] [--produce N]\n"
                 "       [--produce-repeats N] [--trace FILE]\n"
-                "       [--start-at UNIX_MS] [--for-seconds S]\n"
+                "       [--start-at UNIX_MS] [--for-seconds S]"
+                " [--ordering auto|standard]\n"
                 "       --local takes a list: one adapter per address, with"
                 " --weights w1,w2\n",
                 argv[0]);
@@ -1369,6 +1376,7 @@ int main(int argc, char** argv) {
     else if (k == "--port")
       g_meta_port = static_cast<uint16_t>(std::atoi(argv[i + 1]));
     else if (k == "--cc") o.cc = argv[i + 1];
+    else if (k == "--ordering") o.ordering = argv[i + 1];
     else if (k == "--iters") o.iters = std::atoi(argv[i + 1]);
     else if (k == "--sizes") {
       o.sizes.clear();
@@ -1376,6 +1384,11 @@ int main(int argc, char** argv) {
       for (char* tok = std::strtok(s, ","); tok; tok = std::strtok(nullptr, ","))
         o.sizes.push_back(std::strtoull(tok, nullptr, 10));
     }
+  }
+  if (o.ordering != "auto" && o.ordering != "standard") {
+    std::printf("--ordering takes auto or standard, not %s\n",
+                o.ordering.c_str());
+    return 2;
   }
 
   if (std::strcmp(argv[1], "server") == 0) return run_server(o);

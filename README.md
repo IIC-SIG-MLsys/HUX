@@ -68,7 +68,8 @@ RDMA, host to host and device to device, verified byte for byte in both
 directions with no buffer owned by the library anywhere on the path.
 
 In place: the public API, the completion contract, the provider contract, an
-RDMA provider with several queue pairs and per-queue accounting, a same-host
+RDMA provider with several queue pairs and per-queue accounting and
+out-of-order placement on mlx5 adapters, a same-host
 IPC path, a same-process path, a UCX provider, selection between them by
 where the peer is, device dependencies, the write-side ready handoff, an
 engine-level control channel, acknowledged notifications, copy accounting,
@@ -220,6 +221,12 @@ tests:
 * **One queue pair completing says nothing about the others.** Ordering holds
   within a queue pair, not across them, so arrival is announced only after
   every sub-operation has completed.
+* **The last byte landing says nothing about the rest.** Where both adapters
+  can, reads and writes place their packets out of order, so one lost packet
+  costs its own retransmission instead of everything after it. A message's
+  bytes then land in any order: arrival is what the completion or the ready
+  handoff says, never a flag at the end of a buffer
+  ([decision](docs/decisions/0004-out-of-order-placement.md)).
 * **Every queue pair used needs its own signalling anchor.** Completions are
   the only way posted entries are reclaimed, and a queue left without one
   stalls with nothing to wait for.
