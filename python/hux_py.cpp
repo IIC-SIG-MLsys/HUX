@@ -69,6 +69,9 @@ class PyRegion {
  public:
   PyRegion(MemoryRegionPtr region, Py_buffer view)
       : region_(std::move(region)), view_(view) {}
+  /* An object Python promises is immutable -- bytes, a read-only memoryview.
+   * Registered for reading only, and never the destination of a read. */
+  bool read_only() const { return view_.readonly != 0; }
 
   ~PyRegion() {
     /* Destruction can happen after the interpreter has finalized, when object
@@ -243,9 +246,7 @@ class PyEngine {
       if (PyObject_GetBuffer(obj.ptr(), &view, PyBUF_SIMPLE) != 0)
         throw std::invalid_argument("object does not support the buffer protocol");
     }
-    AccessFlags access = AccessFlags::kLocalRead | AccessFlags::kLocalWrite;
-    if (remote_read) access = access | AccessFlags::kRemoteRead;
-    if (remote_write) access = access | AccessFlags::kRemoteWrite;
+    AccessFlags const access = access_for(view, remote_read, remote_write);
 
     MemoryRegionPtr region;
     Status s = engine_->register_memory(view.buf,
@@ -467,9 +468,15 @@ class PyEngine {
       lengths.push_back(static_cast<uint64_t>(v.len));
     }
 
-    AccessFlags access = AccessFlags::kLocalRead | AccessFlags::kLocalWrite;
+    /* One access for the whole batch, so one read-only buffer in it makes
+     * all of them read-only rather than letting the adapter write into it. */
+    bool any_read_only = false;
+    for (auto const& v : views) any_read_only = any_read_only || v.readonly;
+    AccessFlags access = AccessFlags::kLocalRead;
+    if (!any_read_only) access = access | AccessFlags::kLocalWrite;
     if (remote_read) access = access | AccessFlags::kRemoteRead;
-    if (remote_write) access = access | AccessFlags::kRemoteWrite;
+    if (remote_write && !any_read_only)
+      access = access | AccessFlags::kRemoteWrite;
 
     std::vector<RegistrationResult> results;
     Status s = engine_->register_memory_batch(addrs, lengths, access, &results);
@@ -562,6 +569,32 @@ class PyEngine {
   }
 
  private:
+  /* A read-only buffer is registered for reading and nothing else. The
+   * adapter honours whatever it is given, so granting a write -- by a peer,
+   * or local, as the destination of a read -- would let it write into an
+   * object Python promises is immutable, and a small bytes object may be
+   * shared across the whole interpreter. */
+  static AccessFlags access_for(Py_buffer const& view, bool remote_read,
+                                bool remote_write) {
+    bool const read_only = view.readonly != 0;
+    AccessFlags access = AccessFlags::kLocalRead;
+    if (!read_only) access = access | AccessFlags::kLocalWrite;
+    if (remote_read) access = access | AccessFlags::kRemoteRead;
+    if (remote_write && !read_only) access = access | AccessFlags::kRemoteWrite;
+    return access;
+  }
+
+  /* Checked here because the region below is null once deregistered, and
+   * using it would be a crash rather than an exception. */
+  static void usable_for(PyRegion const& local, bool is_write) {
+    if (local.region() == nullptr)
+      throw std::runtime_error("region has been deregistered");
+    if (!is_write && local.read_only())
+      throw std::invalid_argument(
+          "the destination of a read must be writable; this buffer is "
+          "read-only");
+  }
+
   static TransferOptions options_from(
       std::vector<std::shared_ptr<PyEvent>> const& after) {
     TransferOptions o;
@@ -574,6 +607,14 @@ class PyEngine {
       PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
       uint64_t local_offset, uint64_t remote_offset, uint64_t length,
       bool is_write, std::vector<std::shared_ptr<PyEvent>> const& after) {
+    usable_for(local, is_write);
+    /* The default: the rest of the local region. A length of zero used to
+     * go through as a transfer of nothing, which never ended; the engine
+     * now refuses one, and a default that could only fail is no default. */
+    if (length == 0) {
+      uint64_t const n = local.region()->length();
+      length = local_offset < n ? n - local_offset : 0;
+    }
     RegionView lv, rv;
     raise_on_error(local.region()->view(local_offset, length, &lv), "local view");
     raise_on_error(remote.remote()->view(remote_offset, length, &rv),
@@ -598,6 +639,7 @@ class PyEngine {
     if (lo.size() != ro.size() || lo.size() != len.size())
       throw std::invalid_argument(
           "local_offsets, remote_offsets and lengths must have equal length");
+    usable_for(local, is_write);
     std::vector<RegionView> lvs(lo.size()), rvs(ro.size());
     for (size_t i = 0; i < lo.size(); ++i) {
       raise_on_error(local.region()->view(lo[i], len[i], &lvs[i]), "local view");
@@ -763,12 +805,16 @@ NB_MODULE(hux, m) {
            nb::arg("remote"), nb::arg("local_offset") = 0,
            nb::arg("remote_offset") = 0, nb::arg("length") = 0,
            nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
-           nb::keep_alive<0, 1>())
+           nb::keep_alive<0, 1>(),
+           "Read into local from remote. length=0 means the rest of the"
+           " local region from local_offset.")
       .def("write", &PyEngine::write, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offset") = 0,
            nb::arg("remote_offset") = 0, nb::arg("length") = 0,
            nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
-           nb::keep_alive<0, 1>())
+           nb::keep_alive<0, 1>(),
+           "Write local to remote. length=0 means the rest of the local"
+           " region from local_offset.")
       .def("readv", &PyEngine::readv, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offsets"),
            nb::arg("remote_offsets"), nb::arg("lengths"),

@@ -51,6 +51,25 @@ def test_round_trip():
     check(req.reached("target_ready"), "reaches target_ready")
 
 
+def test_the_default_length_is_the_rest_of_the_region():
+    """length defaults to 0, which went through as a transfer of nothing:
+    the request never ended and a wait on it never returned. It now means
+    the rest of the local region."""
+    eng, peer = setup()
+    src = bytearray(bytes(range(256)) * 16)
+    dst = bytearray(len(src))
+    src_region = eng.register_memory(src)
+    dst_region = eng.register_memory(dst)
+    remote = peer.import_region(src_region.descriptor())
+    req = eng.read(peer, dst_region, remote)
+    for _ in range(100):
+        eng.poll()
+        if req.done:
+            break
+    check(req.wait(1000) == "ok", "a read with no length completes")
+    check(bytes(dst) == bytes(src), "and moves the whole region")
+
+
 def test_registration_keeps_its_buffer_alive():
     """The one with no Python-level symptom.
 
@@ -202,7 +221,9 @@ def test_deregistering_lets_the_registration_go():
 
 
 def test_a_retired_region_refuses_rather_than_crashes():
-    eng, _ = setup()
+    eng, peer = setup()
+    other = eng.register_memory(bytearray(4096))
+    remote = peer.import_region(other.descriptor())
     region = eng.register_memory(bytearray(4096))
     eng.deregister_memory(region)
     try:
@@ -210,6 +231,49 @@ def test_a_retired_region_refuses_rather_than_crashes():
         check(False, "exporting a retired region raises")
     except RuntimeError:
         check(True, "exporting a retired region raises")
+    # A transfer from it reached through a null handle: a segfault, where
+    # the export beside it raised.
+    for name, call in (("write", eng.write), ("read", eng.read)):
+        try:
+            call(peer, region, remote, length=4096)
+            check(False, "a %s from a retired region raises" % name)
+        except RuntimeError:
+            check(True, "a %s from a retired region raises" % name)
+    try:
+        eng.writev(peer, region, remote, [0], [0], [4096])
+        check(False, "so does a vector transfer")
+    except RuntimeError:
+        check(True, "so does a vector transfer")
+
+
+def test_a_read_only_buffer_is_never_written():
+    """bytes is immutable, and a small one may be shared across the whole
+    interpreter. Registered, it was granted local and remote write all the
+    same, so a read could land in it and so could a peer's write -- the
+    adapter honours what it is given."""
+    eng, peer = setup()
+    want = bytes(range(256)) * 16
+    payload = bytes(range(256)) * 16
+    ro = eng.register_memory(payload)
+    src = eng.register_memory(bytearray(b"z" * len(payload)))
+    remote_src = peer.import_region(src.descriptor())
+    try:
+        eng.read(peer, ro, remote_src, length=len(payload))
+        check(False, "a read into a read-only buffer raises")
+    except ValueError:
+        check(True, "a read into a read-only buffer raises")
+    check(payload == want, "and the bytes object is untouched")
+
+    dst = bytearray(len(payload))
+    dst_region = eng.register_memory(dst)
+    req = eng.write(peer, ro, peer.import_region(dst_region.descriptor()),
+                    length=len(payload))
+    for _ in range(100):
+        eng.poll()
+        if req.done:
+            break
+    check(req.wait(1000) == "ok", "it can still be the source of a write")
+    check(bytes(dst) == want, "and what it holds arrives")
 
 
 def test_batch_registration_keeps_the_order():
@@ -390,6 +454,7 @@ def test_stats_carry_every_engine_counter():
 def main():
     for fn in [
         test_round_trip,
+        test_the_default_length_is_the_rest_of_the_region,
         test_registration_keeps_its_buffer_alive,
         test_blocking_wait_releases_the_gil,
         test_batch_submits_once,
@@ -398,6 +463,7 @@ def main():
         test_peer_says_which_path_it_got,
         test_deregistering_lets_the_registration_go,
         test_a_retired_region_refuses_rather_than_crashes,
+        test_a_read_only_buffer_is_never_written,
         test_batch_registration_keeps_the_order,
         test_a_notification_comes_back_with_its_payload,
         test_removing_a_peer_disconnects_it,
