@@ -124,6 +124,24 @@ HUX_TEST(a_peer_on_another_host_is_reached_over_the_network) {
   CHECK(peer->caps().place == PeerPlace::kAnotherHost);
 }
 
+HUX_TEST(a_peer_reached_over_ucx_says_so) {
+  /* Every transport that was neither local nor IPC was reported as the
+   * native RDMA path, UCX included. */
+  MockConfig mc;
+  mc.name = "ucx";
+  auto prov = std::make_shared<MockProvider>(mc);
+  EngineConfig cfg;
+  cfg.progress = ProgressMode::kExplicit;
+  std::unique_ptr<Engine> e;
+  CHECK_STATUS(make_engine(cfg, nullptr, prov, &e), Status::kOk);
+  std::vector<uint8_t> meta;
+  CHECK_STATUS(e->local_metadata(&meta), Status::kOk);
+  PeerPtr peer;
+  CHECK_STATUS(e->add_peer(meta, &peer), Status::kOk);
+  CHECK(peer->caps().provider == "ucx");
+  CHECK(peer->caps().path == PathKind::kUcx);
+}
+
 HUX_TEST(a_region_exported_for_another_path_is_refused_not_misused) {
   /* The peer exported a region its network transport registered, and this
    * side reached it over IPC. There is no key here that means anything, and

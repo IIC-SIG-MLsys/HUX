@@ -615,6 +615,8 @@ Status EngineImpl::add_peer(std::vector<uint8_t> const& metadata,
     caps.path = PathKind::kSameProcess;
   else if (caps.provider == "ipc")
     caps.path = PathKind::kIpc;
+  else if (chosen_family == "ucx")
+    caps.path = PathKind::kUcx;
   else
     caps.path = PathKind::kRdma;
   /* Across every lane, since that is how many queue pairs this peer is
