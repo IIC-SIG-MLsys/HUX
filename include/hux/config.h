@@ -66,7 +66,9 @@ struct EngineConfig {
   uint32_t notify_max_payload = 4096;
 
   /* Finished requests kept for poll_completions, and ready events kept for
-   * poll_ready_events. Past these the oldest are dropped and counted.
+   * poll_ready_events. Past its depth a finished request pushes out the
+   * oldest, and a ready event is refused -- a consumer takes those in order
+   * and is waiting on the oldest first. Either way it is counted.
    *
    * Without a bound, an application that only waits on its requests -- and
    * so never polls -- had every one of them kept for it: about 400 bytes a

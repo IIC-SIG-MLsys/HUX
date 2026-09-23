@@ -1165,16 +1165,17 @@ RequestPtr EngineImpl::keep_completed_locked(RequestPtr req) {
 }
 
 void EngineImpl::keep_ready_locked(ReadyEventPtr ev) {
-  /* The same for a receiver that never asks for its ready events. These
-   * hold no references, so dropping one under the lock is harmless. */
-  if (cfg_.ready_queue_depth == 0) {
+  /* The same bound for a receiver that never asks for its ready events --
+   * but past it the new event is refused, not the oldest. A consumer takes
+   * these in order and is waiting on the oldest first; dropping those would
+   * leave it waiting for a signal that was thrown away, while refusing new
+   * ones leaves everything before the gap intact. Notifications are bounded
+   * the same way. */
+  if (ready_events_.size() >= cfg_.ready_queue_depth) {
     ready_events_dropped_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   ready_events_.push_back(std::move(ev));
-  if (ready_events_.size() <= cfg_.ready_queue_depth) return;
-  ready_events_.pop_front();
-  ready_events_dropped_.fetch_add(1, std::memory_order_relaxed);
 }
 
 Status EngineImpl::poll_completions(uint32_t max_items,

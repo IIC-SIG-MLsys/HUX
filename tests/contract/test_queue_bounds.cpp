@@ -58,13 +58,14 @@ struct SelfPeer {
   }
 
   /* One write, waited on rather than polled for. */
-  Status write_and_wait() {
+  Status write_and_wait(RequestId* id = nullptr) {
     RegionView lv, rv;
     if (sreg->view(0, 4096, &lv) != Status::kOk) return Status::kInternal;
     if (remote->view(0, 4096, &rv) != Status::kOk) return Status::kInternal;
     RequestPtr req;
     Status s = engine->write(peer.get(), lv, rv, {}, &req);
     if (s != Status::kOk) return s;
+    if (id != nullptr) *id = req->id();
     return req->wait(2000);
   }
 };
@@ -137,10 +138,16 @@ HUX_TEST(ready_events_nobody_asks_for_are_not_kept_for_ever) {
   cfg.ready_queue_depth = 8;
   SelfPeer f;
   CHECK(f.setup(cfg));
-  for (int i = 0; i < 50; ++i) CHECK_STATUS(f.write_and_wait(), Status::kOk);
+  std::vector<RequestId> ids(50);
+  for (int i = 0; i < 50; ++i)
+    CHECK_STATUS(f.write_and_wait(&ids[i]), Status::kOk);
 
   CHECK(settles([&] { return f.engine->stats().ready_events_dropped; }, 42));
   std::vector<ReadyEventPtr> ready;
   CHECK_STATUS(f.engine->poll_ready_events(1000, &ready), Status::kOk);
   CHECK_EQ(ready.size(), size_t(8));
+  /* The first eight writes' events, in order: a consumer waits on the
+   * oldest first, so those are the ones kept and the later ones refused. */
+  for (size_t i = 0; i < ready.size(); ++i)
+    CHECK_EQ(ready[i]->request(), ids[i]);
 }

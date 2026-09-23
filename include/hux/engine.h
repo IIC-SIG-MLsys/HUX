@@ -87,7 +87,8 @@ struct EngineStats {
   uint64_t notification_acks_failed = 0;
 
   /* Finished requests and ready events dropped because nobody collected
-   * them and their queue was at its depth, oldest first. Zero for an
+   * them and their queue was at its depth (the oldest request, the newest
+   * event). Zero for an
    * application that polls; for one that only waits it rises with every
    * request, which is harmless there and is what keeps its memory flat. */
   uint64_t completions_dropped = 0;
