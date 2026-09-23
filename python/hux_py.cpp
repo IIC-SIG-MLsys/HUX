@@ -527,15 +527,24 @@ class PyEngine {
     d["requests_accepted"] = s.requests_accepted;
     d["requests_succeeded"] = s.requests_succeeded;
     d["requests_failed"] = s.requests_failed;
+    d["requests_cancelled"] = s.requests_cancelled;
     d["requests_would_block"] = s.requests_would_block;
     d["submit_deferred"] = s.submit_deferred;
+    d["requests_waiting_on_dependency"] = s.requests_waiting_on_dependency;
     d["subops_posted"] = s.subops_posted;
     d["subops_completed"] = s.subops_completed;
+    d["subops_failed"] = s.subops_failed;
     d["payload_bytes"] = s.payload_bytes;
     d["payload_bytes_copied"] = s.payload_bytes_copied;
     d["registrations_created"] = s.registrations_created;
     d["registrations_reused"] = s.registrations_reused;
+    d["registration_cache_size"] = s.registration_cache_size;
     d["peak_inflight_requests"] = s.peak_inflight_requests;
+    /* What the engine let go because nobody collected it. A Python loop
+     * that counts what poll() returns against what it submitted needs these
+     * to explain a shortfall rather than wait on it for ever. */
+    d["completions_dropped"] = s.completions_dropped;
+    d["ready_events_dropped"] = s.ready_events_dropped;
     /* The control-plane counters, which nothing here exposed. Two of them
      * are the only place a failure shows at all: a ready handoff or an
      * acknowledgement the transport refused leaves the peer waiting while
@@ -547,6 +556,8 @@ class PyEngine {
     d["ready_handoffs_sent"] = s.ready_handoffs_sent;
     d["ready_handoffs_failed"] = s.ready_handoffs_failed;
     d["ready_handoffs_received"] = s.ready_handoffs_received;
+    d["region_invalidates_sent"] = s.region_invalidates_sent;
+    d["region_invalidates_failed"] = s.region_invalidates_failed;
     return d;
   }
 

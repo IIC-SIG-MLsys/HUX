@@ -365,6 +365,28 @@ def test_objects_outliving_the_engine_do_not_use_freed_memory():
     check(len(dst_region.descriptor()) > 0, "and can still be described")
 
 
+def test_stats_carry_every_engine_counter():
+    """The dict is written out by hand, field by field, so a counter added to
+    the engine is missing from Python until someone adds it there too -- eight
+    had been, among them the only ones that explain a poll() loop coming up
+    short. The fields are read from the engine's own header rather than
+    listed here, so a list in this file cannot drift the same way."""
+    import os, re
+    header = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "..", "include", "hux", "engine.h")
+    text = open(header).read()
+    body = re.search(r"struct EngineStats \{(.*?)\n\};", text, re.S)
+    check(body is not None, "found EngineStats in the header")
+    if body is None:
+        return
+    want = set(re.findall(r"^\s*uint64_t\s+(\w+)\s*=", body.group(1), re.M))
+    check(len(want) > 20, "read %d counters from the header" % len(want))
+    eng = hux.make_mock_engine(move_data=True)
+    missing = want - set(eng.stats())
+    check(not missing, "stats() has every engine counter (missing: %s)"
+          % (", ".join(sorted(missing)) or "none"))
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -383,6 +405,7 @@ def main():
         test_a_transfer_can_be_ordered_after_an_event,
         test_the_stream_calls_refuse_without_a_backend,
         test_objects_outliving_the_engine_do_not_use_freed_memory,
+        test_stats_carry_every_engine_counter,
     ]:
         print(f"{fn.__name__}:")
         fn()
