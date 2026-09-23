@@ -229,6 +229,28 @@ Status LocalProvider::send_control(ProviderConnection* conn, uint16_t type,
   return Status::kOk;
 }
 
+Status LocalProvider::broadcast_control(uint16_t type,
+                                        std::vector<uint8_t> const& payload,
+                                        uint32_t* sent, uint32_t* refused) {
+  /* The one other side, whether or not this end dialled it -- or this one,
+   * unpaired. No connection to name: nothing replies to a broadcast. */
+  std::shared_ptr<LocalProvider> peer;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    peer = peer_.lock();
+  }
+  ControlMessage m;
+  m.type = type;
+  m.payload = payload;
+  if (peer != nullptr)
+    peer->deliver_control(std::move(m));
+  else
+    deliver_control(std::move(m));
+  if (sent != nullptr) *sent = 1;
+  if (refused != nullptr) *refused = 0;
+  return Status::kOk;
+}
+
 Status LocalProvider::poll_control(uint32_t max_items,
                                    std::vector<ControlMessage>* out) {
   if (out == nullptr) return Status::kInvalidArgument;

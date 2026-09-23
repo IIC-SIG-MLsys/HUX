@@ -1359,6 +1359,31 @@ Status RdmaProvider::send_control(ProviderConnection* conn, uint16_t type,
   return s;
 }
 
+Status RdmaProvider::broadcast_control(uint16_t type,
+                                       std::vector<uint8_t> const& payload,
+                                       uint32_t* sent, uint32_t* refused) {
+  /* Every connection, accepted ones included: a peer that dialled this
+   * engine is reached only over the connection it dialled, which no Peer
+   * here holds. One that has gone is skipped -- there is nobody to tell. */
+  std::vector<std::shared_ptr<RdmaConnection>> conns;
+  {
+    std::lock_guard<std::mutex> g(conn_mu_);
+    for (auto const& w : ctrl_conns_)
+      if (auto c = w.lock()) conns.push_back(std::move(c));
+  }
+  uint32_t ok = 0, no = 0;
+  for (auto const& c : conns) {
+    if (!c->alive()) continue;
+    if (send_control(c.get(), type, payload) == Status::kOk)
+      ++ok;
+    else
+      ++no;
+  }
+  if (sent != nullptr) *sent = ok;
+  if (refused != nullptr) *refused = no;
+  return Status::kOk;
+}
+
 Status RdmaProvider::poll_control(uint32_t max_items,
                                   std::vector<ControlMessage>* out) {
   if (out == nullptr) return Status::kInvalidArgument;

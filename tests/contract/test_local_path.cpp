@@ -213,3 +213,46 @@ HUX_TEST(the_cache_keeps_a_peer_reachable_after_deregistration) {
   CHECK_STATUS(p.drive(req), Status::kOk);
   CHECK_EQ(std::memcmp(p.buf_a.data(), p.buf_b.data(), 4096), 0);
 }
+
+HUX_TEST(deregistering_tells_an_engine_that_dialled_this_one) {
+  /* The only test of this notice used one engine talking to itself, where
+   * it comes back on the connection it left on. Between two engines it never
+   * went: this side sent it to the peers it had added, and a side that only
+   * accepts has added none. */
+  Pair p;
+  CHECK(p.setup());
+  CHECK(p.remote_b->valid());
+  CHECK_STATUS(p.b->deregister_memory(p.reg_b), Status::kOk);
+
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 20 && p.remote_b->valid(); ++i) {
+    p.b->poll_completions(8, &done);
+    p.a->poll_completions(8, &done);
+  }
+  CHECK(!p.remote_b->valid());
+  CHECK(p.b->stats().region_invalidates_sent >= 1u);
+
+  RegionView lv, rv;
+  CHECK_STATUS(p.reg_a->view(0, 4096, &lv), Status::kOk);
+  CHECK_STATUS(p.remote_b->view(0, 4096, &rv), Status::kStaleGeneration);
+}
+
+HUX_TEST(deregistering_tells_an_engine_dialled_both_ways) {
+  /* Each side has added the other, and the notice goes out on this side's
+   * own connection -- which arrives on one the other side accepted and no
+   * Peer of its holds. Matched by connection, it was dropped there. */
+  Pair p;
+  CHECK(p.setup());
+  std::vector<uint8_t> meta;
+  CHECK_STATUS(p.a->local_metadata(&meta), Status::kOk);
+  PeerPtr back;
+  CHECK_STATUS(p.b->add_peer(meta, &back), Status::kOk);
+  CHECK_STATUS(p.b->deregister_memory(p.reg_b), Status::kOk);
+
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 20 && p.remote_b->valid(); ++i) {
+    p.b->poll_completions(8, &done);
+    p.a->poll_completions(8, &done);
+  }
+  CHECK(!p.remote_b->valid());
+}

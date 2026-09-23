@@ -347,29 +347,57 @@ Status EngineImpl::deregister_memory(MemoryRegionPtr region) {
   RegionInvalidateBody b;
   b.region = impl->id();
   b.generation = impl->generation();
+  b.has_origin = true;
+  b.origin = impl->origin();
   std::vector<uint8_t> payload;
   encode_region_invalidate(b, &payload);
-  std::vector<std::shared_ptr<PeerImpl>> peers;
-  {
-    std::lock_guard<std::mutex> g(mu_);
-    for (auto& kv : peers_) peers.push_back(kv.second);
+  uint16_t const type = static_cast<uint16_t>(ControlType::kRegionInvalidate);
+
+  /* To every connection each transport holds, not only to the peers this
+   * engine added: a peer that dialled this engine has no Peer here, and it
+   * is the one most likely to have imported the region. Sent only to Peers,
+   * the notice reached nobody but this engine talking to itself.
+   *
+   * Counted by whether the transport took it, which is not the same as the
+   * peer having read it: a control message it accepts may still be queued
+   * for a peer that is not reading, and the provider reports what is still
+   * owed. The local handle goes either way, so a notice that was refused
+   * leaves the peer holding a descriptor for memory that is no longer there,
+   * and this counter is the only place that shows. */
+  uint64_t sent = 0, refused = 0;
+  std::vector<TransportProvider*> one_by_one;
+  for (auto const& prov : providers_) {
+    uint32_t s = 0, r = 0;
+    if (prov->broadcast_control(type, payload, &s, &r) == Status::kOk) {
+      sent += s;
+      refused += r;
+    } else {
+      one_by_one.push_back(prov.get());
+    }
   }
-  for (auto& p : peers) {
-    if (!p->connected()) continue;
-    /* Counted by whether the transport took it, which is not the same as
-     * the peer having read it: a control message it accepts may still be
-     * queued for a peer that is not reading, and the provider reports what
-     * is still owed. The local handle goes either way, so a notice that was
-     * refused leaves the peer holding a descriptor for memory that is no
-     * longer there, and this counter is the only place that shows. */
-    Status const sent = p->provider()->send_control(
-        p->conn(), static_cast<uint16_t>(ControlType::kRegionInvalidate),
-        payload);
+  /* A transport that cannot reach all of its connections still reaches the
+   * peers this engine dialled over it. */
+  if (!one_by_one.empty()) {
+    std::vector<std::shared_ptr<PeerImpl>> peers;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      for (auto& kv : peers_) peers.push_back(kv.second);
+    }
+    for (auto& p : peers) {
+      if (!p->connected()) continue;
+      if (std::find(one_by_one.begin(), one_by_one.end(), p->provider()) ==
+          one_by_one.end())
+        continue;
+      if (p->provider()->send_control(p->conn(), type, payload) == Status::kOk)
+        ++sent;
+      else
+        ++refused;
+    }
+  }
+  {
     std::lock_guard<std::mutex> g(stats_mu_);
-    if (sent == Status::kOk)
-      ++stats_.region_invalidates_sent;
-    else
-      ++stats_.region_invalidates_failed;
+    stats_.region_invalidates_sent += sent;
+    stats_.region_invalidates_failed += refused;
   }
 
   /* The underlying registration is released when the last reference to it
@@ -688,8 +716,10 @@ std::shared_ptr<MemoryRegionImpl> EngineImpl::find_region(RegionId id) const {
 PeerId EngineImpl::peer_for_conn(ProviderConnection* conn) const {
   if (conn == nullptr) return 0;
   std::lock_guard<std::mutex> g(mu_);
+  /* Any lane, not only the first: each is a connection of this peer's. */
   for (auto const& kv : peers_)
-    if (kv.second->conn() == conn) return kv.second->id();
+    for (auto const& l : kv.second->lanes())
+      if (l.conn.get() == conn) return kv.second->id();
   /* A connection this engine accepted without an application ever adding a
    * Peer for it. Nothing to scope against, and saying so is better than
    * guessing. */
@@ -1449,10 +1479,10 @@ Status EngineImpl::progress() {
          * notion of identity, not the ids handed to the application. Without
          * it a control message can only be matched by what it names, and
          * every peer numbers its regions from one. */
-        if (m.conn != nullptr) {
-          PeerId const from = peer_for_conn(m.conn);
-          if (from != 0) m.peer = from;
-        }
+        /* Always this engine's answer, 0 when it has none. Keeping a
+         * provider's own value when there was no match handed out another
+         * numbering -- a process id -- as if it were a PeerId. */
+        m.peer = peer_for_conn(m.conn);
         if (static_cast<ControlType>(m.type) == ControlType::kReadyHandoff) {
           ReadyHandoffBody b;
           if (decode_ready_handoff(m.payload, &b) != Status::kOk) continue;
@@ -1531,20 +1561,28 @@ Status EngineImpl::progress() {
                    ControlType::kRegionInvalidate) {
           RegionInvalidateBody b;
           if (decode_region_invalidate(m.payload, &b) != Status::kOk) continue;
-          std::shared_ptr<RemoteRegionImpl> rr;
+          /* Scoped to the engine that exported it: another peer's region
+           * can share the id, and retiring the wrong one would silently stop
+           * a healthy path. By its identity when the notice carries one,
+           * whichever connection it came in on and whichever Peer imported
+           * the region; by the connection's peer otherwise. */
+          std::vector<std::shared_ptr<RemoteRegionImpl>> named;
           {
             std::lock_guard<std::mutex> g(mu_);
-            /* Scoped to the peer that sent the notice: another peer's
-             * region can share the id, and retiring the wrong one would
-             * silently stop a healthy path. */
-            auto it = remotes_.find({m.peer, b.region});
-            if (it != remotes_.end()) rr = it->second;
+            if (b.has_origin) {
+              for (auto const& kv : remotes_)
+                if (kv.first.second == b.region &&
+                    kv.second->origin() == b.origin)
+                  named.push_back(kv.second);
+            } else if (m.peer != 0) {
+              auto it = remotes_.find({m.peer, b.region});
+              if (it != remotes_.end()) named.push_back(it->second);
+            }
           }
           /* Only if the generations match: an id can be reused, and a notice
            * for an older incarnation must not retire a newer one. */
-          if (rr != nullptr && rr->generation() == b.generation) {
-            rr->invalidate();
-          }
+          for (auto const& rr : named)
+            if (rr->generation() == b.generation) rr->invalidate();
         } else if (static_cast<ControlType>(m.type) ==
                    ControlType::kNotificationAck) {
           uint64_t id = 0;

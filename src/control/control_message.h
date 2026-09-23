@@ -15,13 +15,16 @@
 #include <cstdint>
 #include <vector>
 
+#include "control/identity.h"
 #include "hux/status.h"
 #include "hux/types.h"
 
 namespace hux {
 
+/* Minor 1: kNotificationRefused, and the exporter's identity in
+ * kRegionInvalidate. */
 constexpr uint16_t kControlMajor = 1;
-constexpr uint16_t kControlMinor = 0;
+constexpr uint16_t kControlMinor = 1;
 
 enum class ControlType : uint16_t {
   kInvalid = 0,
@@ -54,14 +57,25 @@ constexpr size_t kNotificationHeaderBytes = 8;
 void encode_u64(uint64_t v, std::vector<uint8_t>* out);
 Status decode_u64(std::vector<uint8_t> const& in, uint64_t* out);
 
-/* Body of a kRegionInvalidate: which region, and at which generation. The
- * generation matters because an id can be reused, and a notice for an older
- * incarnation must not retire a newer one. */
+/* Body of a kRegionInvalidate: which region, at which generation, exported by
+ * which engine. The generation matters because an id can be reused, and a
+ * notice for an older incarnation must not retire a newer one.
+ *
+ * The exporter's identity is what the receiver matches on. Matching by the
+ * connection the notice arrived on found nothing between two engines: a peer
+ * that dialled this one has no Peer here, and each end of a pair that dialled
+ * both ways answers on the connection the other dialled, which neither side's
+ * Peer holds. Only a loopback test ever saw a notice applied. A body without
+ * it, from an older sender, is still read, and scoped by connection. */
 struct RegionInvalidateBody {
   uint64_t region = 0;
   uint32_t generation = 0;
+  bool has_origin = false;
+  Identity origin;
 };
 constexpr size_t kRegionInvalidateBytes = 8 + 4;
+constexpr size_t kRegionInvalidateWithOriginBytes =
+    kRegionInvalidateBytes + kIdentityBytes;
 
 void encode_region_invalidate(RegionInvalidateBody const& b,
                               std::vector<uint8_t>* out);

@@ -184,6 +184,22 @@ class TransportProvider {
   virtual Status send_control(ProviderConnection* conn, uint16_t type,
                               std::vector<uint8_t> const& payload) = 0;
 
+  /* Sends on every connection this transport holds, dialled or accepted,
+   * and counts how many took it and how many refused. For what every peer
+   * has to hear, including one that dialled this engine and has no Peer
+   * here -- the engine only knows the connections it dialled. kUnsupported
+   * from a transport that cannot, which the engine answers by sending to
+   * its own peers instead. */
+  virtual Status broadcast_control(uint16_t type,
+                                   std::vector<uint8_t> const& payload,
+                                   uint32_t* sent, uint32_t* refused) {
+    (void)type;
+    (void)payload;
+    if (sent != nullptr) *sent = 0;
+    if (refused != nullptr) *refused = 0;
+    return Status::kUnsupported;
+  }
+
   /* Control messages received since the last call. */
   virtual Status poll_control(uint32_t max_items,
                               std::vector<ControlMessage>* out) = 0;

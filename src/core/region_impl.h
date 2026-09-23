@@ -160,6 +160,9 @@ class RemoteRegionImpl : public RemoteRegion {
 
   uint64_t base() const { return d_.base; }
   uint64_t remote_key() const { return d_.remote_key; }
+  /* The engine that exported it, which is how a notice that it has gone
+   * finds it. */
+  Identity const& origin() const { return d_.origin; }
   /* The key the named transport minted. A peer with an adapter each side of
    * a machine exported one per adapter, and a write carried by one of them
    * cannot use the other's: an rkey belongs to the protection domain that

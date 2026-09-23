@@ -135,6 +135,13 @@ int run_server(int gpu, uint32_t qps, CongestionControllerPtr cc,
 
   std::printf("[server] verifying what the client wrote: %s\n",
               buf.verify(0x22) ? "OK" : "MISMATCH");
+
+  /* Last, so nothing above depends on it. This side never added the client
+   * as a peer, and the client imported the region, so it is the client that
+   * has to be told the region is gone -- over the connection it dialled. */
+  Status const dr = engine->deregister_memory(region);
+  std::printf("[server] deregistered: %s, notices sent %llu\n", to_string(dr),
+              (unsigned long long)engine->stats().region_invalidates_sent);
   send_blob(fd, "z", 1);
   ::close(fd);
   ::close(srv);
@@ -473,8 +480,20 @@ int run_client(std::string const& ip, int gpu, uint32_t qps,
 
   std::vector<uint8_t> fin;
   recv_blob(fd, &fin);
+
+  std::printf("\n=== the server withdraws its region ===\n");
+  for (int i = 0; i < 200 && remote->valid(); ++i) {
+    std::vector<RequestPtr> drained;
+    engine->poll_completions(8, &drained);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  RegionView after;
+  Status const vs = remote->view(0, kBytes, &after);
+  bool const withdrawn = !remote->valid();
+  std::printf("   notice received: %s, a new view is %s\n",
+              withdrawn ? "yes" : "NO", to_string(vs));
   ::close(fd);
-  return read_ok && s == Status::kOk ? 0 : 1;
+  return read_ok && s == Status::kOk && withdrawn ? 0 : 1;
 }
 
 }  // namespace

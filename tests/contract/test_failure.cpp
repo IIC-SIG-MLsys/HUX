@@ -189,29 +189,76 @@ HUX_TEST(a_transport_failure_ends_the_request_with_a_reason) {
   CHECK_EQ(req->error().may_have_modified_target, true);
 }
 
+namespace {
+
+/* Delivers a notice that a region has gone, as its exporter would. */
+void send_invalidate(FailFixture& f, RegionInvalidateBody const& b) {
+  std::vector<uint8_t> payload;
+  encode_region_invalidate(b, &payload);
+  f.provider->send_control(
+      nullptr, static_cast<uint16_t>(ControlType::kRegionInvalidate), payload);
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 20; ++i) f.engine->poll_completions(8, &done);
+}
+
+}  // namespace
+
 HUX_TEST(an_invalidation_for_another_generation_is_ignored) {
   /* Region ids are reused. A notice naming an older incarnation must not
    * retire the region that replaced it, or a live transfer would be refused
-   * for a reason that no longer exists. */
+   * for a reason that no longer exists.
+   *
+   * With the exporter named, so the notice is one this engine would act on:
+   * without it, it was never matched to anything, and this passed whatever
+   * the generation said. */
   FailFixture f;
   CHECK(f.setup());
   CHECK(f.remote->valid());
 
   RegionInvalidateBody b;
   b.region = f.remote->id();
+  b.has_origin = true;
+  b.origin = std::static_pointer_cast<RemoteRegionImpl>(f.remote)->origin();
   b.generation = f.remote->generation() + 7; /* not this one */
-  std::vector<uint8_t> payload;
-  encode_region_invalidate(b, &payload);
-  CHECK_STATUS(
-      f.provider->send_control(
-          nullptr, static_cast<uint16_t>(ControlType::kRegionInvalidate),
-          payload),
-      Status::kOk);
+  send_invalidate(f, b);
+  CHECK_EQ(f.remote->valid(), true);
 
-  std::vector<RequestPtr> done;
-  for (int i = 0; i < 20; ++i) f.engine->poll_completions(8, &done);
+  /* And the same notice for this generation does retire it. */
+  b.generation = f.remote->generation();
+  send_invalidate(f, b);
+  CHECK_EQ(f.remote->valid(), false);
+}
+
+HUX_TEST(an_invalidation_from_another_exporter_is_ignored) {
+  /* Every engine numbers its regions from one, so a peer's region 1 and
+   * another's share an id and usually a generation. Only the one whose
+   * exporter sent the notice goes. */
+  FailFixture f;
+  CHECK(f.setup());
+
+  RegionInvalidateBody b;
+  b.region = f.remote->id();
+  b.generation = f.remote->generation();
+  b.has_origin = true;
+  b.origin = std::static_pointer_cast<RemoteRegionImpl>(f.remote)->origin();
+  b.origin.engine += 1; /* a different engine, same numbering */
+  send_invalidate(f, b);
 
   CHECK_EQ(f.remote->valid(), true);
+}
+
+HUX_TEST(a_transport_without_broadcast_still_tells_its_peers) {
+  /* The engine falls back to the peers it dialled over such a transport. */
+  MockConfig mc;
+  mc.no_broadcast = true;
+  FailFixture f;
+  CHECK(f.setup(mc));
+  CHECK_STATUS(f.engine->deregister_memory(f.src_region), Status::kOk);
+  std::vector<RequestPtr> done;
+  for (int i = 0; i < 20 && f.remote->valid(); ++i)
+    f.engine->poll_completions(8, &done);
+  CHECK_EQ(f.remote->valid(), false);
+  CHECK_EQ(f.engine->stats().region_invalidates_sent, 1u);
 }
 
 HUX_TEST(a_departed_peer_fails_what_was_in_flight_to_it) {

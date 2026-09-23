@@ -180,6 +180,8 @@ class RdmaProvider : public TransportProvider {
   Status poll(uint32_t max_events, std::vector<CompletionEvent>* out) override;
   Status send_control(ProviderConnection* conn, uint16_t type,
                       std::vector<uint8_t> const& payload) override;
+  Status broadcast_control(uint16_t type, std::vector<uint8_t> const& payload,
+                           uint32_t* sent, uint32_t* refused) override;
   Status poll_control(uint32_t max_items,
                       std::vector<ControlMessage>* out) override;
   Status poll_peer_arrivals(uint32_t max_items,

@@ -73,14 +73,24 @@ void encode_region_invalidate(RegionInvalidateBody const& b,
   out->assign(kRegionInvalidateBytes, 0);
   put_u64(out->data(), b.region);
   put_u32(out->data() + 8, b.generation);
+  if (b.has_origin) encode_identity(b.origin, out);
 }
 
 Status decode_region_invalidate(std::vector<uint8_t> const& in,
                                 RegionInvalidateBody* out) {
-  if (out == nullptr || in.size() != kRegionInvalidateBytes)
+  if (out == nullptr) return Status::kInvalidArgument;
+  /* The short form from an older sender, or the long one; anything between
+   * is neither. Longer is read as far as this end knows, as a later minor
+   * only appends. */
+  if (in.size() != kRegionInvalidateBytes &&
+      in.size() < kRegionInvalidateWithOriginBytes)
     return Status::kInvalidArgument;
   out->region = get_u64(in.data());
   out->generation = get_u32(in.data() + 8);
+  out->has_origin = in.size() >= kRegionInvalidateWithOriginBytes;
+  if (out->has_origin &&
+      decode_identity(in, kRegionInvalidateBytes, &out->origin) != Status::kOk)
+    return Status::kInvalidArgument;
   return Status::kOk;
 }
 

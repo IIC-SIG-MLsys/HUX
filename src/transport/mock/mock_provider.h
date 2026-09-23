@@ -47,6 +47,9 @@ struct MockConfig {
    * stopped reading does: a notification then waits for an acknowledgement
    * that is not coming. */
   bool swallow_control = false;
+  /* Has no broadcast, the way a transport that cannot enumerate its
+   * connections does. */
+  bool no_broadcast = false;
   Status subop_error = Status::kTransportError;
   /* Actually move bytes so tests can verify content end to end. */
   bool move_data = true;
@@ -164,6 +167,19 @@ class MockProvider : public TransportProvider {
     if (cfg_.fail_control) return Status::kTransportError;
     if (cfg_.swallow_control) return Status::kOk;
     control_.push_back(ControlMessage{0, type, payload, conn});
+    return Status::kOk;
+  }
+
+  /* Once, back to itself: the loopback is its only connection. Unless the
+   * test asks for a transport without it, which sends to its peers one by
+   * one as the engine then has to. */
+  Status broadcast_control(uint16_t type, std::vector<uint8_t> const& payload,
+                           uint32_t* sent, uint32_t* refused) override {
+    if (cfg_.no_broadcast)
+      return TransportProvider::broadcast_control(type, payload, sent, refused);
+    Status const s = send_control(nullptr, type, payload);
+    if (sent != nullptr) *sent = s == Status::kOk ? 1 : 0;
+    if (refused != nullptr) *refused = s == Status::kOk ? 0 : 1;
     return Status::kOk;
   }
 

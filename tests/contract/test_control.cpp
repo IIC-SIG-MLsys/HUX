@@ -79,6 +79,49 @@ HUX_TEST(ready_handoff_refuses_truncated_body) {
   CHECK_STATUS(decode_ready_handoff(buf, &got), Status::kInvalidArgument);
 }
 
+HUX_TEST(region_invalidate_carries_its_exporter) {
+  RegionInvalidateBody b;
+  b.region = 0x0102030405060708ull;
+  b.generation = 9;
+  b.has_origin = true;
+  b.origin.host = 0xAAull << 40;
+  b.origin.process = 77;
+  b.origin.engine = 3;
+  std::vector<uint8_t> buf;
+  encode_region_invalidate(b, &buf);
+  CHECK_EQ(buf.size(), kRegionInvalidateWithOriginBytes);
+
+  RegionInvalidateBody got;
+  CHECK_STATUS(decode_region_invalidate(buf, &got), Status::kOk);
+  CHECK_EQ(got.region, b.region);
+  CHECK_EQ(got.generation, b.generation);
+  CHECK(got.has_origin);
+  CHECK(got.origin == b.origin);
+
+  /* A later minor may append; what this end knows is still read. */
+  buf.push_back(0xFF);
+  CHECK_STATUS(decode_region_invalidate(buf, &got), Status::kOk);
+  CHECK(got.origin == b.origin);
+}
+
+HUX_TEST(region_invalidate_reads_the_short_form_and_nothing_between) {
+  /* An older sender's body has no exporter; it is read, and says so. A
+   * length between the two forms is neither. */
+  RegionInvalidateBody b;
+  b.region = 5;
+  b.generation = 2;
+  std::vector<uint8_t> buf;
+  encode_region_invalidate(b, &buf);
+  CHECK_EQ(buf.size(), kRegionInvalidateBytes);
+  RegionInvalidateBody got;
+  CHECK_STATUS(decode_region_invalidate(buf, &got), Status::kOk);
+  CHECK(!got.has_origin);
+  CHECK_EQ(got.region, 5u);
+
+  buf.resize(kRegionInvalidateWithOriginBytes - 1, 0);
+  CHECK_STATUS(decode_region_invalidate(buf, &got), Status::kInvalidArgument);
+}
+
 /* ---- Notifications ---- */
 
 namespace {

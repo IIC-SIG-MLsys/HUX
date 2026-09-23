@@ -787,6 +787,31 @@ Status IpcProvider::send_control(ProviderConnection* conn, uint16_t type,
   return s;
 }
 
+Status IpcProvider::broadcast_control(uint16_t type,
+                                      std::vector<uint8_t> const& payload,
+                                      uint32_t* sent, uint32_t* refused) {
+  /* One peer per provider, dialled or accepted alike, so every connection
+   * is this one. */
+  uint32_t ok = 0, no = 0;
+  std::vector<uint8_t> body;
+  put_u16(&body, type);
+  body.insert(body.end(), payload.begin(), payload.end());
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    if (sock_ >= 0 && !peer_gone_) {
+      Status const s = send_frame(sock_, kFrameControl, body);
+      if (s == Status::kPeerDisconnected) peer_is_gone_locked();
+      if (s == Status::kOk)
+        ++ok;
+      else
+        ++no;
+    }
+  }
+  if (sent != nullptr) *sent = ok;
+  if (refused != nullptr) *refused = no;
+  return Status::kOk;
+}
+
 Status IpcProvider::poll_control(uint32_t max_items,
                                  std::vector<ControlMessage>* out) {
   if (out == nullptr) return Status::kInvalidArgument;

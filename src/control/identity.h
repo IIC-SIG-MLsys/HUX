@@ -26,6 +26,13 @@ struct Identity {
   uint64_t engine = 0;
 };
 
+inline bool operator==(Identity const& a, Identity const& b) {
+  return a.host == b.host && a.process == b.process && a.engine == b.engine;
+}
+inline bool operator!=(Identity const& a, Identity const& b) {
+  return !(a == b);
+}
+
 /* This process's identity, computed once. */
 Identity const& local_identity();
 
