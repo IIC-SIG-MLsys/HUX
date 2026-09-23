@@ -976,6 +976,11 @@ Status EngineImpl::submit_vector(Peer* peer,
 
   size_t total_ops = 0;
   for (auto const& v : per_lane) total_ops += v.size();
+  /* Moving nothing is refused. A request without a single sub-operation has
+   * nothing that could ever end it: it stayed in flight for good, a wait on
+   * it never returned, and every deregistration after it was turned away as
+   * busy. Nothing has been admitted yet, so refusing here leaves no trace. */
+  if (total_ops == 0) return Status::kInvalidArgument;
 
   auto req = std::make_shared<RequestImpl>(
       req_id, kind, static_cast<uint32_t>(total_ops), opts.context);

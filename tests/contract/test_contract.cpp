@@ -334,18 +334,37 @@ HUX_TEST(partial_submit_releases_the_request) {
 HUX_TEST(full_submit_rejection_has_no_side_effect) {
   EngineConfig cfg = explicit_cfg();
   MockConfig mock;
-  mock.accept_limit = 0;
+  mock.reject_all = true;
   mock.submit_status_on_partial = Status::kResourceExhausted;
   Fixture f;
   CHECK(f.setup(cfg, mock));
-  /* accept_limit = 0 means unlimited in the mock, so full rejection is staged
-   * with a zero-length request: nothing may reach the provider. */
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 4096, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
+  RequestPtr req;
+  f.engine->read(f.peer.get(), local, remote, {}, &req);
+  CHECK_EQ(f.provider->submitted_subops(), 0u);
+}
+
+HUX_TEST(a_transfer_of_nothing_is_refused_and_leaves_nothing_behind) {
+  /* A regression. A zero-length transfer produced no sub-operation, so
+   * nothing could ever end it: the call returned kOk, the request stayed in
+   * flight for good, a wait on it never returned, and every deregistration
+   * afterwards was refused as busy. */
+  EngineConfig cfg = explicit_cfg();
+  Fixture f;
+  CHECK(f.setup(cfg, MockConfig{}));
   RegionView local, remote;
   CHECK_STATUS(f.dst_region->view(0, 0, &local), Status::kOk);
   CHECK_STATUS(f.remote_src->view(0, 0, &remote), Status::kOk);
   RequestPtr req;
-  f.engine->read(f.peer.get(), local, remote, {}, &req);
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kInvalidArgument);
+  CHECK(req == nullptr);
   CHECK_EQ(f.provider->submitted_subops(), 0u);
+  CHECK_EQ(f.engine->stats().requests_accepted, uint64_t(0));
+  /* Nothing is in flight, so the region can go at once. */
+  CHECK_STATUS(f.engine->deregister_memory(f.dst_region), Status::kOk);
 }
 
 /* ---- Submission queue bound ---- */

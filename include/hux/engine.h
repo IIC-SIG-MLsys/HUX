@@ -165,7 +165,8 @@ class Engine {
 
   /* Transfers, asynchronous by default. The scalar forms are single-segment
    * shortcuts over the same submission path. One vector operation targets one
-   * peer; segments pair up by index with equal lengths. */
+   * peer; segments pair up by index with equal lengths. A transfer of no
+   * bytes at all is refused with kInvalidArgument. */
   virtual Status read(Peer* peer, RegionView const& local,
                       RegionView const& remote, TransferOptions const& opts,
                       RequestPtr* out) = 0;
