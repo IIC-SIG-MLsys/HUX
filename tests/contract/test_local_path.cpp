@@ -4,7 +4,11 @@
  * exactly why it needs testing: a local path that succeeds where a remote one
  * refuses teaches callers habits that break when the peer moves to another
  * host. */
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #include "core/factory.h"
@@ -123,6 +127,42 @@ HUX_TEST(an_out_of_range_access_is_refused) {
 
   LocalRegistry::instance().withdraw(key);
   CHECK(LocalRegistry::instance().resolve(key, base, 4096) == nullptr);
+}
+
+HUX_TEST(withdrawing_waits_for_a_copy_already_under_way) {
+  /* A regression. The key was resolved under the registry's lock and the
+   * copy made after it was released, so an owner could withdraw the range
+   * mid-copy, free the memory, and have the copy write into whatever came
+   * next. Once withdraw() returns, a copy that had begun must be over: the
+   * destination is complete. A copy that only began after the withdrawal
+   * finds the key gone and says nothing either way, so that round is run
+   * again. */
+  size_t const bytes = 64u << 20;
+  std::vector<uint8_t> src(bytes, 0x3c), dst(bytes, 0);
+  auto const base = reinterpret_cast<uint64_t>(src.data());
+  bool decided = false;
+  for (int round = 0; round < 20 && !decided; ++round) {
+    std::fill(dst.begin(), dst.end(), 0);
+    uint64_t const key = LocalRegistry::instance().publish(src.data(), bytes);
+    std::atomic<bool> started{false};
+    bool copied = false;
+    std::thread copier([&] {
+      started.store(true, std::memory_order_release);
+      copied = LocalRegistry::instance().copy(key, base, bytes, dst.data(),
+                                              /*into_local=*/true);
+    });
+    while (!started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    LocalRegistry::instance().withdraw(key);
+    /* Read before joining: joining would wait for the copy anyway. */
+    bool const complete = dst.back() == 0x3c && dst[bytes / 2] == 0x3c;
+    copier.join();
+    if (!copied) continue;
+    decided = true;
+    CHECK(complete);
+  }
+  CHECK(decided);
 }
 
 HUX_TEST(a_withdrawn_registration_stops_serving_transfers) {

@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -37,13 +38,24 @@ class LocalRegistry {
    * for an unknown key or a range outside it -- the refusal a NIC gives,
    * rather than a wild pointer. */
   void* resolve(uint64_t key, uint64_t address, uint64_t length) const;
+  /* Copies between local memory and a published range, holding the range
+   * published until the copy is done: withdraw() waits for it. Resolving
+   * and then copying left a window in which the owner could withdraw the
+   * range and free the memory, and the copy then wrote into whatever the
+   * allocator handed out next -- the one thing the IPC path waits for its
+   * peer to rule out. False, and nothing copied, for an unknown key or a
+   * range outside it. */
+  bool copy(uint64_t key, uint64_t address, uint64_t length, void* local,
+            bool into_local) const;
 
  private:
   struct Entry {
     void* addr;
     uint64_t length;
   };
-  mutable std::mutex mu_;
+  void* resolve_locked(uint64_t key, uint64_t address, uint64_t length) const;
+  /* Shared for copies, exclusive to change the table. */
+  mutable std::shared_mutex mu_;
   std::map<uint64_t, Entry> entries_;
   uint64_t next_ = 1;
 };

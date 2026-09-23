@@ -28,20 +28,37 @@ LocalRegistry& LocalRegistry::instance() {
 }
 
 uint64_t LocalRegistry::publish(void* addr, uint64_t length) {
-  std::lock_guard<std::mutex> g(mu_);
+  std::unique_lock<std::shared_mutex> g(mu_);
   uint64_t key = next_++;
   entries_[key] = Entry{addr, length};
   return key;
 }
 
 void LocalRegistry::withdraw(uint64_t key) {
-  std::lock_guard<std::mutex> g(mu_);
+  std::unique_lock<std::shared_mutex> g(mu_);
   entries_.erase(key);
 }
 
 void* LocalRegistry::resolve(uint64_t key, uint64_t address,
                              uint64_t length) const {
-  std::lock_guard<std::mutex> g(mu_);
+  std::shared_lock<std::shared_mutex> g(mu_);
+  return resolve_locked(key, address, length);
+}
+
+bool LocalRegistry::copy(uint64_t key, uint64_t address, uint64_t length,
+                         void* local, bool into_local) const {
+  std::shared_lock<std::shared_mutex> g(mu_);
+  void* remote = resolve_locked(key, address, length);
+  if (remote == nullptr) return false;
+  if (into_local)
+    std::memcpy(local, remote, static_cast<size_t>(length));
+  else
+    std::memcpy(remote, local, static_cast<size_t>(length));
+  return true;
+}
+
+void* LocalRegistry::resolve_locked(uint64_t key, uint64_t address,
+                                    uint64_t length) const {
   auto it = entries_.find(key);
   if (it == entries_.end()) return nullptr;
 
@@ -146,17 +163,13 @@ SubmitResult LocalProvider::submit(ProviderConnection* conn,
     /* The remote address is a key plus an offset, resolved through the
      * registry, not a pointer taken on trust. Dereferencing what a peer sent
      * would work here and be a serious bug the moment the peer is remote. */
-    void* remote = LocalRegistry::instance().resolve(op.remote_key,
-                                                     op.remote_addr, op.length);
-    if (remote == nullptr) {
+    if (!LocalRegistry::instance().copy(op.remote_key, op.remote_addr,
+                                        op.length, op.local_addr,
+                                        op.kind == SubOp::Kind::kRead)) {
       /* The same refusal a NIC gives for an unknown or out-of-range key. */
       r.status = Status::kInvalidArgument;
       break;
     }
-
-    void* dst = op.kind == SubOp::Kind::kRead ? op.local_addr : remote;
-    void const* src = op.kind == SubOp::Kind::kRead ? remote : op.local_addr;
-    std::memcpy(dst, src, static_cast<size_t>(op.length));
 
     CompletionEvent ev;
     ev.request = op.request;
