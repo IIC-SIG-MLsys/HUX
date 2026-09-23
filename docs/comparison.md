@@ -214,6 +214,26 @@ DEVX `dp_ordering_ooo`). Forced back to the standard IBTA ordering
 portable verbs queue pairs use, UCX lost 1090 and 1013 packets in two runs
 and showed the same tail: p99 383 and 1667 us.
 
+What drops the packets is the mismatch in the hardware, not the load on the
+hosts. The sending host has a second adapter, on PCIe ×4 like the receiver's.
+Same hosts, same load, same receiver, only the sending adapter changed, two
+passes each:
+
+| | sender -> receiver | write p99 us | packets lost |
+| --- | --- | ---: | ---: |
+| HUX | ×8 -> ×4 | 1483, 1507 | 947, 1104 |
+| HUX | ×4 -> ×4 | 392, 403 | 0, 0 |
+| UCX, standard ordering | ×8 -> ×4 | 1465, 368 | 1040, 1076 |
+| UCX, standard ordering | ×4 -> ×4 | 370, 374 | 0, 0 |
+
+Rate-matched, neither loses a packet and neither has the tail. So the tail
+needs a sender faster than its receiver -- common enough in practice, with
+adapters of different generations or slots of different widths, which is
+why the feature is still worth having -- and on matched hardware HUX's write
+tail is as clean as UCX's. What the load on the hosts does explain is the
+other two tails, UCX's tagged rendezvous and UCCL's, whose protocols need
+the receiving CPU to run.
+
 Ruled out on the way, each by measurement rather than argument: the ready
 handoff (its send never took more than 37 us, and a build that skips it kept
 the tail), the receiving side's progress thread, congestion control (off),
