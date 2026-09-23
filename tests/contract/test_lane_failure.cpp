@@ -217,3 +217,19 @@ HUX_TEST(cancelling_a_request_waiting_on_a_dependency_ends_it) {
   CHECK_EQ(provider->submitted_subops(), 0u);
   CHECK_EQ(engine->stats().requests_cancelled, uint64_t(1));
 }
+
+HUX_TEST(a_split_request_waiting_on_a_dependency_counts_once) {
+  /* The counter was the size of the queue of pieces, and a request split
+   * across two lanes waits there as two. */
+  TwoLanes t;
+  CHECK(t.make(MockConfig{}, MockConfig{}));
+  RegionView lv, rv;
+  CHECK_STATUS(t.sreg->view(0, 2 * kChunk, &lv), Status::kOk);
+  CHECK_STATUS(t.remote->view(0, 2 * kChunk, &rv), Status::kOk);
+  TransferOptions opts;
+  opts.after.push_back(std::make_shared<PendingEvent>());
+  RequestPtr req;
+  CHECK_STATUS(t.engine->write(t.peer.get(), lv, rv, opts, &req), Status::kOk);
+  CHECK(req->state() == RequestState::kWaitDependency);
+  CHECK_EQ(t.engine->stats().requests_waiting_on_dependency, 1u);
+}

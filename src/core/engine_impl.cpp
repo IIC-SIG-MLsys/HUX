@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <unordered_set>
 
 #include "control/control_message.h"
 #include "control/identity.h"
@@ -1779,7 +1780,15 @@ EngineStats EngineImpl::stats() const {
       ready_events_dropped_.load(std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> g(mu_);
-    s.requests_waiting_on_dependency = pending_.size();
+    /* Requests, not their pieces, and only those waiting on a dependency:
+     * pending_ holds a piece per lane, and pieces put back for want of a
+     * turn, so its size counted a split request once per lane and a large
+     * one that was merely still going out as if it were waiting. */
+    std::unordered_set<RequestImpl const*> waiting;
+    for (auto const& ps : pending_)
+      if (ps.req->state() == RequestState::kWaitDependency)
+        waiting.insert(ps.req.get());
+    s.requests_waiting_on_dependency = waiting.size();
     s.registration_cache_size = reg_cache_.size();
   }
   /* Sub-operation and byte counts come from the providers, which are the only

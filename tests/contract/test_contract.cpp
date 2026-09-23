@@ -776,3 +776,22 @@ HUX_TEST(a_request_that_fails_at_once_is_reported_once) {
   CHECK(done.size() == 1 && done[0] == req);
   CHECK_EQ(f.engine->stats().requests_failed, 1u);
 }
+
+HUX_TEST(a_request_still_going_out_is_not_waiting_on_a_dependency) {
+  /* A request larger than one turn puts the rest back to wait for the
+   * next, with no dependency anywhere; it was counted as waiting on one. */
+  EngineConfig cfg = explicit_cfg();
+  cfg.chunk_bytes = 512;
+  cfg.scheduler_quantum_bytes = 1024;
+  Fixture f;
+  CHECK(f.setup(cfg, MockConfig{}));
+  RegionView local, remote;
+  CHECK_STATUS(f.dst_region->view(0, 4096, &local), Status::kOk);
+  CHECK_STATUS(f.remote_src->view(0, 4096, &remote), Status::kOk);
+  RequestPtr req;
+  CHECK_STATUS(f.engine->read(f.peer.get(), local, remote, {}, &req),
+               Status::kOk);
+  CHECK(f.provider->submitted_subops() < 8u); /* some of it is still to go */
+  CHECK_EQ(f.engine->stats().requests_waiting_on_dependency, 0u);
+  CHECK_STATUS(f.drain(req), Status::kOk);
+}
