@@ -191,22 +191,32 @@ RegistrationPtr EngineImpl::find_registration(void* addr, uint64_t length,
 }
 
 void EngineImpl::cache_registration(RegistrationPtr reg) {
-  std::lock_guard<std::mutex> g(mu_);
-  reg_cache_.push_back(std::move(reg));
-  /* Over the bound, drop entries nothing else is holding. One still in use is
-   * skipped rather than evicted: releasing it would pull the registration out
-   * from under a handle that may still be transferring. */
-  while (reg_cache_.size() > cfg_.registration_cache_entries) {
-    bool evicted = false;
-    for (auto it = reg_cache_.begin(); it != reg_cache_.end(); ++it) {
-      if (it->use_count() == 1) {
-        reg_cache_.erase(it);
-        evicted = true;
-        break;
+  std::vector<RegistrationPtr> evicted;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    reg_cache_.push_back(std::move(reg));
+    /* Over the bound, drop entries nothing else is holding. One still in use
+     * is skipped rather than evicted: releasing it would pull the
+     * registration out from under a handle that may still be transferring. */
+    while (reg_cache_.size() > cfg_.registration_cache_entries) {
+      bool dropped = false;
+      for (auto it = reg_cache_.begin(); it != reg_cache_.end(); ++it) {
+        if (it->use_count() == 1) {
+          evicted.push_back(std::move(*it));
+          reg_cache_.erase(it);
+          dropped = true;
+          break;
+        }
       }
+      if (!dropped) break; /* everything is in use; the bound gives way */
     }
-    if (!evicted) break; /* everything is in use; the bound gives way */
   }
+  /* Released here, outside the lock, for the same reason as in
+   * release_cached_registrations(): deregistration can block -- the IPC path
+   * waits for the peer to confirm it unmapped -- and erasing the last
+   * reference under the lock did it with every submitter and the progress
+   * thread waiting on that lock. */
+  evicted.clear();
 }
 
 Status EngineImpl::register_memory(void* addr, uint64_t length,
