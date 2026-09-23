@@ -526,12 +526,20 @@ Status IpcProvider::pump(int fd) {
     peer_is_gone_locked();
     return Status::kPeerDisconnected;
   }
+  std::lock_guard<std::mutex> g(mu_);
+  /* Read under the lock, and only while the socket is still the one this was
+   * called for. Callers take the descriptor and let the lock go, and the
+   * peer can be declared gone in between -- the socket closed and its number
+   * free for the next file or socket this process opens. A read taken
+   * outside the lock would then consume someone else's bytes, and the
+   * acknowledgement below would be written into their descriptor. The reads
+   * never wait, so holding the lock for them costs nothing. */
+  if (fd != sock_) return Status::kPeerDisconnected;
   bool closed = false;
   for (;;) {
     uint8_t buf[4096];
     ssize_t k = ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
     if (k > 0) {
-      std::lock_guard<std::mutex> g(mu_);
       inbox_.insert(inbox_.end(), buf, buf + k);
       continue;
     }
@@ -549,7 +557,6 @@ Status IpcProvider::pump(int fd) {
     break;
   }
 
-  std::lock_guard<std::mutex> g(mu_);
   for (;;) {
     if (inbox_.size() < 6) break;
     uint32_t const len = get_u32(inbox_.data());
