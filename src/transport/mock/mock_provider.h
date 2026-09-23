@@ -8,12 +8,14 @@
 #define HUX_TRANSPORT_MOCK_PROVIDER_H
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "transport/provider.h"
@@ -54,6 +56,10 @@ struct MockConfig {
    * whose connection has broken does. accept_limit cannot stage this: zero
    * there means no limit. */
   bool reject_all = false;
+  /* Holds poll_control this long, outside the lock, the way a real reader
+   * spends time in recv and parsing. Two callers at once then overlap
+   * reliably, which overlapping_control_polls() counts. */
+  uint32_t control_poll_us = 0;
 };
 
 class MockConnection : public ProviderConnection {
@@ -154,12 +160,25 @@ class MockProvider : public TransportProvider {
                       std::vector<ControlMessage>* out) override {
     if (out == nullptr) return Status::kInvalidArgument;
     out->clear();
-    std::lock_guard<std::mutex> g(mu_);
-    while (!control_.empty() && out->size() < max_items) {
-      out->push_back(std::move(control_.front()));
-      control_.pop_front();
+    /* Counted outside the lock: the real providers' control readers are not
+     * locked against a second caller, so the engine must never be one. */
+    if (in_control_poll_.fetch_add(1, std::memory_order_acq_rel) != 0)
+      overlapping_control_polls_.fetch_add(1, std::memory_order_relaxed);
+    if (cfg_.control_poll_us > 0)
+      std::this_thread::sleep_for(
+          std::chrono::microseconds(cfg_.control_poll_us));
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      while (!control_.empty() && out->size() < max_items) {
+        out->push_back(std::move(control_.front()));
+        control_.pop_front();
+      }
     }
+    in_control_poll_.fetch_sub(1, std::memory_order_acq_rel);
     return Status::kOk;
+  }
+  uint64_t overlapping_control_polls() const {
+    return overlapping_control_polls_.load(std::memory_order_relaxed);
   }
 
   Status poll_peer_arrivals(uint32_t max_items,
@@ -221,6 +240,8 @@ class MockProvider : public TransportProvider {
   uint64_t inflight_bytes_ = 0;
   uint64_t total_registrations_ = 0;
   ProviderStats stats_;
+  std::atomic<int> in_control_poll_{0};
+  std::atomic<uint64_t> overlapping_control_polls_{0};
 };
 
 }  // namespace hux

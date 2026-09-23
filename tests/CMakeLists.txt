@@ -19,6 +19,7 @@ add_executable(hux_contract_tests
   contract/test_ipc_path.cpp
   contract/test_paths.cpp
   contract/test_mlx5_prm.cpp
+  contract/test_progress_turns.cpp
   device/test_host_backend.cpp
 )
 target_include_directories(hux_contract_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

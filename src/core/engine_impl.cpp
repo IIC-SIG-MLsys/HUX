@@ -1272,6 +1272,7 @@ void EngineImpl::reap_departed_peers() {
 }
 
 Status EngineImpl::progress() {
+  std::lock_guard<std::mutex> turn(progress_mu_);
   /* One scheduling pass first, so a request that has become ready is offered
    * in this same call rather than a later one. */
   drain_pending();

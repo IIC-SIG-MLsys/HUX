@@ -253,6 +253,12 @@ class EngineImpl : public Engine {
   mutable std::mutex stats_mu_;
   EngineStats stats_;
 
+  /* progress() runs on one thread at a time. close() drives it while the
+   * progress thread may still be running, and in explicit mode every poll
+   * call drives it from whichever thread makes the call -- and a provider's
+   * control reader keeps a partial message between calls and is not made
+   * for two callers. Taken before mu_, never while holding it. */
+  std::mutex progress_mu_;
   std::thread progress_thread_;
   std::atomic<bool> stopping_{false};
   std::atomic<bool> closed_{false};
