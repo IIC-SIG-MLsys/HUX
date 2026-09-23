@@ -97,7 +97,9 @@ using RegistrationPtr = std::shared_ptr<Registration>;
  * Containment has to be exact. A range that only partly overlaps covers bytes
  * the hardware was never told about, and the transfer that follows fails
  * somewhere far from the registration that caused it. Permissions have to be
- * at least as wide, for the same reason in the other direction. */
+ * at least as wide, for the same reason in the other direction -- and the
+ * remote ones exactly as wide, since the key a handle exports lets a peer do
+ * whatever its registration allows. */
 bool registration_covers(Registration const& r, void* addr, uint64_t length,
                          DeviceId device, AccessFlags access);
 

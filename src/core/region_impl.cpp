@@ -130,6 +130,13 @@ bool registration_covers(Registration const& r, void* addr, uint64_t length,
   uint32_t const want = static_cast<uint32_t>(access);
   uint32_t const have = static_cast<uint32_t>(r.access);
   if ((want & ~have) != 0) return false;
+  /* And what a peer may do has to match exactly, not merely suffice. The key
+   * a handle exports is its registration's, and a peer can do whatever that
+   * key allows: served from a registration a peer could write through, a
+   * handle registered for reading exported a key it could write with. */
+  uint32_t const remote = static_cast<uint32_t>(AccessFlags::kRemoteRead) |
+                          static_cast<uint32_t>(AccessFlags::kRemoteWrite);
+  if ((want & remote) != (have & remote)) return false;
 
   auto const start = reinterpret_cast<uintptr_t>(addr);
   auto const base = reinterpret_cast<uintptr_t>(r.base);

@@ -108,7 +108,28 @@ HUX_TEST(wider_permissions_are_not_taken_from_a_narrower_registration) {
   CHECK_EQ(f.provider->registration_count(), 2u);
 }
 
-HUX_TEST(narrower_permissions_may_reuse_a_wider_registration) {
+HUX_TEST(narrower_local_permissions_may_reuse_a_wider_registration) {
+  CacheFixture f;
+  CHECK(f.setup());
+
+  MemoryRegionPtr wide, narrow;
+  CHECK_STATUS(f.engine->register_memory(f.at(0), 8192,
+                                         AccessFlags::kLocalRead |
+                                             AccessFlags::kLocalWrite |
+                                             AccessFlags::kRemoteRead,
+                                         &wide),
+               Status::kOk);
+  CHECK_STATUS(f.engine->register_memory(
+                   f.at(0), 4096,
+                   AccessFlags::kLocalRead | AccessFlags::kRemoteRead, &narrow),
+               Status::kOk);
+  CHECK_EQ(f.provider->registration_count(), 1u);
+}
+
+HUX_TEST(narrower_remote_permissions_get_a_registration_of_their_own) {
+  /* A regression. Served from a registration a peer could write through, a
+   * handle registered for reading only exported that registration's key --
+   * and the key is what the adapter checks, so the peer could write. */
   CacheFixture f;
   CHECK(f.setup());
 
@@ -120,7 +141,7 @@ HUX_TEST(narrower_permissions_may_reuse_a_wider_registration) {
   CHECK_STATUS(
       f.engine->register_memory(f.at(0), 4096, AccessFlags::kRemoteRead, &ro),
       Status::kOk);
-  CHECK_EQ(f.provider->registration_count(), 1u);
+  CHECK_EQ(f.provider->registration_count(), 2u);
 }
 
 HUX_TEST(a_registration_outlives_handles_that_still_reference_it) {
