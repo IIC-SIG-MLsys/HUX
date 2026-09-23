@@ -1227,11 +1227,17 @@ Status RdmaProvider::poll(uint32_t max_events,
       stashed_.pop_front();
     }
   }
+  /* A failed poll still hands back what was taken from the stash above:
+   * returning at once dropped those completions, and their requests never
+   * ended. */
+  Status polled = Status::kOk;
   if (n < static_cast<int>(max_events)) {
     int const drawn =
         ibv_poll_cq(cq_, static_cast<int>(max_events) - n, wc.data() + n);
-    if (drawn < 0) return Status::kTransportError;
-    n += drawn;
+    if (drawn < 0)
+      polled = Status::kTransportError;
+    else
+      n += drawn;
   }
 
   for (int i = 0; i < n; ++i) {
@@ -1324,7 +1330,7 @@ Status RdmaProvider::poll(uint32_t max_events,
     }
     q.reclaimed = seq + 1;
   }
-  return Status::kOk;
+  return polled;
 }
 
 Status RdmaProvider::send_control(ProviderConnection* conn, uint16_t type,

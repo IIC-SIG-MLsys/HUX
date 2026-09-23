@@ -1188,16 +1188,17 @@ Status EngineImpl::poll_completions(uint32_t max_items,
                                     std::vector<RequestPtr>* out) {
   if (out == nullptr) return Status::kInvalidArgument;
   out->clear();
-  if (cfg_.progress == ProgressMode::kExplicit) {
-    Status s = progress();
-    if (s != Status::kOk) return s;
-  }
+  /* What finished is handed out even when a transport's poll failed: the
+   * error is returned, but returning it instead left every finished request
+   * in the queue for as long as the failure lasted. */
+  Status const s =
+      cfg_.progress == ProgressMode::kExplicit ? progress() : Status::kOk;
   std::lock_guard<std::mutex> g(mu_);
   while (!completed_.empty() && out->size() < max_items) {
     out->push_back(std::move(completed_.front()));
     completed_.pop_front();
   }
-  return Status::kOk;
+  return s;
 }
 
 Status EngineImpl::poll_ready_events(uint32_t max_items,
@@ -1425,10 +1426,14 @@ Status EngineImpl::progress() {
    * contract requires every event it collected; returning early drops other
    * requests' completions, and skipping a transport strands whatever is in
    * flight on it. */
+  Status polled = Status::kOk;
   for (auto const& prov : providers_) {
     std::vector<CompletionEvent> batch;
-    Status ps = prov->poll(cfg_.cq_batch, &batch);
-    if (ps != Status::kOk) return ps;
+    Status const ps = prov->poll(cfg_.cq_batch, &batch);
+    /* Kept and reported, not returned on: returning here dropped the events
+     * already taken from the transports before this one, and a lasting
+     * error on one adapter starved every transport after it. */
+    if (ps != Status::kOk && polled == Status::kOk) polled = ps;
     events.insert(events.end(), batch.begin(), batch.end());
   }
 
@@ -1519,7 +1524,7 @@ Status EngineImpl::progress() {
       evicted = keep_completed_locked(req);
     }
   }
-  return Status::kOk;
+  return polled;
 }
 
 void EngineImpl::progress_loop() {

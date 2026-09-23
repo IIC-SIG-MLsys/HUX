@@ -154,6 +154,27 @@ HUX_TEST(a_request_keeps_every_lane_it_went_out_on) {
   CHECK(!is_terminal(req->state()));
 }
 
+HUX_TEST(a_transport_whose_poll_fails_still_hands_back_what_it_took) {
+  /* A regression. progress() returned at the first transport whose poll
+   * failed: what that poll had handed back was dropped, and the transports
+   * after it were not polled at all, so a request with work on either never
+   * ended. The failure is still reported. */
+  MockConfig failing;
+  failing.poll_status = Status::kTransportError;
+  TwoLanes t;
+  CHECK(t.make(failing, MockConfig{}));
+  RequestPtr req;
+  CHECK_STATUS(t.write_both_lanes(&req), Status::kOk);
+
+  std::vector<RequestPtr> done;
+  Status last = Status::kOk;
+  for (int i = 0; i < 50 && done.empty(); ++i)
+    last = t.engine->poll_completions(32, &done);
+  CHECK_EQ(done.size(), size_t(1));
+  CHECK(req->state() == RequestState::kSucceeded);
+  CHECK_STATUS(last, Status::kTransportError);
+}
+
 HUX_TEST(cancelling_a_request_waiting_on_a_dependency_ends_it) {
   auto provider = std::make_shared<MockProvider>(MockConfig{});
   EngineConfig cfg;

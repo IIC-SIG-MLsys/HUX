@@ -187,6 +187,8 @@ class Engine {
   virtual Status poll_notifications(uint32_t max_items,
                                     std::vector<Notification>* out) = 0;
 
+  /* A transport's poll failing is returned, and what finished is handed out
+   * all the same. */
   virtual Status poll_completions(uint32_t max_items,
                                   std::vector<RequestPtr>* out) = 0;
   /* Ready handoffs for regions this engine is the write target of. */

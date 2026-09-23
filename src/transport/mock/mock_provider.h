@@ -60,6 +60,9 @@ struct MockConfig {
    * spends time in recv and parsing. Two callers at once then overlap
    * reliably, which overlapping_control_polls() counts. */
   uint32_t control_poll_us = 0;
+  /* What poll() reports alongside whatever it hands back, the way a real
+   * one reports a failed poll after taking completions it had set aside. */
+  Status poll_status = Status::kOk;
 };
 
 class MockConnection : public ProviderConnection {

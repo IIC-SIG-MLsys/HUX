@@ -94,7 +94,7 @@ Status MockProvider::poll(uint32_t max_events,
     inflight_bytes_ -= b < inflight_bytes_ ? b : inflight_bytes_;
     pending_.pop_front();
   }
-  return Status::kOk;
+  return cfg_.poll_status;
 }
 
 }  // namespace hux
