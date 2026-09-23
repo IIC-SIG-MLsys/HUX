@@ -125,46 +125,125 @@ That is a difference in what the two can do rather than a measurement, and it
 is claimed only for this class of GPU. Where peer access is enabled, UCCL's
 path would presumably work and would deserve a real comparison.
 
-## Still to do
+## Against UCX and UCCL, across machines
 
-A cross-machine comparison against UCCL over RDMA, which is its main path.
-What that needs was checked rather than assumed, because an earlier note here
-said it needed a particular pair of cards and that was wrong.
+Host memory, one adapter each end, between the two NVIDIA hosts on the RoCE
+fabric. The sender's adapter sits on PCIe ×8 and the receiver's on ×4, so
+the path tops out near 24 Gb/s and every 1 MiB write the sender pushes at its
+own line rate has to be absorbed by a slower receiver -- the path is
+congested by construction, and the adapters' congestion machinery (ECN and
+DCQCN) is active on it. Both hosts carried other people's work throughout:
+load 65-84 on the sender's 64 cores and 104-124 on the receiver's. That is the
+condition the earlier UCCL measurement was made under, and the load is
+recorded with every run.
 
-It does not need peer access, which is what stopped the same-host
-comparison: two machines reach each other through their adapters, not through
-the PCIe fabric.
+UCX is 1.20.0, built once with its release configuration and the same binary
+run on both ends. Its arm is `ucx-bench` (`-DHUX_BUILD_UCX_BENCH=ON`), a plain
+UCP program linked against nothing of HUX, with hux-bench's definitions
+throughout: latency from issue to known-complete, percentiles as the sorted
+sample at floor(q(n-1)), warm-up and depth meaning the same thing. Before it
+was trusted it was held against UCX's own `ucx_perftest` on the same path:
+1 MiB put 343.8 us and 24.4 Gb/s against perftest's 348.5 us and 23.3 Gb/s;
+16 KiB, 8.8 against 9.0 us. It writes a pattern to the peer and reads it back
+at the end of every run.
 
-It does need a particular card, and an earlier version of this section said
-otherwise on the grounds that `nvidia_peermem` was loaded on both hosts. That
-module is necessary and not sufficient. Probed directly here, with the module
-loaded, on the same host and the same adapter:
+A UCP put completes when its source may be reused, which for a short put is
+before the bytes leave the host. So a put is timed to a flush of its
+endpoint, UCP's own way to learn the bytes arrived and the guarantee a HUX
+write gives. UCX's tagged send is a separate arm: above the rendezvous
+threshold it cannot complete until the receiver has progressed.
 
-| card | `ibv_reg_mr` on device memory, 4 KiB / 1 MiB / 64 MiB |
-| --- | --- |
-| RTX 4090 | `EFAULT` at every size |
-| A40 | succeeds at every size |
+### One-sided writes, 1 MiB, one outstanding
 
-GPUDirect is withheld from the consumer line whatever is installed, which
-`docs/support-matrix.md` already recorded from a separate measurement. A
-comparison over device memory therefore needs the A40 on each host, not any
-spare GPU. A comparison over host memory needs no such thing, and is worth
-running on its own terms -- but the pair of hosts is the same either way.
+Five passes of 3000, the arms rotated through the order:
 
-What it does need is two NVIDIA hosts on the RoCE fabric, and there are
-exactly two: the machine these measurements were taken on, five RTX 4090s
-and an A40, and a second with four 4090s and an A40. The other NVIDIA
-machines available -- two with RTX 5090s -- have no adapter on that fabric
-at all: no `ibv_devinfo` output, no address on the subnet, no
-`nvidia_peermem`. So there is no third host to substitute.
+| | p50 us | p90 us | p99 us | p99 of each pass |
+| --- | ---: | ---: | ---: | --- |
+| UCX put | 343.6 | 351.7 | **359.2** | 358 353 360 359 365 |
+| UCX tagged send | 349.7 | 358.0 | 369.0 | 364 **31133 28732** 367 369 |
+| HUX write | 362.6 | 373.0 | 1534.3 | 1554 1461 1534 1560 1504 |
+| UCCL write | 366.0 | 1513.0 | 3352.4 | 3212 4010 3184 3352 3372 |
 
-The second of the two carries a sustained load average of 101, which is the
-blocker. That is not only a matter of leaving it alone: a benchmark whose
-progress thread polls a completion queue measures how often it is scheduled,
-and on a machine that oversubscribed it would report the scheduler rather
-than the transport. Its root filesystem is also full, at 4.6 GB free, so
-building UCCL and HUX there has to go on the data volume.
+Against UCCL, HUX keeps the tail: 4.1x lower at p90 and 2.2x at p99. The 54x
+reported earlier came from 600 samples, in which UCCL's p99 was 21 ms; with
+3000 its p99 sits at 3.2-4.0 ms in every pass.
 
-Neither UCCL nor HUX is installed on it yet. That part is work rather than
-waiting, and it is worth doing in advance so the comparison can run whenever
-the load drops.
+Against UCX's put it does not: UCX's p99 is 4.3x lower and its median 5%.
+
+The tails that blow up belong to the protocols that need the receiving
+host's CPU -- UCX's tagged rendezvous, at about 30 ms in two passes of five,
+and UCCL, whose receiver advertises the slots written into. UCX's put needs
+nothing from the receiver and has the tightest distribution of the four. So
+the earlier explanation of the UCCL gap, that a one-sided write does not wait
+for a loaded receiver, holds. What it does not explain is why HUX's write,
+which is just as one-sided, has a tail at all.
+
+### Why: the adapter drops HUX's bursts and not UCX's
+
+The adapters' own counters, read before and after one run of each:
+
+| | sender: `packet_seq_err` | sender: `rp_cnp_handled` | receiver: `out_of_sequence` | receiver: `rx_write_requests` |
+| --- | ---: | ---: | ---: | ---: |
+| HUX | 990 | 2022 | 990 | 3005 |
+| UCX put | 0 | 0 | 0 | 3,077,122 |
+| UCX put, standard ordering | 1090 | 2208 | 1090 | 3007 |
+
+A HUX write is one 1 MiB message. The sender puts its 1024 packets on the
+wire back to back, the ×4 receiver cannot drain them as fast, and about one
+write in three loses a packet: go-back-N retransmission follows, and a DCQCN
+rate cut. That is the tail. UCX lost nothing, and the receiver counted 1024
+write requests per put -- every packet placed on its own.
+
+The difference is one adapter feature. Where the device supports it, UCX
+creates its RC queue pairs with out-of-order data placement enabled (mlx5
+DEVX `dp_ordering_ooo`). Forced back to the standard IBTA ordering
+(`UCX_RC_MLX5_AR_ENABLE=n UCX_RC_MLX5_DDP_ENABLE=n`), which is what HUX's
+portable verbs queue pairs use, UCX lost 1090 and 1013 packets in two runs
+and showed the same tail: p99 383 and 1667 us.
+
+Ruled out on the way, each by measurement rather than argument: the ready
+handoff (its send never took more than 37 us, and a build that skips it kept
+the tail), the receiving side's progress thread, congestion control (off),
+signalling (every batch ends signalled), relaxed ordering (UCX identical with
+it on, off and auto -- both hosts are Intel), and the traffic class (UCX
+identical at 0 and 106). Chunking HUX's write at the 1 KiB MTU does remove the
+drops -- 0 out of order -- but posts 1024 work requests per MiB and halves the
+throughput (median 655-728 us), so that is not the fix.
+
+So, attributed: with the same ordering semantics HUX and UCX lose the same
+packets and show the same tail, and UCX's median is about 5% ahead. UCX's
+default advantage on this path is an adapter feature HUX does not yet turn
+on. rdma-core exposes it as `MLX5DV_QP_CREATE_OOO_DP`; it has to be set on
+both ends, and it relaxes the order in which a message's bytes land. HUX's
+completion contract does not depend on that order, but two things would have
+to be settled first: an application polling the last byte of a buffer would
+break, and HUX's inference that a signalled completion covers the unsignalled
+ones before it would need to be shown to still hold.
+
+### Short writes behind long ones
+
+16 KiB writes interleaved with 4 MiB ones, eight outstanding, 2000 of each,
+three passes:
+
+| | short, alone | short, mixed p50 | short, mixed p99 | long, mixed p50 | Gb/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| HUX, no control | 47.9 | 5890.6 | 6232.6 | 6291.8 | 22.46 |
+| HUX, 1 MiB window | 38.5 | **23.4** | **40.2** | 10963.3 | 21.73 |
+| UCX | 39.6 | 5653.1 | 5838.8 | 5653.4 | 23.94 |
+| UCX, standard ordering | 41.0 | 6041.3 | 6323.2 | 6042.1 | 22.31 |
+| UCX, second endpoint for short | 39.6 | **24.0** | **39.7** | 11085.4 | 24.24 |
+
+Without a mitigation both are blocked alike, the short write waiting behind
+about 5.7 ms of long ones. HUX's window takes it to 23 us on one connection;
+UCX gets the same by giving short messages an endpoint of their own. So what
+HUX offers here is that the application does not have to split its traffic
+across connections, not that it goes faster -- UCX moved 12% more over the
+same mix with its second endpoint, again from losing no packets.
+
+### Still to do
+
+Device memory. GPUDirect is withheld from the RTX 4090 whatever is
+installed -- `ibv_reg_mr` on its memory returns `EFAULT` at every size, with
+`nvidia_peermem` loaded, while the A40 on the same host and adapter succeeds
+-- so a device-memory comparison needs the A40 on each host, and one of the
+two has been occupied by someone else's work.

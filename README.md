@@ -161,6 +161,7 @@ from the library even though CI never runs them:
 | `tests/manual/ipc_pair` | Two processes on one host through a mapping, including a soak mode |
 | `tests/manual/two_paths` | One engine with both transports live at once, three processes |
 | `benchmarks/hux-bench` | Latency and bandwidth across two machines |
+| `benchmarks/ucx-bench` | The same measurement through UCX directly, for comparison (`-DHUX_BUILD_UCX_BENCH=ON`) |
 | `tools/probe_registration` | What a new device will let a NIC register |
 | `tools/hux_topology` | NICs, devices and how close they are |
 

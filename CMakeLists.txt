@@ -256,3 +256,24 @@ message(STATUS "HUX build summary:")
 message(STATUS "  RDMA=${HUX_ENABLE_RDMA} UCX=${HUX_ENABLE_UCX}")
 message(STATUS "  CUDA=${HUX_ENABLE_CUDA} ROCM=${HUX_ENABLE_ROCM} "
                "NEUWARE=${HUX_ENABLE_NEUWARE} MUSA=${HUX_ENABLE_MUSA}")
+
+# The UCX baseline for hux-bench. A plain UCP program linked against no part
+# of HUX, so what it measures is UCX, not HUX running over UCX. Off by
+# default: it needs a UCX install, which most hosts here do not have --
+# point CMAKE_PREFIX_PATH at one.
+option(HUX_BUILD_UCX_BENCH "UCX baseline for hux-bench (needs UCX)" OFF)
+if(HUX_BUILD_UCX_BENCH)
+  find_path(UCX_BENCH_INCLUDE_DIR ucp/api/ucp.h)
+  find_library(UCX_BENCH_UCP NAMES ucp)
+  find_library(UCX_BENCH_UCS NAMES ucs)
+  if(NOT UCX_BENCH_INCLUDE_DIR OR NOT UCX_BENCH_UCP OR NOT UCX_BENCH_UCS)
+    message(FATAL_ERROR
+      "HUX_BUILD_UCX_BENCH=ON but UCX was not found. "
+      "Set CMAKE_PREFIX_PATH to a UCX install.")
+  endif()
+  add_executable(ucx-bench benchmarks/ucx_bench.cpp)
+  target_include_directories(ucx-bench PRIVATE ${UCX_BENCH_INCLUDE_DIR})
+  target_link_libraries(ucx-bench PRIVATE ${UCX_BENCH_UCP} ${UCX_BENCH_UCS})
+  target_compile_options(ucx-bench PRIVATE -Wall -Wextra)
+  message(STATUS "HUX: UCX baseline benchmark enabled (${UCX_BENCH_UCP})")
+endif()
