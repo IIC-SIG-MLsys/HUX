@@ -69,7 +69,13 @@ class Request {
   virtual Status cancel() = 0;
 
   /* Installs the dependency on the stream and returns. Does not block the
-   * calling thread on the network, and never synchronizes the whole device. */
+   * calling thread on the network, and never synchronizes the whole device.
+   *
+   * Only once the request has reached target_ready (source_reusable for the
+   * second): before that nothing is installed and the answer is kWouldBlock,
+   * since ordering device work behind a transfer still on the network needs
+   * a stream-side wait that is not implemented. A request that failed or was
+   * cancelled returns its error. */
   virtual Status wait_on(DeviceStream* stream) = 0;
   virtual Status wait_source_reusable_on(DeviceStream* stream) = 0;
 

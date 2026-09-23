@@ -187,9 +187,19 @@ void RequestImpl::finish_cancelled() {
   cv_.notify_all();
 }
 
+Status RequestImpl::reached_or(Stage s) const {
+  std::lock_guard<std::mutex> g(mu_);
+  if ((stages_ & stage_bit(s)) != 0) return Status::kOk;
+  if (state_ == RequestState::kCancelled) return Status::kCancelled;
+  if (terminal_locked()) return error_.ok() ? Status::kInternal : error_.status;
+  return Status::kWouldBlock;
+}
+
 Status RequestImpl::wait_on(DeviceStream* stream) {
   if (stream == nullptr) return Status::kInvalidArgument;
   if (device_ == nullptr) return Status::kUnsupported;
+  Status const s = reached_or(Stage::kTargetReady);
+  if (s != Status::kOk) return s;
   /* Installs the dependency and returns; never blocks on the network. */
   return device_->make_visible(stream, target_addr_, target_bytes_);
 }
@@ -198,7 +208,7 @@ Status RequestImpl::wait_source_reusable_on(DeviceStream* stream) {
   if (stream == nullptr) return Status::kInvalidArgument;
   if (kind_ != SubOp::Kind::kWrite) return Status::kInvalidArgument;
   if (device_ == nullptr) return Status::kUnsupported;
-  return Status::kOk;
+  return reached_or(Stage::kSourceReusable);
 }
 
 }  // namespace hux

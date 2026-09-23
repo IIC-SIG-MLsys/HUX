@@ -132,6 +132,13 @@ class RequestImpl : public Request {
 
  private:
   bool terminal_locked() const;
+  /* kOk once the request has reached s. Before that nothing is installed and
+   * the answer is kWouldBlock: ordering device work behind a transfer still
+   * on the network needs a stream-side wait, which is not implemented, and
+   * answering kOk let a caller launch a kernel that read -- or overwrote --
+   * a buffer the adapter was still moving. A request that ended without
+   * reaching s says why. */
+  Status reached_or(Stage s) const;
 
   mutable std::mutex mu_;
   std::condition_variable cv_;
