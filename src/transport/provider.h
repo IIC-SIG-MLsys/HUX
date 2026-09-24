@@ -165,6 +165,10 @@ class TransportProvider {
 
   virtual Status connect(std::vector<uint8_t> const& peer_metadata,
                          ProviderConnectionPtr* out) = 0;
+  /* Stops the connection. Once it returns the transport no longer reads or
+   * writes memory for work posted on it, and that work still completes,
+   * failed, through poll() -- which is what lets the engine call it
+   * FailedSafe. */
   virtual Status disconnect(ProviderConnectionPtr conn) = 0;
   virtual Status local_metadata(std::vector<uint8_t>* out) const = 0;
 

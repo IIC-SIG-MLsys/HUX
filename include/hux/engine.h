@@ -170,6 +170,8 @@ class Engine {
   virtual Status local_metadata(std::vector<uint8_t>* out) const = 0;
   virtual Status add_peer(std::vector<uint8_t> const& metadata,
                           PeerPtr* out) = 0;
+  /* Transfers still in flight to it are stopped and end failed; one that
+   * had already finished keeps its result. */
   virtual Status remove_peer(PeerPtr peer) = 0;
 
   /* Transfers, asynchronous by default. The scalar forms are single-segment

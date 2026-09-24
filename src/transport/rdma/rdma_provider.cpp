@@ -1264,9 +1264,13 @@ Status RdmaProvider::poll(uint32_t max_events,
         std::lock_guard<std::mutex> g(arrival_mu_);
         arrivals_.push_back(PeerArrival{ntohl(wc[i].imm_data), 0});
       }
-      /* Re-arm regardless: a consumed receive that is not replaced silently
-       * lowers the number of arrivals that can still be caught. */
-      {
+      /* Re-armed after a success: a consumed receive that is not replaced
+       * silently lowers the number of arrivals that can still be caught.
+       * Not after a failure. That is a queue pair in error flushing what was
+       * posted, and a receive posted to it is flushed at once -- re-arming
+       * each flush made the next, and a peer that died left this loop
+       * spinning for as long as the connection lived. */
+      if (wc[i].status == IBV_WC_SUCCESS) {
         std::lock_guard<std::mutex> g(conn_mu_);
         auto it = conn_by_qp_.find(wc[i].qp_num);
         if (it != conn_by_qp_.end()) it->second->repost_receive();
@@ -1514,11 +1518,28 @@ Status RdmaProvider::drain(ProviderConnection* conn, int64_t timeout_ms) {
 }
 
 Status RdmaProvider::disconnect(ProviderConnectionPtr conn) {
-  /* The connection owns its QP and destroys it; in-flight work requests are
-   * flushed by the hardware and surface as WR_FLUSH_ERR completions, which
-   * poll() still reports so their requests can reach a terminal state. */
-  (void)conn;
-  return Status::kOk;
+  if (conn == nullptr) return Status::kInvalidArgument;
+  /* Every queue pair to error. The adapter then stops working on them and
+   * completes what was posted with a flush, so once this returns nothing
+   * more is read from or written into this side's memory for them.
+   *
+   * It did nothing before, on the belief that the connection's destruction
+   * flushes -- but requests hold their connection, so it outlived them, and
+   * the engine called a departed peer's requests FailedSafe while their
+   * queue pairs were live and the adapter could still be moving their
+   * bytes. */
+  auto* c = static_cast<RdmaConnection*>(conn.get());
+  c->mark_failed();
+  Status first = Status::kOk;
+  std::lock_guard<std::mutex> qg(c->qp_mutex());
+  for (auto& q : c->queue_pairs()) {
+    if (q.qp == nullptr) continue;
+    ibv_qp_attr a{};
+    a.qp_state = IBV_QPS_ERR;
+    if (ibv_modify_qp(q.qp, &a, IBV_QP_STATE) != 0 && first == Status::kOk)
+      first = Status::kTransportError;
+  }
+  return first;
 }
 
 }  // namespace hux

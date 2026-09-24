@@ -1425,6 +1425,13 @@ void EngineImpl::reap_departed_peers() {
     /* The epoch moves first, so nothing new is admitted onto a connection
      * that is no longer there. */
     p->bump_epoch();
+    /* Then its connections are stopped, before anything is called
+     * FailedSafe: that says local DMA has stopped, and a queue pair left
+     * live after its peer's control channel closed could still be reading a
+     * source or writing a destination the caller is about to reuse. */
+    for (auto const& l : p->lanes())
+      if (l.provider != nullptr && l.conn != nullptr)
+        l.provider->disconnect(l.conn);
 
     /* Taking a request out of inflight_ is what claims it: whatever else was
      * about to end one of these finds it gone and leaves it alone. */

@@ -52,6 +52,9 @@ if(TARGET hux_transport_rdma)
   # Two processes and a real NIC, so it is built but never run by ctest.
   # Built here rather than compiled by hand, so it cannot drift from the
   # library it exercises.
+  add_executable(hux_rdma_disconnect manual/rdma_disconnect.cpp)
+  target_link_libraries(hux_rdma_disconnect PRIVATE hux_transport_rdma)
+  target_compile_options(hux_rdma_disconnect PRIVATE -Wall -Wextra)
   add_executable(hux_rdma_loopback manual/rdma_loopback.cpp)
   target_include_directories(hux_rdma_loopback PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(hux_rdma_loopback PRIVATE hux_transport_rdma)
