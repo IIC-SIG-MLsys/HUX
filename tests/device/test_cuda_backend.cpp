@@ -6,6 +6,7 @@
  * what the caller claims. */
 #include <cuda_runtime.h>
 
+#include <thread>
 #include <vector>
 
 #include "device/cuda_backend.h"
@@ -122,4 +123,41 @@ HUX_TEST(cuda_backend_rejects_invalid_device_index) {
   if (make_backend() == nullptr) SKIP("no CUDA device");
   std::shared_ptr<DeviceBackend> b;
   CHECK_STATUS(CudaBackend::create(9999, &b), Status::kInvalidArgument);
+}
+
+HUX_TEST(cuda_backend_works_from_a_thread_on_another_device) {
+  /* The runtime's current device is per thread. Creating a backend used to
+   * leave its device current on the caller's thread, and calls from any
+   * other thread ran on whatever that thread had current: settle() waited
+   * on device 0's stream, not this device's. What can be checked without
+   * racing a copy: creation leaves the caller's device alone, a call from
+   * another thread works, and that thread's device is put back after. */
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count < 2)
+    SKIP("needs two CUDA devices");
+  std::shared_ptr<DeviceBackend> b;
+  CHECK_STATUS(CudaBackend::create(1, &b), Status::kOk);
+
+  int current = -1;
+  CHECK_EQ(cudaGetDevice(&current), cudaSuccess);
+  CHECK_EQ(current, 0); /* creating it left this thread's device alone */
+
+  CHECK_EQ(cudaSetDevice(1), cudaSuccess);
+  cudaStream_t raw = nullptr;
+  CHECK_EQ(cudaStreamCreate(&raw), cudaSuccess);
+  CHECK_EQ(cudaSetDevice(0), cudaSuccess);
+  DeviceStreamPtr stream;
+  CHECK_STATUS(b->import_stream(raw, &stream), Status::kOk);
+
+  Status recorded = Status::kInternal;
+  int after = -1;
+  std::thread other([&] {
+    DeviceEventPtr ev;
+    recorded = b->record_event(stream.get(), &ev);
+    cudaGetDevice(&after);
+  });
+  other.join();
+  CHECK_STATUS(recorded, Status::kOk);
+  CHECK_EQ(after, 0); /* and the thread's own device is put back */
+  cudaStreamDestroy(raw);
 }

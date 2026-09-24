@@ -65,6 +65,37 @@ class CudaEvent : public DeviceEvent {
  * an unrelated later call from inheriting the failure. */
 inline void clear_sticky_error() { (void)cudaGetLastError(); }
 
+/* Makes a device current for the calls in scope and puts back whatever was
+ * current before. The runtime's current device is per thread, and was set
+ * only on the thread that created the backend: called from the progress
+ * thread, or any caller's, settle() synchronised device 0's stream rather
+ * than this device's -- so copy() said bytes had landed that had not -- an
+ * IPC mapping went into device 0's context, and an event was created on
+ * device 0 for a stream on another. */
+class DeviceGuard {
+ public:
+  explicit DeviceGuard(int want) {
+    if (cudaGetDevice(&prev_) != cudaSuccess) {
+      clear_sticky_error();
+      prev_ = -1;
+    }
+    if (prev_ == want) return;
+    if (cudaSetDevice(want) == cudaSuccess)
+      set_ = true;
+    else
+      clear_sticky_error();
+  }
+  ~DeviceGuard() {
+    if (set_ && prev_ >= 0) cudaSetDevice(prev_);
+  }
+  DeviceGuard(DeviceGuard const&) = delete;
+  DeviceGuard& operator=(DeviceGuard const&) = delete;
+
+ private:
+  int prev_ = -1;
+  bool set_ = false;
+};
+
 }  // namespace
 
 Status CudaBackend::create(int device_index,
@@ -77,9 +108,16 @@ Status CudaBackend::create(int device_index,
   }
   if (device_index < 0 || device_index >= count)
     return Status::kInvalidArgument;
-  if (cudaSetDevice(device_index) != cudaSuccess) {
-    clear_sticky_error();
-    return Status::kDeviceError;
+  {
+    /* Proves the device can be made current, without leaving it current on
+     * the caller's thread: that was a side effect nobody asked for. */
+    int prev = -1;
+    if (cudaGetDevice(&prev) != cudaSuccess) clear_sticky_error();
+    if (cudaSetDevice(device_index) != cudaSuccess) {
+      clear_sticky_error();
+      return Status::kDeviceError;
+    }
+    if (prev >= 0 && prev != device_index) cudaSetDevice(prev);
   }
   *out = std::make_shared<CudaBackend>(device_index);
   return Status::kOk;
@@ -175,6 +213,9 @@ Status CudaBackend::record_event(DeviceStream* stream, DeviceEventPtr* out) {
   auto* s = static_cast<CudaStream*>(stream);
   if (s->device().kind != DeviceKind::kCuda) return Status::kInvalidArgument;
 
+  /* The event belongs on the stream's device; recording one made on
+   * another device into it fails. */
+  DeviceGuard guard(s->device().index);
   cudaEvent_t ev = nullptr;
   /* Disabling timing keeps the record and wait path cheap; HUX never reads
    * elapsed time from these events. */
@@ -228,6 +269,7 @@ Status CudaBackend::make_visible(DeviceStream* stream, void* addr,
 Status CudaBackend::copy(void* dst, void const* src, uint64_t bytes) {
   if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
   if (bytes == 0) return Status::kOk;
+  DeviceGuard guard(device_index_);
   /* cudaMemcpyDefault, not an explicit direction: one side may be a mapping
    * of another process's allocation, and the runtime knows where each address
    * lives while the caller does not. */
@@ -247,6 +289,7 @@ Status CudaBackend::copy(void* dst, void const* src, uint64_t bytes) {
 Status CudaBackend::copy_nowait(void* dst, void const* src, uint64_t bytes) {
   if (dst == nullptr || src == nullptr) return Status::kInvalidArgument;
   if (bytes == 0) return Status::kOk;
+  DeviceGuard guard(device_index_);
   if (cudaMemcpy(dst, src, static_cast<size_t>(bytes), cudaMemcpyDefault) !=
       cudaSuccess) {
     clear_sticky_error();
@@ -256,6 +299,9 @@ Status CudaBackend::copy_nowait(void* dst, void const* src, uint64_t bytes) {
 }
 
 Status CudaBackend::settle() {
+  /* The default stream of this device, which is the one the copies went to
+   * -- not whichever device the calling thread happens to have current. */
+  DeviceGuard guard(device_index_);
   if (cudaStreamSynchronize(nullptr) != cudaSuccess) {
     clear_sticky_error();
     return Status::kDeviceError;
@@ -285,6 +331,7 @@ Status CudaBackend::export_ipc(void* addr, uint64_t length, IpcHandle* out) {
     return Status::kInvalidArgument;
 
   cudaIpcMemHandle_t handle;
+  DeviceGuard guard(device_index_);
   if (cudaIpcGetMemHandle(&handle, reinterpret_cast<void*>(base)) !=
       cudaSuccess) {
     clear_sticky_error();
@@ -317,6 +364,8 @@ Status CudaBackend::import_ipc(IpcHandle const& handle, void** out) {
   cudaIpcMemHandle_t native;
   std::memcpy(&native, handle.bytes.data(), sizeof(native));
   void* base = nullptr;
+  /* Mapped into this device's context, not the calling thread's. */
+  DeviceGuard guard(device_index_);
   /* Lazy peer access: enabling it eagerly would fail on a pair of devices
    * that cannot reach each other, for an allocation the caller may only ever
    * read from its own side. */
@@ -360,6 +409,7 @@ Status CudaBackend::close_ipc(void* mapped) {
   void* base = rec->second.base;
   imports_by_base_.erase(it);
   imports_by_handle_.erase(rec);
+  DeviceGuard guard(device_index_);
   if (cudaIpcCloseMemHandle(base) != cudaSuccess) {
     clear_sticky_error();
     return Status::kDeviceError;
