@@ -1053,6 +1053,7 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     uint32_t qp_index = 0;
     size_t op_index = 0;
     bool signal = false;
+    ibv_mr* mr = nullptr;
   };
   std::vector<Planned> plan;
   plan.reserve(ops.size());
@@ -1066,6 +1067,21 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
   std::vector<size_t> last_on_qp(qps.size(), static_cast<size_t>(-1));
 
   for (size_t i = 0; i < ops.size(); ++i) {
+    /* The key is looked up while planning, not while posting. Found missing
+     * halfway through posting, it stopped the batch after a queue pair's
+     * last posted request had gone out unsignalled -- and an unsignalled
+     * request is only retired by a later signalled one on the same queue
+     * pair, so with nothing after it the request never completed. */
+    ibv_mr* mr = nullptr;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      auto it = regions_.find(ops[i].local_key);
+      if (it != regions_.end()) mr = it->second;
+    }
+    if (mr == nullptr) {
+      r.status = Status::kNotFound;
+      break;
+    }
     QueuePair* q = c->pick_queue_pair_locked();
     if (q == nullptr) {
       r.status = Status::kWouldBlock;
@@ -1095,6 +1111,7 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     Planned p;
     p.qp_index = qi;
     p.op_index = i;
+    p.mr = mr;
     /* Period elapsed, or the queue is three quarters full: both leave an
      * anchor before the queue can fill with nothing to wait for. */
     p.signal = (since[qi] + 1 >= cfg_.signal_period) ||
@@ -1119,17 +1136,7 @@ SubmitResult RdmaProvider::submit(ProviderConnection* conn,
     SubOp const& op = ops[p.op_index];
     QueuePair& q = qps[p.qp_index];
 
-    ibv_mr* mr = nullptr;
-    {
-      std::lock_guard<std::mutex> g(mu_);
-      auto it = regions_.find(op.local_key);
-      if (it == regions_.end()) {
-        r.status = Status::kNotFound;
-        break;
-      }
-      mr = it->second;
-    }
-
+    ibv_mr* const mr = p.mr;
     uint64_t const seq = q.posted;
 
     ibv_sge sge{};
