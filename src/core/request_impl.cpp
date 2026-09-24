@@ -10,6 +10,18 @@ namespace {
 constexpr uint32_t stage_bit(Stage s) { return 1u << static_cast<uint32_t>(s); }
 }  // namespace
 
+ErrorInfo const RequestImpl::kNoError{};
+
+RequestImpl::~RequestImpl() {
+  ErrorInfo const* e = error_.load(std::memory_order_relaxed);
+  if (e != &kNoError) delete e;
+}
+
+void RequestImpl::record_error_locked(ErrorInfo const& e) {
+  if (e.ok() || !err_locked().ok()) return;
+  error_.store(new ErrorInfo(e), std::memory_order_release);
+}
+
 RequestImpl::RequestImpl(RequestId id, SubOp::Kind kind, uint32_t total_subops,
                          void* context)
     : id_(id), kind_(kind), total_subops_(total_subops), context_(context) {
@@ -76,7 +88,7 @@ bool RequestImpl::part_finished() {
 
 bool RequestImpl::abandoning() const {
   std::lock_guard<std::mutex> g(mu_);
-  return terminal_locked() || cancel_requested_ || !error_.ok();
+  return terminal_locked() || cancel_requested_ || !err_locked().ok();
 }
 
 bool RequestImpl::seal_if_idle() {
@@ -100,10 +112,12 @@ bool RequestImpl::on_subop_complete(CompletionEvent const& ev) {
   std::lock_guard<std::mutex> g(mu_);
   if (terminal_locked()) return false;
 
-  if (ev.status != Status::kOk && error_.ok()) {
-    error_.status = ev.status;
-    error_.provider_errno = ev.provider_errno;
-    error_.may_have_modified_target = ev.may_have_modified_target;
+  if (ev.status != Status::kOk) {
+    ErrorInfo e;
+    e.status = ev.status;
+    e.provider_errno = ev.provider_errno;
+    e.may_have_modified_target = ev.may_have_modified_target;
+    record_error_locked(e);
   }
   ++completed_subops_;
   /* Measured against the request's full size while more may still be
@@ -140,7 +154,7 @@ Status RequestImpl::wait(int64_t timeout_ms) {
 
 Status RequestImpl::outcome_locked() const {
   if (state_ == RequestState::kCancelled) return Status::kCancelled;
-  if (!error_.ok()) return error_.status;
+  if (!err_locked().ok()) return err_locked().status;
   /* A failure always carries a reason; one without is a defect, and must not
    * read as success. */
   return state_ == RequestState::kFailed ? Status::kInternal : Status::kOk;
@@ -161,14 +175,14 @@ Status RequestImpl::cancel() {
 void RequestImpl::note_error(ErrorInfo const& e) {
   std::lock_guard<std::mutex> g(mu_);
   if (terminal_locked()) return;
-  if (error_.ok()) error_ = e;
+  record_error_locked(e);
 }
 
 void RequestImpl::fail(ErrorInfo const& e) {
   {
     std::lock_guard<std::mutex> g(mu_);
     if (terminal_locked()) return;
-    if (error_.ok()) error_ = e;
+    record_error_locked(e);
     stages_ |= stage_bit(Stage::kFailedSafe);
     state_ = RequestState::kFailed;
   }
@@ -201,7 +215,8 @@ Status RequestImpl::reached_or(Stage s) const {
   std::lock_guard<std::mutex> g(mu_);
   if ((stages_ & stage_bit(s)) != 0) return Status::kOk;
   if (state_ == RequestState::kCancelled) return Status::kCancelled;
-  if (terminal_locked()) return error_.ok() ? Status::kInternal : error_.status;
+  if (terminal_locked())
+    return err_locked().ok() ? Status::kInternal : err_locked().status;
   return Status::kWouldBlock;
 }
 

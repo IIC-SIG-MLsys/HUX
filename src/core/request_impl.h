@@ -2,6 +2,7 @@
 #ifndef HUX_CORE_REQUEST_IMPL_H
 #define HUX_CORE_REQUEST_IMPL_H
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -32,7 +33,14 @@ class RequestImpl : public Request {
   Status cancel() override;
   Status wait_on(DeviceStream* stream) override;
   Status wait_source_reusable_on(DeviceStream* stream) override;
-  ErrorInfo const& error() const override { return error_; }
+  /* A reference that stays good and never changes under the reader: the
+   * error is published once, by the first failure, as an object nothing
+   * writes again. Returning the member itself let a caller read it while
+   * the failing thread was assigning it -- a string torn mid-copy. */
+  ErrorInfo const& error() const override {
+    return *error_.load(std::memory_order_acquire);
+  }
+  ~RequestImpl() override;
   void* context() const override { return context_; }
 
   /* Internal state transitions below; not part of the public interface. */
@@ -178,7 +186,14 @@ class RequestImpl : public Request {
   bool cancel_requested_ = false;
   /* One bit per Stage, so reached() is stable across repeated queries. */
   uint32_t stages_ = 0;
-  ErrorInfo error_;
+  /* No error until the first failure publishes one; see error(). */
+  static ErrorInfo const kNoError;
+  std::atomic<ErrorInfo const*> error_{&kNoError};
+  ErrorInfo const& err_locked() const {
+    return *error_.load(std::memory_order_relaxed);
+  }
+  /* The first error sticks; later ones are dropped, as before. */
+  void record_error_locked(ErrorInfo const& e);
 
   std::vector<MemoryRegionPtr> held_regions_;
   /* Declared after the regions so they go first: a connection's teardown
