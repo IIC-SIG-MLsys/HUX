@@ -20,6 +20,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
 #include <memory>
@@ -29,6 +30,7 @@
 
 #include "core/factory.h"
 #include "hux/engine.h"
+#include "hux/host_memory.h"
 #include "hux/device.h"
 #include "transport/mock/mock_provider.h"
 
@@ -735,6 +737,34 @@ std::shared_ptr<PyEngine> make_rdma_engine(std::string const& advertise_ip,
 
 }  // namespace
 
+/* Host memory on 2 MiB pages, exposed through the buffer protocol so it
+ * registers like any other buffer -- and wraps into numpy or torch without a
+ * copy. A view taken of it holds a reference, so the memory outlives every
+ * view and every registration made from one. */
+struct PyHostBuffer {
+  HostAllocation a;
+  PyHostBuffer() = default;
+  PyHostBuffer(PyHostBuffer const&) = delete;
+  PyHostBuffer& operator=(PyHostBuffer const&) = delete;
+  ~PyHostBuffer() { free_host(a); }
+};
+
+int host_buffer_getbuffer(PyObject* self, Py_buffer* view, int flags) {
+  PyHostBuffer* b = nb::inst_ptr<PyHostBuffer>(self);
+  return PyBuffer_FillInfo(view, self, b->a.ptr,
+                           static_cast<Py_ssize_t>(b->a.bytes), 0, flags);
+}
+
+PyType_Slot host_buffer_slots[] = {
+    {Py_bf_getbuffer, reinterpret_cast<void*>(host_buffer_getbuffer)},
+    {0, nullptr}};
+
+std::unique_ptr<PyHostBuffer> alloc_host_py(uint64_t nbytes) {
+  auto b = std::make_unique<PyHostBuffer>();
+  raise_on_error(alloc_host(nbytes, &b->a), "alloc_host");
+  return b;
+}
+
 NB_MODULE(hux, m) {
   m.doc() = "HUX: heterogeneous unified exchange";
 
@@ -857,6 +887,17 @@ NB_MODULE(hux, m) {
            "Release registrations the reuse cache holds; returns how many.")
       .def("stats", &PyEngine::stats);
 
+  nb::class_<PyHostBuffer>(m, "HostBuffer", nb::type_slots(host_buffer_slots))
+      .def_prop_ro("nbytes", [](PyHostBuffer const& b) { return b.a.bytes; })
+      .def_prop_ro("huge_bytes",
+                   [](PyHostBuffer const& b) { return b.a.huge_bytes; },
+                   "How much of it the kernel put on huge pages.")
+      .def("__len__", [](PyHostBuffer const& b) { return b.a.bytes; });
+  m.def("alloc_host", &alloc_host_py, nb::arg("nbytes"),
+        "Host memory for buffers the adapter moves, on 2 MiB pages where the"
+        " kernel grants them, rounded up to whole pages and zero-filled."
+        " Where an IOMMU translates the adapter's accesses, ordinary 4 KiB"
+        " pages can cost most of a large transfer's bandwidth.");
   m.def("make_mock_engine", &make_mock_engine, nb::arg("move_data") = true,
         nb::arg("gpu") = -1,
         "An engine over the mock backend, for testing without hardware.");

@@ -499,3 +499,29 @@ So the controller takes the slowest sender from 80% of its fair share to
 94%, and the fastest from 120% down to 115%, for 0.2% of the aggregate and
 6% of the median latency. That is what a window is worth under overload
 here: real, small, and nothing like what the raw spread suggests.
+
+## Host memory behind an IOMMU wants huge pages
+
+Between two GH200s over 400 Gb/s InfiniBand, 4 MiB writes from host memory
+ran at 92 Gb/s — a quarter of what the same port carried from GPU memory.
+Grace translates the adapter's accesses through its SMMU, and a buffer on
+ordinary 4 KiB pages is a translation per 4 KiB. Only the pages changed
+between these runs (alternating, two passes each, both ends):
+
+| 4 MiB write | 4 KiB pages | 2 MiB pages |
+| --- | --- | --- |
+| one queue pair | 362–373 us | 105 us (320 Gb/s) |
+| four queue pairs | 300–313 us | 98–104 us |
+| read, four queue pairs | 271–282 us | 91 us (367 Gb/s) |
+
+More queue pairs do not buy this back: past two they were slower, which is
+the translation path saturating, not the link. The other transport measured
+on the same machines gained the same factor from the same change, so this
+is a property of the buffer, not of a library.
+
+`hux::alloc_host()` (Python: `hux.alloc_host(n)`) returns memory on 2 MiB
+pages, faulted in before anything registers it, and reports how much the
+kernel actually granted — with transparent huge pages set to `never` it is
+ordinary memory that still works. A caller that owns its staging buffers
+should take them from there. hux-bench measures with it under
+`--hugepages on`.

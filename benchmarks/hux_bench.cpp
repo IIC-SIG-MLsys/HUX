@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <chrono>
 #include <ctime>
 #include <cstdio>
@@ -33,6 +34,7 @@
 #include "core/factory.h"
 #include "core/region_impl.h"
 #include "hux/engine.h"
+#include "hux/host_memory.h"
 #include "transport/cc/controller.h"
 #include "transport/rdma/rdma_provider.h"
 
@@ -64,6 +66,11 @@ namespace {
  * which is the only way to put this fabric under contention and the only
  * condition where congestion control can be worth anything. */
 uint16_t g_meta_port = 18516;
+/* Host buffers on 2 MiB pages. Where an IOMMU translates the adapter's
+ * accesses, a 4 KiB page is a translation per 4 KiB moved, and a large
+ * transfer from host memory can be bound by that rather than by the link. */
+bool g_hugepages = false;
+
 
 struct Options {
   uint32_t qp = 1;
@@ -190,11 +197,26 @@ CongestionControllerPtr make_cc(std::string const& spec) {
 struct Pool {
   std::shared_ptr<DeviceBackend> dev;
   std::vector<uint8_t> host;
+  HostAllocation huge;
+  Pool() = default;
+  Pool(Pool const&) = delete;
+  Pool& operator=(Pool const&) = delete;
+  ~Pool() { free_host(huge); }
   void* ptr = nullptr;
   uint64_t bytes = 0;
 
   bool make(int gpu, uint64_t n) {
     bytes = n;
+    if (gpu < 0 && g_hugepages) {
+      if (alloc_host(n, &huge) != Status::kOk) return false;
+      std::memset(huge.ptr, 0x5a, huge.bytes);
+      ptr = huge.ptr;
+      std::printf("host buffer: %llu MiB from alloc_host, %llu MiB of it on "
+                  "huge pages\n",
+                  (unsigned long long)(huge.bytes >> 20),
+                  (unsigned long long)(huge.huge_bytes >> 20));
+      return true;
+    }
     if (gpu < 0) {
       host.assign(n, 0x5a);
       ptr = host.data();
@@ -1336,7 +1358,7 @@ int main(int argc, char** argv) {
                 "       [--peers N] [--segments N] [--produce N]\n"
                 "       [--produce-repeats N] [--trace FILE]\n"
                 "       [--start-at UNIX_MS] [--for-seconds S]"
-                " [--ordering auto|standard] [--handoff on|off]\n"
+                " [--ordering auto|standard] [--handoff on|off] [--hugepages on|off]\n"
                 "       --local takes a list: one adapter per address, with"
                 " --weights w1,w2\n",
                 argv[0]);
@@ -1399,6 +1421,7 @@ int main(int argc, char** argv) {
     else if (k == "--cc") o.cc = argv[i + 1];
     else if (k == "--ordering") o.ordering = argv[i + 1];
     else if (k == "--handoff") o.handoff = std::string(argv[i + 1]) != "off";
+    else if (k == "--hugepages") g_hugepages = std::string(argv[i + 1]) == "on";
     else if (k == "--iters") o.iters = std::atoi(argv[i + 1]);
     else if (k == "--sizes") {
       o.sizes.clear();

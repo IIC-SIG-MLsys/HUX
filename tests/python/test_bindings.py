@@ -476,6 +476,29 @@ def test_a_write_can_skip_the_ready_handoff():
     check(eng.stats()["ready_handoffs_sent"] == before + 1, "and sends one")
 
 
+def test_host_memory_on_huge_pages_registers_and_moves():
+    """alloc_host gives whole 2 MiB pages that register like any buffer."""
+    buf = hux.alloc_host(3 << 20)
+    view = memoryview(buf)
+    check(view.nbytes == 4 << 20 == buf.nbytes, "rounded up to whole huge pages")
+    check(0 <= buf.huge_bytes <= view.nbytes, "reports how much landed on huge pages")
+    check(view[0] == 0 and view[view.nbytes - 1] == 0, "zero-filled")
+
+    eng, peer = setup()
+    dst = bytearray(1 << 20)
+    view[: 1 << 20] = b"\x5a" * (1 << 20)
+    src_region = eng.register_memory(buf)
+    dst_region = eng.register_memory(dst)
+    remote = peer.import_region(src_region.descriptor())
+    req = eng.read(peer, dst_region, remote, length=1 << 20)
+    for _ in range(100):
+        eng.poll()
+        if req.done:
+            break
+    check(req.wait(1000) == "ok", "a read from it completes")
+    check(bytes(dst) == b"\x5a" * (1 << 20), "and moves its bytes")
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -498,6 +521,7 @@ def main():
         test_objects_outliving_the_engine_do_not_use_freed_memory,
         test_stats_carry_every_engine_counter,
         test_a_write_can_skip_the_ready_handoff,
+        test_host_memory_on_huge_pages_registers_and_moves,
     ]:
         print(f"{fn.__name__}:")
         fn()
