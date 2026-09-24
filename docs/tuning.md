@@ -525,3 +525,10 @@ kernel actually granted — with transparent huge pages set to `never` it is
 ordinary memory that still works. A caller that owns its staging buffers
 should take them from there. hux-bench measures with it under
 `--hugepages on`.
+
+On those 4 KiB pages two queue pairs are the one place more of them help:
+a 4 MiB write's median fell from 349 to 218 us, while its p99 stayed at
+350 -- some transfers get the parallelism and some do not. Four were
+slower than two. On 2 MiB pages, or from GPU memory, the number of queue
+pairs is worth 3–5% on 4 MiB and nothing below it, so the default stays
+at one; huge pages are the change that matters.
