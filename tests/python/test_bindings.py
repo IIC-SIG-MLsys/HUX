@@ -451,6 +451,31 @@ def test_stats_carry_every_engine_counter():
           % (", ".join(sorted(missing)) or "none"))
 
 
+def test_a_write_can_skip_the_ready_handoff():
+    """ready_handoff=False lands the bytes and tells the peer nothing."""
+    eng, peer = setup()
+    src = bytearray(b"\x07" * 4096)
+    dst = bytearray(4096)
+    src_region = eng.register_memory(src)
+    dst_region = eng.register_memory(dst)
+    remote = peer.import_region(dst_region.descriptor())
+
+    def write(**kw):
+        req = eng.write(peer, src_region, remote, 0, 0, 4096, **kw)
+        for _ in range(100):
+            eng.poll()
+            if req.done:
+                break
+        return req.wait(1000)
+
+    before = eng.stats()["ready_handoffs_sent"]
+    check(write(ready_handoff=False) == "ok", "a write without a handoff completes")
+    check(bytes(dst) == bytes(src), "and its bytes land")
+    check(eng.stats()["ready_handoffs_sent"] == before, "no handoff was sent")
+    check(write() == "ok", "the default write completes")
+    check(eng.stats()["ready_handoffs_sent"] == before + 1, "and sends one")
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -472,6 +497,7 @@ def main():
         test_the_stream_calls_refuse_without_a_backend,
         test_objects_outliving_the_engine_do_not_use_freed_memory,
         test_stats_carry_every_engine_counter,
+        test_a_write_can_skip_the_ready_handoff,
     ]:
         print(f"{fn.__name__}:")
         fn()

@@ -58,7 +58,8 @@ struct Setup {
   /* Writes each (region, offset, length) from the source and returns the
    * ready events that came back, in order of offset within region. */
   std::vector<ReadyEventPtr> writev(
-      std::vector<std::pair<RemoteRegionPtr, Span>> const& segs) {
+      std::vector<std::pair<RemoteRegionPtr, Span>> const& segs,
+      TransferOptions const& opts = {}) {
     std::vector<RegionView> locals, remotes;
     uint64_t at = 0;
     for (auto const& s : segs) {
@@ -70,7 +71,7 @@ struct Setup {
       at += s.second.length;
     }
     RequestPtr req;
-    if (engine->writev(peer.get(), locals, remotes, {}, &req) != Status::kOk)
+    if (engine->writev(peer.get(), locals, remotes, opts, &req) != Status::kOk)
       return {};
     std::vector<RequestPtr> done;
     for (int i = 0; i < 100 && !is_terminal(req->state()); ++i)
@@ -129,4 +130,23 @@ HUX_TEST(ranges_that_follow_on_are_named_once) {
   if (ready.size() != 1) return;
   CHECK_EQ(ready[0]->span().offset, uint64_t(0));
   CHECK_EQ(ready[0]->span().length, uint64_t(1536));
+}
+
+HUX_TEST(a_write_without_a_handoff_tells_the_peer_nothing) {
+  /* For a caller that signals arrival its own way: the bytes land, and no
+   * handoff is sent -- the socket write it costs is most of a small write. */
+  Setup s;
+  CHECK(s.make());
+  TransferOptions quiet;
+  quiet.ready_handoff = false;
+  auto ready = s.writev({{s.remote_a, Span{0, 512}}}, quiet);
+  CHECK_EQ(ready.size(), size_t(0));
+  CHECK_EQ(s.engine->stats().ready_handoffs_sent, uint64_t(0));
+  CHECK(std::all_of(s.a.begin(), s.a.begin() + 512,
+                    [](uint8_t v) { return v == 9; }));
+
+  /* And the default still sends one. */
+  ready = s.writev({{s.remote_b, Span{0, 512}}});
+  CHECK_EQ(ready.size(), size_t(1));
+  CHECK_EQ(s.engine->stats().ready_handoffs_sent, uint64_t(1));
 }

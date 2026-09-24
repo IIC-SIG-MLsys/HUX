@@ -29,6 +29,13 @@ struct TransferOptions {
   std::vector<uint8_t> notify_payload;
   bool notify = false;
 
+  /* Writes only. On, the peer gets a ready event naming the bytes that
+   * landed once the write completes. Off, it is told nothing -- for a caller
+   * that signals arrival its own way, as UCCL's writes do. Sending the
+   * handoff is a socket write on the completion path, about 8 us per write
+   * on the machines measured, which is most of a small write's cost. */
+  bool ready_handoff = true;
+
   void* context = nullptr; /* Local only. */
 };
 

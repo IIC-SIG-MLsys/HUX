@@ -288,9 +288,9 @@ class PyEngine {
   std::shared_ptr<PyRequest> write(
       PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
       uint64_t local_offset, uint64_t remote_offset, uint64_t length,
-      std::vector<std::shared_ptr<PyEvent>> const& after) {
+      std::vector<std::shared_ptr<PyEvent>> const& after, bool ready_handoff) {
     return submit(peer, local, remote, local_offset, remote_offset, length,
-                  true, after);
+                  true, after, ready_handoff);
   }
 
   /* One call, many segments: the point of a batch is that the crossing into
@@ -310,9 +310,9 @@ class PyEngine {
       std::vector<uint64_t> const& local_offsets,
       std::vector<uint64_t> const& remote_offsets,
       std::vector<uint64_t> const& lengths,
-      std::vector<std::shared_ptr<PyEvent>> const& after) {
+      std::vector<std::shared_ptr<PyEvent>> const& after, bool ready_handoff) {
     return submitv(peer, local, remote, local_offsets, remote_offsets, lengths,
-                   true, after);
+                   true, after, ready_handoff);
   }
 
   /* Returns how many requests finished. Completions are collected here rather
@@ -596,8 +596,10 @@ class PyEngine {
   }
 
   static TransferOptions options_from(
-      std::vector<std::shared_ptr<PyEvent>> const& after) {
+      std::vector<std::shared_ptr<PyEvent>> const& after,
+      bool ready_handoff = true) {
     TransferOptions o;
+    o.ready_handoff = ready_handoff;
     for (auto const& e : after)
       if (e != nullptr) o.after.push_back(e->shared());
     return o;
@@ -606,7 +608,8 @@ class PyEngine {
   std::shared_ptr<PyRequest> submit(
       PyPeer& peer, PyRegion& local, PyRemoteRegion& remote,
       uint64_t local_offset, uint64_t remote_offset, uint64_t length,
-      bool is_write, std::vector<std::shared_ptr<PyEvent>> const& after) {
+      bool is_write, std::vector<std::shared_ptr<PyEvent>> const& after,
+      bool ready_handoff = true) {
     usable_for(local, is_write);
     /* The default: the rest of the local region. A length of zero used to
      * go through as a transfer of nothing, which never ended; the engine
@@ -619,7 +622,7 @@ class PyEngine {
     raise_on_error(local.region()->view(local_offset, length, &lv), "local view");
     raise_on_error(remote.remote()->view(remote_offset, length, &rv),
                    "remote view");
-    TransferOptions const opts = options_from(after);
+    TransferOptions const opts = options_from(after, ready_handoff);
     RequestPtr r;
     Status s = is_write
                    ? engine_->write(peer.get(), lv, rv, opts, &r)
@@ -635,7 +638,8 @@ class PyEngine {
                                      std::vector<uint64_t> const& len,
                                      bool is_write,
                                      std::vector<std::shared_ptr<PyEvent>> const&
-                                         after) {
+                                         after,
+                                     bool ready_handoff = true) {
     if (lo.size() != ro.size() || lo.size() != len.size())
       throw std::invalid_argument(
           "local_offsets, remote_offsets and lengths must have equal length");
@@ -646,7 +650,7 @@ class PyEngine {
       raise_on_error(remote.remote()->view(ro[i], len[i], &rvs[i]),
                      "remote view");
     }
-    TransferOptions const opts = options_from(after);
+    TransferOptions const opts = options_from(after, ready_handoff);
     RequestPtr r;
     Status s = is_write ? engine_->writev(peer.get(), lvs, rvs, opts, &r)
                         : engine_->readv(peer.get(), lvs, rvs, opts, &r);
@@ -812,9 +816,11 @@ NB_MODULE(hux, m) {
            nb::arg("remote"), nb::arg("local_offset") = 0,
            nb::arg("remote_offset") = 0, nb::arg("length") = 0,
            nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
-           nb::keep_alive<0, 1>(),
+           nb::arg("ready_handoff") = true, nb::keep_alive<0, 1>(),
            "Write local to remote. length=0 means the rest of the local"
-           " region from local_offset.")
+           " region from local_offset. ready_handoff=False tells the peer"
+           " nothing when it lands, for a caller that signals arrival"
+           " itself; it saves a socket write per transfer.")
       .def("readv", &PyEngine::readv, nb::arg("peer"), nb::arg("local"),
            nb::arg("remote"), nb::arg("local_offsets"),
            nb::arg("remote_offsets"), nb::arg("lengths"),
@@ -824,7 +830,7 @@ NB_MODULE(hux, m) {
            nb::arg("remote"), nb::arg("local_offsets"),
            nb::arg("remote_offsets"), nb::arg("lengths"),
            nb::arg("after") = std::vector<std::shared_ptr<PyEvent>>{},
-           nb::keep_alive<0, 1>())
+           nb::arg("ready_handoff") = true, nb::keep_alive<0, 1>())
       .def("import_stream", &PyEngine::import_stream, nb::arg("native_handle"),
            nb::keep_alive<0, 1>(),
            "Adapt an execution queue the application already owns, given as"

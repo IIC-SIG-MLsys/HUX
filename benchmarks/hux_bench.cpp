@@ -73,6 +73,9 @@ struct Options {
    * for the feature. Both ends have to offer it, so either side can turn it
    * off. */
   std::string ordering = "auto";
+  /* "off" writes without a ready handoff, the peer told nothing -- the
+   * semantics UCCL's writes have, and so the like-for-like comparison. */
+  bool handoff = true;
   /* The address peers dial back on, which across machines also selects the
    * port and the GID. It has to be the address the kernel routes to the peer:
    * a host with two ports on one subnet will otherwise connect and then fail
@@ -642,9 +645,15 @@ int run_client(std::string const& ip, Options const& o) {
       std::printf("  <-- the rest could not carry a transfer");
     std::printf("\n\n");
   }
+  if (!o.handoff)
+    std::printf("writes without a ready handoff: the peer is told nothing\n\n");
   std::printf("%-10s %-8s %10s %10s %10s %10s %10s %10s %7s %10s\n", "size",
               "op", "median_us", "p10_us", "p90_us", "p99_us", "Gb/s",
               "rate_Gb/s", "cores", "cpu_s/GiB");
+
+  /* Every write the client times carries these, not only the warm-up. */
+  TransferOptions wopts;
+  wopts.ready_handoff = o.handoff;
 
   auto one_transfer = [&](uint64_t bytes, bool write) -> double {
     RegionView lv, rv;
@@ -653,8 +662,8 @@ int run_client(std::string const& ip, Options const& o) {
 
     auto const t0 = Clock::now();
     RequestPtr req;
-    Status s = write ? engine->write(peer.get(), lv, rv, {}, &req)
-                     : engine->read(peer.get(), lv, rv, {}, &req);
+    Status s = write ? engine->write(peer.get(), lv, rv, wopts, &req)
+                     : engine->read(peer.get(), lv, rv, wopts, &req);
     if (s != Status::kOk) return -1;
 
     std::vector<RequestPtr> done;
@@ -768,10 +777,10 @@ int run_client(std::string const& ip, Options const& o) {
         Status s;
         if (o.segments > 1) {
           auto const& seg = segmented[bytes];
-          s = write ? engine->writev(peer.get(), seg.first, seg.second, {}, &req)
+          s = write ? engine->writev(peer.get(), seg.first, seg.second, wopts, &req)
                     : engine->readv(peer.get(), seg.first, seg.second, {}, &req);
         } else {
-          s = write ? engine->write(peer.get(), v.first, v.second, {}, &req)
+          s = write ? engine->write(peer.get(), v.first, v.second, wopts, &req)
                     : engine->read(peer.get(), v.first, v.second, {}, &req);
         }
         /* Would-block is the engine saying its queue is full, which is the
@@ -916,7 +925,7 @@ int run_client(std::string const& ip, Options const& o) {
         }
         RequestPtr req;
         Status const st =
-            r.write ? engine->write(peer.get(), lv, rv, {}, &req)
+            r.write ? engine->write(peer.get(), lv, rv, wopts, &req)
                     : engine->read(peer.get(), lv, rv, {}, &req);
         if (st != Status::kOk) {
           std::printf("record %zu (%llu B) -> %s\n", issued,
@@ -1012,7 +1021,7 @@ int run_client(std::string const& ip, Options const& o) {
               DeviceEventPtr ev;
               if (engine->record_event(stream.get(), &ev) != Status::kOk) break;
 
-              TransferOptions opts;
+              TransferOptions opts = wopts;
               if (ordered) opts.after.push_back(ev);
 
               RegionView lv, rv;
@@ -1327,7 +1336,7 @@ int main(int argc, char** argv) {
                 "       [--peers N] [--segments N] [--produce N]\n"
                 "       [--produce-repeats N] [--trace FILE]\n"
                 "       [--start-at UNIX_MS] [--for-seconds S]"
-                " [--ordering auto|standard]\n"
+                " [--ordering auto|standard] [--handoff on|off]\n"
                 "       --local takes a list: one adapter per address, with"
                 " --weights w1,w2\n",
                 argv[0]);
@@ -1389,6 +1398,7 @@ int main(int argc, char** argv) {
       g_meta_port = static_cast<uint16_t>(std::atoi(argv[i + 1]));
     else if (k == "--cc") o.cc = argv[i + 1];
     else if (k == "--ordering") o.ordering = argv[i + 1];
+    else if (k == "--handoff") o.handoff = std::string(argv[i + 1]) != "off";
     else if (k == "--iters") o.iters = std::atoi(argv[i + 1]);
     else if (k == "--sizes") {
       o.sizes.clear();

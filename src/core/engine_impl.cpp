@@ -1143,9 +1143,10 @@ Status EngineImpl::submit_vector(Peer* peer,
   req->set_peer(p->id());
   req->set_device_backend(device_.get());
   req->set_target(target_addr, target_bytes);
-  if (kind == SubOp::Kind::kWrite) {
+  if (kind == SubOp::Kind::kWrite && opts.ready_handoff) {
     /* Every segment's own range, so the handoff names the bytes written and
-     * no others. */
+     * no others. None when the caller asked for no handoff: the handoffs
+     * are sent from this list. */
     for (auto const& seg : remote) {
       if (seg.span.length == 0) continue;
       auto rr = find_remote(p->id(), seg.region);
