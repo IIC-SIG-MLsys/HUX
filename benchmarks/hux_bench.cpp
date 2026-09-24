@@ -83,6 +83,10 @@ struct Options {
   /* "off" writes without a ready handoff, the peer told nothing -- the
    * semantics UCCL's writes have, and so the like-for-like comparison. */
   bool handoff = true;
+  /* "thread": the client's engine progresses on its own thread and the
+   * timed loop only watches for the end -- how an application that waits,
+   * rather than polls, sees a transfer. */
+  std::string progress = "explicit";
   /* The address peers dial back on, which across machines also selects the
    * port and the GID. It has to be the address the kernel routes to the peer:
    * a host with two ports on one subnet will otherwise connect and then fail
@@ -593,7 +597,8 @@ int run_client(std::string const& ip, Options const& o) {
   if (make_rdma_providers(o, cfg, &provs, &prov) != Status::kOk) return 1;
 
   EngineConfig ecfg;
-  ecfg.progress = ProgressMode::kExplicit;
+  ecfg.progress = o.progress == "thread" ? ProgressMode::kThread
+                                         : ProgressMode::kExplicit;
   if (o.chunk > 0) ecfg.chunk_bytes = o.chunk;
   uint64_t const biggest = *std::max_element(o.sizes.begin(), o.sizes.end());
   Pool pool;
@@ -824,6 +829,11 @@ int run_client(std::string const& ip, Options const& o) {
         ++submitted;
       }
       std::vector<RequestPtr> done;
+      /* With a progress thread, block on the oldest the way an application
+       * that waits would. Spinning on the engine instead fought that thread
+       * for its locks and measured the fight. */
+      if (o.progress == "thread" && !live.empty())
+        live.front().req->wait(1000);
       engine->poll_completions(64, &done);
       auto const now = Clock::now();
       for (auto it = live.begin(); it != live.end();) {
@@ -1359,6 +1369,7 @@ int main(int argc, char** argv) {
                 "       [--produce-repeats N] [--trace FILE]\n"
                 "       [--start-at UNIX_MS] [--for-seconds S]"
                 " [--ordering auto|standard] [--handoff on|off] [--hugepages on|off]\n"
+                "       [--progress explicit|thread]\n"
                 "       --local takes a list: one adapter per address, with"
                 " --weights w1,w2\n",
                 argv[0]);
@@ -1422,6 +1433,7 @@ int main(int argc, char** argv) {
     else if (k == "--ordering") o.ordering = argv[i + 1];
     else if (k == "--handoff") o.handoff = std::string(argv[i + 1]) != "off";
     else if (k == "--hugepages") g_hugepages = std::string(argv[i + 1]) == "on";
+    else if (k == "--progress") o.progress = argv[i + 1];
     else if (k == "--iters") o.iters = std::atoi(argv[i + 1]);
     else if (k == "--sizes") {
       o.sizes.clear();

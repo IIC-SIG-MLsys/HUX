@@ -1,6 +1,8 @@
 /* Copyright (c) 2026 IIC-SIG-MLsys. Licensed under the Apache License 2.0. */
 #include "core/engine_impl.h"
 
+#include <sys/prctl.h>
+
 #include <algorithm>
 #include <chrono>
 #include <unordered_set>
@@ -1492,6 +1494,7 @@ Status EngineImpl::progress() {
     TransportProvider* const prov = prov_ptr.get();
     std::vector<ControlMessage> msgs;
     if (prov->poll_control(cfg_.cq_batch, &msgs) == Status::kOk) {
+      progress_events_.fetch_add(msgs.size(), std::memory_order_relaxed);
       for (auto& m : msgs) {
         /* Which peer this came from, in the engine's own numbering. A
          * provider cannot fill this in: it knows connections and its own
@@ -1634,6 +1637,7 @@ Status EngineImpl::progress() {
     std::vector<PeerArrival> arrivals;
     if (prov->poll_peer_arrivals(cfg_.cq_batch, &arrivals) == Status::kOk &&
         !arrivals.empty()) {
+      progress_events_.fetch_add(arrivals.size(), std::memory_order_relaxed);
       std::lock_guard<std::mutex> g(mu_);
       for (auto const& a : arrivals) {
         keep_ready_locked(std::make_shared<ReadyEventImpl>(
@@ -1658,6 +1662,7 @@ Status EngineImpl::progress() {
     events.insert(events.end(), batch.begin(), batch.end());
   }
 
+  progress_events_.fetch_add(events.size(), std::memory_order_relaxed);
   for (auto const& ev : events) {
     RequestImplPtr req;
     {
@@ -1746,9 +1751,39 @@ Status EngineImpl::progress() {
   return polled;
 }
 
+bool EngineImpl::has_outstanding() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return !inflight_.empty() || !pending_.empty() || !notify_pending_.empty();
+}
+
 void EngineImpl::progress_loop() {
+  /* Sleeping only once there is nothing to do. The loop used to sleep 50 us
+   * after every pass -- nearer 120 us with the kernel's default timer slack
+   * -- and that was every completion's latency in this mode: a 64 KiB write
+   * between two GH200s took 119 us here and 6 us under explicit progress.
+   *
+   * Busy while anything is outstanding. Idle, it keeps polling for a while
+   * after the last event, since a peer's messages come when they come and a
+   * receiver has nothing outstanding to go by; only then does it sleep, and
+   * with its timer slack cut so the sleep is the length asked for. */
+  prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
+  using clock = std::chrono::steady_clock;
+  constexpr auto kLinger = std::chrono::milliseconds(2);
+  uint64_t seen = progress_events_.load(std::memory_order_relaxed);
+  auto last_active = clock::now();
   while (!stopping_.load(std::memory_order_acquire)) {
     progress();
+    uint64_t const now_events =
+        progress_events_.load(std::memory_order_relaxed);
+    if (now_events != seen || has_outstanding()) {
+      seen = now_events;
+      last_active = clock::now();
+      continue;
+    }
+    if (clock::now() - last_active < kLinger) {
+      std::this_thread::yield();
+      continue;
+    }
     std::this_thread::sleep_for(std::chrono::microseconds(50));
   }
 }

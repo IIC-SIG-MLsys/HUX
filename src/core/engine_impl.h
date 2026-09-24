@@ -274,6 +274,12 @@ class EngineImpl : public Engine {
   std::mutex progress_mu_;
   std::thread progress_thread_;
   std::atomic<bool> stopping_{false};
+  /* Control messages, arrivals and completions progress() has handled, so
+   * the progress thread can tell a quiet engine from a busy one. */
+  std::atomic<uint64_t> progress_events_{0};
+  /* Requests, submissions or notifications not yet ended: something is
+   * coming that a sleeping progress thread would be late for. */
+  bool has_outstanding() const;
   std::atomic<bool> closed_{false};
 
   friend class PeerImpl;
