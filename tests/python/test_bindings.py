@@ -499,6 +499,21 @@ def test_host_memory_on_huge_pages_registers_and_moves():
     check(bytes(dst) == b"\x5a" * (1 << 20), "and moves its bytes")
 
 
+def test_accept_is_for_rdma_engines_only():
+    """An engine whose memory others read, dialling nobody itself, has to
+    accept or their add_peer fails. It is an RDMA notion: the mock has no
+    listener, and asking it is an error rather than a silent no-op."""
+    eng, _ = setup()
+    if not hasattr(eng, "accept"):
+        print("  skip  built without the RDMA provider")
+        return
+    try:
+        eng.accept(0)
+        check(False, "a mock engine refuses accept")
+    except RuntimeError as exc:
+        check("RDMA" in str(exc), f"a mock engine refuses accept ({exc})")
+
+
 def main():
     for fn in [
         test_round_trip,
@@ -522,6 +537,7 @@ def main():
         test_stats_carry_every_engine_counter,
         test_a_write_can_skip_the_ready_handoff,
         test_host_memory_on_huge_pages_registers_and_moves,
+        test_accept_is_for_rdma_engines_only,
     ]:
         print(f"{fn.__name__}:")
         fn()

@@ -236,6 +236,31 @@ class PyEngine {
                     std::shared_ptr<DeviceBackend> dev = nullptr)
       : engine_(std::move(e)), device_(std::move(dev)) {}
 
+#ifdef HUX_PY_RDMA
+  /* Takes one connection a peer dialled, and keeps it.
+   *
+   * A peer that only serves -- its memory read by others, dialling nobody
+   * itself -- has no add_peer to make, and without this nothing on its side
+   * completes the handshake: the dialler's add_peer fails with
+   * kPeerDisconnected. The connection is held here because the transfers
+   * that arrive over it are one-sided, so nothing else refers to it. */
+  bool accept(int64_t timeout_ms) {
+    if (rdma_ == nullptr)
+      throw std::runtime_error("accept is only for an RDMA engine");
+    ProviderConnectionPtr conn;
+    Status s;
+    {
+      nb::gil_scoped_release release;
+      s = rdma_->accept(timeout_ms, &conn);
+    }
+    if (s == Status::kTimeout) return false;
+    raise_on_error(s, "accept");
+    accepted_.push_back(std::move(conn));
+    return true;
+  }
+  void set_rdma(std::shared_ptr<RdmaProvider> p) { rdma_ = std::move(p); }
+#endif
+
   /* Takes anything supporting the buffer protocol -- numpy arrays, torch
    * tensors, bytearrays. The buffer must be contiguous: a strided view has
    * gaps the NIC would happily transfer over. */
@@ -663,6 +688,10 @@ class PyEngine {
   std::unique_ptr<Engine> engine_;
   /* Outlives the engine's use of it: the engine holds a raw pointer. */
   std::shared_ptr<DeviceBackend> device_;
+#ifdef HUX_PY_RDMA
+  std::shared_ptr<RdmaProvider> rdma_;
+  std::vector<ProviderConnectionPtr> accepted_;
+#endif
 };
 
 /* Whichever backend was compiled in. Only one can be, because the vendor
@@ -731,7 +760,9 @@ std::shared_ptr<PyEngine> make_rdma_engine(std::string const& advertise_ip,
   if (gpu >= 0) raise_on_error(make_device_backend(gpu, &dev), "device");
   std::unique_ptr<Engine> e;
   raise_on_error(make_engine(cfg, dev, provider, &e), "make_engine");
-  return std::make_shared<PyEngine>(std::move(e), std::move(dev));
+  auto py = std::make_shared<PyEngine>(std::move(e), std::move(dev));
+  py->set_rdma(std::move(provider));
+  return py;
 }
 #endif
 
@@ -885,7 +916,15 @@ NB_MODULE(hux, m) {
       .def("release_cached_registrations",
            &PyEngine::release_cached_registrations,
            "Release registrations the reuse cache holds; returns how many.")
-      .def("stats", &PyEngine::stats);
+      .def("stats", &PyEngine::stats)
+#ifdef HUX_PY_RDMA
+      .def("accept", &PyEngine::accept, nb::arg("timeout_ms") = 0,
+           "Take one connection a peer dialled, and keep it. True if one"
+           " arrived, False on timeout. An engine whose memory others read,"
+           " and which dials nobody itself, has to call this or their"
+           " add_peer fails -- nothing else completes the handshake.")
+#endif
+      ;
 
   nb::class_<PyHostBuffer>(m, "HostBuffer", nb::type_slots(host_buffer_slots))
       .def_prop_ro("nbytes", [](PyHostBuffer const& b) { return b.a.bytes; })
