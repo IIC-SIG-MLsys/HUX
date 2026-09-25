@@ -300,24 +300,40 @@ Status RdmaConnection::verify_path(int64_t timeout_ms) {
       return st == IBV_WC_SUCCESS ? Status::kOk : Status::kTransportError;
 
     ibv_wc wc[8];
-    int const n = ibv_poll_cq(owner_->cq(), 8, wc);
+    int const n = owner_->drain_cq(wc, 8);
     if (n < 0) return Status::kTransportError;
+    /* Recorded rather than returned from inside the loop: returning abandons
+     * the rest of the batch, which with several connections verifying at once
+     * is their completions. One dial in twelve timed out that way. */
+    bool mine_seen = false;
+    ibv_wc_status mine = IBV_WC_SUCCESS;
     for (int i = 0; i < n; ++i) {
-      if (wc[i].wr_id == kVerifyWrId && wc[i].qp_num == my_qp_num) {
-        /* Success means the far end acknowledged it. Anything else means
-         * this path does not work, whatever its state says. */
-        return wc[i].status == IBV_WC_SUCCESS ? Status::kOk
-                                              : Status::kTransportError;
+      if (wc[i].wr_id == kVerifyWrId) {
+        if (wc[i].qp_num == my_qp_num) {
+          mine_seen = true;
+          mine = wc[i].status;
+          continue;
+        }
+        /* Another connection's, left for its owner the way the provider's
+         * poll leaves one for this loop. Taken as a transfer instead it was
+         * lost: six peers dialled at once failed 26 dials in 36. */
+        owner_->note_verified(wc[i].qp_num, wc[i].status);
+        continue;
       }
-      if ((wc[i].wr_id & kRecvWrId) != 0 && wc[i].qp_num == my_qp_num) {
-        /* The peer's own verification landing here. Consume it and put the
-         * receive back, or the queue is one short for ever after. */
-        repost_receive();
+      if ((wc[i].wr_id & kRecvWrId) != 0) {
+        /* Any connection's receive: dropping one costs its owner an arrival
+         * and a receive slot for good. */
+        owner_->absorb_receive(wc[i]);
         continue;
       }
       /* Someone else's transfer. Drawn from a queue shared with every other
        * connection, so it goes back to the engine rather than being lost. */
       owner_->stash_completion(wc[i]);
+    }
+    if (mine_seen) {
+      /* Success means the far end acknowledged it. Anything else means this
+       * path does not work, whatever its state says. */
+      return mine == IBV_WC_SUCCESS ? Status::kOk : Status::kTransportError;
     }
     std::this_thread::sleep_for(std::chrono::microseconds(200));
   }
@@ -1203,6 +1219,28 @@ void RdmaProvider::stash_completion(ibv_wc const& wc) {
   stashed_.push_back(wc);
 }
 
+int RdmaProvider::drain_cq(ibv_wc* wc, int max) {
+  if (cq_ == nullptr || wc == nullptr || max <= 0) return 0;
+  std::lock_guard<std::mutex> g(cq_mu_);
+  return ibv_poll_cq(cq_, max, wc);
+}
+
+void RdmaProvider::absorb_receive(ibv_wc const& wc) {
+  /* A peer's write landed. The immediate value names the handoff; the receive
+   * buffer itself holds nothing. */
+  if (wc.status == IBV_WC_SUCCESS && wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+    std::lock_guard<std::mutex> g(arrival_mu_);
+    arrivals_.push_back(PeerArrival{ntohl(wc.imm_data), 0});
+  }
+  /* Re-armed only after a success: a queue pair in error flushes what is
+   * posted, so re-arming each flush made the next and spun until the
+   * connection went. */
+  if (wc.status != IBV_WC_SUCCESS) return;
+  std::lock_guard<std::mutex> g(conn_mu_);
+  auto it = conn_by_qp_.find(wc.qp_num);
+  if (it != conn_by_qp_.end()) it->second->repost_receive();
+}
+
 void RdmaProvider::note_verified(uint32_t qp_num, ibv_wc_status st) {
   std::lock_guard<std::mutex> g(verify_mu_);
   verify_done_[qp_num] = st;
@@ -1240,8 +1278,7 @@ Status RdmaProvider::poll(uint32_t max_events,
    * ended. */
   Status polled = Status::kOk;
   if (n < static_cast<int>(max_events)) {
-    int const drawn =
-        ibv_poll_cq(cq_, static_cast<int>(max_events) - n, wc.data() + n);
+    int const drawn = drain_cq(wc.data() + n, static_cast<int>(max_events) - n);
     if (drawn < 0)
       polled = Status::kTransportError;
     else
@@ -1257,24 +1294,7 @@ Status RdmaProvider::poll(uint32_t max_events,
       continue;
     }
     if ((wc[i].wr_id & kRecvWrId) != 0) {
-      /* A peer's write landed. The immediate value names the handoff; the
-       * receive buffer itself holds nothing. */
-      if (wc[i].status == IBV_WC_SUCCESS &&
-          wc[i].opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
-        std::lock_guard<std::mutex> g(arrival_mu_);
-        arrivals_.push_back(PeerArrival{ntohl(wc[i].imm_data), 0});
-      }
-      /* Re-armed after a success: a consumed receive that is not replaced
-       * silently lowers the number of arrivals that can still be caught.
-       * Not after a failure. That is a queue pair in error flushing what was
-       * posted, and a receive posted to it is flushed at once -- re-arming
-       * each flush made the next, and a peer that died left this loop
-       * spinning for as long as the connection lived. */
-      if (wc[i].status == IBV_WC_SUCCESS) {
-        std::lock_guard<std::mutex> g(conn_mu_);
-        auto it = conn_by_qp_.find(wc[i].qp_num);
-        if (it != conn_by_qp_.end()) it->second->repost_receive();
-      }
+      absorb_receive(wc[i]);
       continue;
     }
 

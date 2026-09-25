@@ -198,12 +198,19 @@ class RdmaProvider : public TransportProvider {
   void stash_completion(ibv_wc const& wc);
   /* Records a verification completion for whoever is waiting on that queue
    * pair, and takes it back out. */
+  /* Takes a receive completion whichever loop drew it from the shared queue.
+   * Both poll() and a connection verifying itself read that queue, and one
+   * dropping the other's receive cost it an arrival and a slot. */
+  void absorb_receive(ibv_wc const& wc);
   void note_verified(uint32_t qp_num, ibv_wc_status st);
   bool take_verified(uint32_t qp_num, ibv_wc_status* st);
 
   CongestionController* cc() const { return cc_.get(); }
   ibv_pd* pd() const { return pd_; }
-  ibv_cq* cq() const { return cq_; }
+  /* The only way into the shared completion queue. Verbs leaves serializing
+   * one to the caller, and a dial polls it outside the engine's progress
+   * turn, so two threads could otherwise be in ibv_poll_cq at once. */
+  int drain_cq(ibv_wc* wc, int max);
   RdmaConfig const& config() const { return cfg_; }
 
  private:
@@ -264,6 +271,7 @@ class RdmaProvider : public TransportProvider {
    * rely on being the only reader. Keyed by queue pair, since several
    * connections can be verified at once. */
   std::mutex verify_mu_;
+  std::mutex cq_mu_;
   std::unordered_map<uint32_t, ibv_wc_status> verify_done_;
 
   std::mutex inflight_mu_;
