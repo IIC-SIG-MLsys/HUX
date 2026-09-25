@@ -118,7 +118,14 @@ std::string describe_config(EngineConfig const& cfg);
 /* The engine owns no communication buffer. The application owns its memory and
  * the engine registers and transfers in place -- this is the main departure
  * from the ConnBuffer-centred design. Several engines may coexist in one
- * process with isolated resources. */
+ * process with isolated resources.
+ *
+ * Threads. Every method may be called from several at once; submissions,
+ * progress and polling serialize internally. A request's own state() is the
+ * answer to whether it finished: poll_completions hands finished requests to
+ * whoever calls it, so a thread also collects other threads' and may drop them.
+ * Region lifetime is not covered -- deregistering while another thread submits
+ * against the same region is a use-after-free the engine cannot see. */
 class Engine {
  public:
   virtual ~Engine() = default;

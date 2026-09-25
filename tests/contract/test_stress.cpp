@@ -314,3 +314,101 @@ HUX_TEST(several_peers_at_once_do_not_get_each_others_data) {
   CHECK_EQ(st.requests_succeeded, static_cast<uint64_t>(submitted.load()));
   CHECK_EQ(st.requests_failed, uint64_t{0});
 }
+
+HUX_TEST(explicit_progress_polled_from_several_threads_loses_nobody) {
+  /* Explicit progress with one poller per peer -- how a caller with no
+   * progress thread drives several peers at once, and uncovered until now.
+   * poll_completions hands each thread other threads' finished requests too,
+   * so a request whose state only its collector could see would hang. */
+  constexpr int kPeers = 4;
+  constexpr int kPerPeer = 25;
+  constexpr uint64_t kSpan = 32 << 10;
+
+  EngineConfig cfg;
+  cfg.progress = ProgressMode::kExplicit;
+  MockConfig mc;
+  mc.move_data = true;
+
+  auto provider = std::make_shared<MockProvider>(mc);
+  std::unique_ptr<Engine> engine;
+  CHECK_STATUS(make_engine(cfg, nullptr, provider, &engine), Status::kOk);
+
+  std::vector<std::vector<uint8_t>> src(kPeers), dst(kPeers);
+  std::vector<MemoryRegionPtr> src_reg(kPeers), dst_reg(kPeers);
+  std::vector<PeerPtr> peers(kPeers);
+  std::vector<RemoteRegionPtr> remotes(kPeers);
+  for (int i = 0; i < kPeers; ++i) {
+    src[i].assign(kSpan, static_cast<uint8_t>(0x10 + i));
+    dst[i].assign(kSpan, 0);
+    CHECK_STATUS(engine->register_memory(src[i].data(), kSpan,
+                                         AccessFlags::kRemoteRead, &src_reg[i]),
+                 Status::kOk);
+    CHECK_STATUS(engine->register_memory(dst[i].data(), kSpan,
+                                         AccessFlags::kLocalWrite, &dst_reg[i]),
+                 Status::kOk);
+    std::vector<uint8_t> meta, desc;
+    CHECK_STATUS(engine->local_metadata(&meta), Status::kOk);
+    CHECK_STATUS(engine->add_peer(meta, &peers[i]), Status::kOk);
+    CHECK_STATUS(src_reg[i]->export_descriptor(&desc), Status::kOk);
+    CHECK_STATUS(peers[i]->import_region(desc, &remotes[i]), Status::kOk);
+  }
+
+  std::atomic<int> completed{0};
+  std::atomic<int> hung{0};
+  std::atomic<int> failed{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kPeers; ++i) {
+    threads.emplace_back([&, i] {
+      for (int n = 0; n < kPerPeer; ++n) {
+        RegionView lv, rv;
+        if (dst_reg[i]->view(0, kSpan, &lv) != Status::kOk) continue;
+        if (remotes[i]->view(0, kSpan, &rv) != Status::kOk) continue;
+        RequestPtr r;
+        Status s = Status::kWouldBlock;
+        for (int tries = 0; tries < 10000 && s == Status::kWouldBlock;
+             ++tries) {
+          s = engine->read(peers[i].get(), lv, rv, {}, &r);
+          if (s == Status::kWouldBlock)
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        if (s != Status::kOk) continue;
+        /* Collected requests are dropped on purpose; this thread reads its
+         * own state. */
+        std::vector<RequestPtr> got;
+        bool done = false;
+        for (int spin = 0; spin < 200000 && !done; ++spin) {
+          engine->poll_completions(32, &got);
+          done = is_terminal(r->state());
+        }
+        if (!done) {
+          hung.fetch_add(1);
+          continue;
+        }
+        if (r->state() != RequestState::kSucceeded) {
+          failed.fetch_add(1);
+          continue;
+        }
+        completed.fetch_add(1);
+      }
+    });
+  }
+  for (auto& t : threads) t.join();
+
+  std::printf("       %d completed, %d failed, %d never finished\n",
+              completed.load(), failed.load(), hung.load());
+  CHECK(hung.load() == 0);
+  CHECK(failed.load() == 0);
+  CHECK(completed.load() == kPeers * kPerPeer);
+
+  /* And each destination holds its own peer's byte, not a neighbour's. */
+  for (int i = 0; i < kPeers; ++i) {
+    uint8_t const mine = static_cast<uint8_t>(0x10 + i);
+    bool clean = true;
+    for (uint64_t b = 0; b < kSpan; ++b)
+      if (dst[i][b] != mine) {
+        clean = false;
+        break;
+      }
+    CHECK(clean);
+  }
+}

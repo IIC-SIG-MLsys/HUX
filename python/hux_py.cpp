@@ -651,9 +651,15 @@ class PyEngine {
                    "remote view");
     TransferOptions const opts = options_from(after, ready_handoff);
     RequestPtr r;
-    Status s = is_write
-                   ? engine_->write(peer.get(), lv, rv, opts, &r)
+    Status s;
+    {
+      /* Nothing the interpreter owns is touched here, and holding the GIL
+       * across a submission stops every other Python thread. poll() releases
+       * it for the same reason. */
+      nb::gil_scoped_release release;
+      s = is_write ? engine_->write(peer.get(), lv, rv, opts, &r)
                    : engine_->read(peer.get(), lv, rv, opts, &r);
+    }
     raise_on_error(s, is_write ? "write" : "read");
     return std::make_shared<PyRequest>(std::move(r));
   }
@@ -679,8 +685,13 @@ class PyEngine {
     }
     TransferOptions const opts = options_from(after, ready_handoff);
     RequestPtr r;
-    Status s = is_write ? engine_->writev(peer.get(), lvs, rvs, opts, &r)
-                        : engine_->readv(peer.get(), lvs, rvs, opts, &r);
+    Status s;
+    {
+      /* See submit(); a vector submission is the longest of these calls. */
+      nb::gil_scoped_release release;
+      s = is_write ? engine_->writev(peer.get(), lvs, rvs, opts, &r)
+                   : engine_->readv(peer.get(), lvs, rvs, opts, &r);
+    }
     raise_on_error(s, is_write ? "writev" : "readv");
     return std::make_shared<PyRequest>(std::move(r));
   }
