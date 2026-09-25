@@ -28,6 +28,19 @@ using namespace hux;
 
 namespace {
 
+/* The socket's own buffer is pinned, because what is being tested is what
+ * happens once it is full. Left at the host's default, the case that fills
+ * it is whatever that host happens to be configured for: this passed
+ * everywhere until a machine with net.core.wmem_default of 203 MiB, a
+ * thousand times the usual, swallowed every message and refused none.
+ *
+ * Not too small either. SO_SNDBUF is not payload capacity: each message on
+ * a Unix socket is a buffer of its own, and the kernel counts its overhead
+ * against the same limit, so 64 KiB of it holds about 11 KiB of 128-byte
+ * messages. The value below leaves room for the backlogs these tests use
+ * while staying far under any host's default. */
+constexpr int kSocketBuffer = 256 << 10;
+
 struct Pair {
   int tx = -1, rx = -1;
   Pair() {
@@ -35,7 +48,19 @@ struct Pair {
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0) {
       tx = fds[0];
       rx = fds[1];
+      int const buf = kSocketBuffer;
+      ::setsockopt(tx, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
     }
+  }
+
+  /* What the kernel actually gave: it doubles the request, applies a
+   * minimum, and a test that posts "more than the socket holds" has to know
+   * how much that is. */
+  int send_buffer() const {
+    int v = 0;
+    socklen_t n = sizeof(v);
+    if (::getsockopt(tx, SOL_SOCKET, SO_SNDBUF, &v, &n) != 0) return 0;
+    return v;
   }
   ~Pair() {
     if (tx >= 0) ::close(tx);
@@ -55,10 +80,13 @@ HUX_TEST(outbox_does_not_wait_on_a_peer_that_never_reads) {
   ControlOutbox out;
   out.reset(p.tx, 64 << 10);
 
-  /* Far more than the socket and the backlog together can hold. */
+  /* Far more than the socket and the backlog together can hold, measured
+   * from what the socket says it has rather than assumed. */
+  int const budget = p.send_buffer() + (64 << 10);
+  int const posts = budget / 64 + 4096;
   auto const t0 = std::chrono::steady_clock::now();
   size_t accepted = 0, refused = 0;
-  for (int i = 0; i < 20000; ++i) {
+  for (int i = 0; i < posts; ++i) {
     Status const s = out.post(msg(64));
     if (s == Status::kOk)
       ++accepted;
