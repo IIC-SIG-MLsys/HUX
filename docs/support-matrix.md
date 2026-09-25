@@ -16,6 +16,7 @@ family. Where a device was never available, that is said rather than inferred.
 | Hygon Z100L | ROCm / DTK | device memory, all sizes to 512 MiB | yes | measured, transfers end to end | 2026-09-19 |
 | Cambricon MLU370-X8 | CNRT | device memory, **256 MiB per process** | yes | measured, transfers end to end | 2026-09-19 |
 | Moore Threads S3000 | MUSA | **host memory only** | yes | measured | 2026-09-18 |
+| Kunlunxin P800 OAM | Kunlun (XPU 5.18) | **host memory only** | yes | measured, transfers end to end | 2026-09-25 |
 | CPU memory | host | host memory | none | measured | 2026-09-18 |
 | Ascend | — | — | — | not supported | — |
 
@@ -32,6 +33,12 @@ same as 512 MiB. That backend stages through pinned host memory and reports
 `supports_peer_registration = false`. Transfers in place are impossible there,
 and the roadmap's zero-copy requirement cannot be met on this device.
 
+**Kunlunxin cannot register device memory either** — `ibv_reg_mr` returns
+EFAULT at 4 KiB as at 4 MiB, while host memory registers, so transfers off
+that host stage through host memory. Its IPC path does work on device memory:
+another process maps the allocation, reads what the first wrote and writes
+back into it.
+
 **GPUDirect is not a property of the vendor.** On the NVIDIA host measured
 here, the A40 supports it over both the peer-memory and DMA-BUF paths while
 the RTX 4090s support neither: `CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED` is 0
@@ -45,7 +52,11 @@ settled by asking the driver for a handle rather than by believing the query.
 Cambricon exports only an allocation's base address -- a handle for base+4096
 comes back `CN_MEMORY_ERROR_INVALID_ADDRESS` -- and its handle is 8 bytes, so
 a region inside a larger allocation is refused there rather than exported with
-an offset the driver gives no way to compute.
+an offset the driver gives no way to compute. Kunlunxin has the same missing
+lookup without the driver's protection: a handle for base+4096 succeeds and
+names the whole allocation, so that backend establishes whether it was handed
+a base -- the byte before one belongs to another allocation or to none -- and
+refuses anything else rather than exporting it as if it were the base.
 
 **Host memory cannot be exported to another process.** Memory the caller
 allocated has no handle another process could map, and `process_vm_readv` is

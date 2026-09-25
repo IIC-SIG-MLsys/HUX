@@ -33,6 +33,7 @@ the public interface binds to no vendor SDK.
 | Hygon DCUs / AMD GPUs | ROCm / DTK | device memory | Z100L; DTK exports no DMA-BUF |
 | Cambricon MLUs | CNRT / Neuware | device memory, 256 MiB per process | MLU370-X8 |
 | Moore Threads GPUs | MUSA | **host memory only** | S3000; device memory is refused |
+| Kunlunxin XPUs | Kunlun (XPU SDK) | **host memory only** | P800; device memory is refused, IPC works |
 | CPU memory | host | host memory | no execution queue |
 
 Transfers between engines in the same process take a local path that copies
@@ -138,6 +139,7 @@ Backends are opt-in and off by default:
 -DHUX_ENABLE_ROCM=ON      AMD / Hygon
 -DHUX_ENABLE_NEUWARE=ON   Cambricon
 -DHUX_ENABLE_MUSA=ON      Moore Threads
+-DHUX_ENABLE_KUNLUN=ON    Kunlunxin
 ```
 
 Enabling one whose dependency is missing fails at configure time rather than

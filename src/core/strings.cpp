@@ -166,6 +166,8 @@ char const* device_name(DeviceKind k) {
       return "cambricon";
     case DeviceKind::kMoore:
       return "moore";
+    case DeviceKind::kKunlun:
+      return "kunlun";
   }
   return "unknown";
 }

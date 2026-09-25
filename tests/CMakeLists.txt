@@ -94,12 +94,13 @@ endif()
 
 # Two processes and a device that can export an allocation, so it is built
 # but never run by ctest. Built for whichever vendor backend is present.
-if(TARGET hux_device_cuda OR TARGET hux_device_rocm OR TARGET hux_device_neuware)
+if(TARGET hux_device_cuda OR TARGET hux_device_rocm OR TARGET hux_device_neuware
+   OR TARGET hux_device_kunlun)
   add_executable(hux_ipc_pair manual/ipc_pair.cpp)
   target_include_directories(hux_ipc_pair PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(hux_ipc_pair PRIVATE hux_transport_ipc)
   target_compile_options(hux_ipc_pair PRIVATE -Wall -Wextra)
-  foreach(vendor cuda rocm neuware)
+  foreach(vendor cuda rocm neuware kunlun)
     string(TOUPPER ${vendor} VENDOR_UP)
     if(TARGET hux_device_${vendor})
       target_compile_definitions(hux_ipc_pair PRIVATE HUX_LOOPBACK_${VENDOR_UP})
@@ -111,7 +112,7 @@ if(TARGET hux_device_cuda OR TARGET hux_device_rocm OR TARGET hux_device_neuware
     target_include_directories(hux_two_paths PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(hux_two_paths PRIVATE hux_transport_ipc hux_transport_rdma)
     target_compile_options(hux_two_paths PRIVATE -Wall -Wextra)
-    foreach(vendor cuda rocm neuware)
+    foreach(vendor cuda rocm neuware kunlun)
       string(TOUPPER ${vendor} VENDOR_UP)
       if(TARGET hux_device_${vendor})
         target_compile_definitions(hux_two_paths PRIVATE HUX_LOOPBACK_${VENDOR_UP})
@@ -131,7 +132,7 @@ endif()
 
 # One suite per vendor, from the same source: every backend claiming a
 # capability must behave identically under it.
-foreach(vendor rocm neuware musa)
+foreach(vendor rocm neuware musa kunlun)
   string(TOUPPER ${vendor} VENDOR_UP)
   if(TARGET hux_device_${vendor})
     add_executable(hux_${vendor}_tests test_main.cpp device/test_vendor_backend.cpp)

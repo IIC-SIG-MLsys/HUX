@@ -17,6 +17,7 @@ option(HUX_ENABLE_CUDA    "NVIDIA device backend"             OFF)
 option(HUX_ENABLE_ROCM    "AMD / Hygon device backend"        OFF)
 option(HUX_ENABLE_NEUWARE "Cambricon device backend"          OFF)
 option(HUX_ENABLE_MUSA    "Moore Threads device backend"      OFF)
+option(HUX_ENABLE_KUNLUN  "Kunlunxin XPU device backend"      OFF)
 option(HUX_BUILD_TESTS    "Build tests"                       ON)
 option(HUX_BUILD_PYTHON  "Python bindings (needs nanobind)"  OFF)
 
@@ -133,6 +134,32 @@ if(HUX_ENABLE_NEUWARE)
   target_link_libraries(hux_device_neuware PUBLIC hux_core cnrt cndrv)
   target_compile_options(hux_device_neuware PRIVATE -Wall -Wextra)
   message(STATUS "HUX: Neuware device backend enabled (${NEUWARE_HOME})")
+endif()
+
+if(HUX_ENABLE_KUNLUN)
+  if(NOT XPU_HOME)
+    if(DEFINED ENV{XPU_HOME})
+      set(XPU_HOME $ENV{XPU_HOME})
+    else()
+      # The SDK installs under a versioned directory; take the newest.
+      file(GLOB _xpu_dirs /usr/local/xpu-*)
+      list(SORT _xpu_dirs)
+      list(REVERSE _xpu_dirs)
+      list(GET _xpu_dirs 0 XPU_HOME)
+    endif()
+  endif()
+  if(NOT EXISTS ${XPU_HOME}/include/cuda_runtime.h)
+    message(FATAL_ERROR
+      "HUX_ENABLE_KUNLUN=ON but cuda_runtime.h was not found under ${XPU_HOME}. "
+      "Set -DXPU_HOME=<path>, or configure with -DHUX_ENABLE_KUNLUN=OFF.")
+  endif()
+  add_library(hux_device_kunlun src/device/kunlun_backend.cpp)
+  target_include_directories(hux_device_kunlun PUBLIC ${XPU_HOME}/include)
+  # The runtime lives in so/, and is the SDK's own CUDA-compatible build --
+  # never a real libcudart that happens to be on the link path.
+  target_link_libraries(hux_device_kunlun PUBLIC hux_core ${XPU_HOME}/so/libcudart.so)
+  target_compile_options(hux_device_kunlun PRIVATE -Wall -Wextra)
+  message(STATUS "HUX: Kunlunxin device backend enabled (${XPU_HOME})")
 endif()
 
 if(HUX_ENABLE_ROCM)
@@ -269,7 +296,8 @@ endif()
 message(STATUS "HUX build summary:")
 message(STATUS "  RDMA=${HUX_ENABLE_RDMA} UCX=${HUX_ENABLE_UCX}")
 message(STATUS "  CUDA=${HUX_ENABLE_CUDA} ROCM=${HUX_ENABLE_ROCM} "
-               "NEUWARE=${HUX_ENABLE_NEUWARE} MUSA=${HUX_ENABLE_MUSA}")
+               "NEUWARE=${HUX_ENABLE_NEUWARE} MUSA=${HUX_ENABLE_MUSA} "
+               "KUNLUN=${HUX_ENABLE_KUNLUN}")
 
 # The UCX baseline for hux-bench. A plain UCP program linked against no part
 # of HUX, so what it measures is UCX, not HUX running over UCX. Off by

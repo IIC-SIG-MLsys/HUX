@@ -52,8 +52,23 @@ using VendorStream = musaStream_t;
 #define VENDOR_STREAM_DESTROY(s) ((void)musaStreamDestroy(s))
 #define VENDOR_STREAM_SYNC(s) (musaStreamSynchronize(s) == musaSuccess)
 
+#elif defined(HUX_TEST_KUNLUN)
+/* The SDK's own CUDA-compatible runtime, not a real CUDA one. */
+#include <cuda_runtime.h>
+
+#include "device/kunlun_backend.h"
+using VendorBackend = hux::KunlunBackend;
+using VendorStream = cudaStream_t;
+#define VENDOR_NAME "Kunlunxin"
+#define VENDOR_KIND hux::DeviceKind::kKunlun
+#define VENDOR_MALLOC(p, n) (cudaMalloc((p), (n)) == cudaSuccess)
+#define VENDOR_FREE(p) ((void)cudaFree(p))
+#define VENDOR_STREAM_CREATE(s) (cudaStreamCreate(s) == cudaSuccess)
+#define VENDOR_STREAM_DESTROY(s) ((void)cudaStreamDestroy(s))
+#define VENDOR_STREAM_SYNC(s) (cudaStreamSynchronize(s) == cudaSuccess)
+
 #else
-#error "Define exactly one of HUX_TEST_ROCM / HUX_TEST_NEUWARE / HUX_TEST_MUSA"
+#error "Define one of HUX_TEST_ROCM / _NEUWARE / _MUSA / _KUNLUN"
 #endif
 
 using namespace hux;

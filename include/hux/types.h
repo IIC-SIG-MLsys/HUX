@@ -25,6 +25,7 @@ enum class DeviceKind : uint8_t {
   kRocm, /* AMD and Hygon DCU share the HIP runtime. */
   kCambricon,
   kMoore,
+  kKunlun, /* Kunlunxin XPU. */
 };
 
 /* Orthogonal to DeviceKind: pinned host memory differs from pageable in both

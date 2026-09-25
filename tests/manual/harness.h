@@ -44,6 +44,13 @@
 #include "device/neuware_backend.h"
 #endif
 
+#ifdef HUX_LOOPBACK_KUNLUN
+/* The SDK's own CUDA-compatible runtime. */
+#include <cuda_runtime.h>
+
+#include "device/kunlun_backend.h"
+#endif
+
 namespace hux {
 namespace manual {
 
@@ -142,6 +149,10 @@ struct Buffer {
 #elif defined(HUX_LOOPBACK_NEUWARE)
     if (NeuwareBackend::create(gpu, &dev) != Status::kOk) return false;
     if (cnrtSetDevice(gpu) != cnrtSuccess || cnrtMalloc(&ptr, n) != cnrtSuccess)
+      return false;
+#elif defined(HUX_LOOPBACK_KUNLUN)
+    if (KunlunBackend::create(gpu, &dev) != Status::kOk) return false;
+    if (cudaSetDevice(gpu) != cudaSuccess || cudaMalloc(&ptr, n) != cudaSuccess)
       return false;
 #else
     std::printf("built without a device backend\n");
